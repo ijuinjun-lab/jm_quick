@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "576531288403",
+    "project_id": "jm-quick",
+    "storage_bucket": "jm-quick.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:576531288403:android:398fb28a5ed4ffd87811a6",
+        "android_client_info": {
+          "package_name": "com.example.jm_quick"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAOUbp3-cOHmsf2lgfExs-4xkuXMede5lY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
