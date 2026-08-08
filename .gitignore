@@ -32,6 +32,10 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/functions/node_modules/
+/functions/.env*
+/cloudrun/mail-api/node_modules/
+/.firebase/
 
 # Symbolication related
 app.*.symbols

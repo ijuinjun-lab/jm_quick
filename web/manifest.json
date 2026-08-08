@@ -1,11 +1,11 @@
 {
-    "name": "jm_quick",
-    "short_name": "jm_quick",
+    "name": "イベント参加受付",
+    "short_name": "参加受付",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "イベント参加者向け公式マイページ",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

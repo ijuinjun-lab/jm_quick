@@ -1,0 +1,13 @@
+{
+  "name": "jm-common-mail-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
+    "express": "^5.1.0"
+  }
+}

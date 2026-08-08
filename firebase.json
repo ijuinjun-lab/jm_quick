@@ -1,1 +1,23 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"jm-quick","appId":"1:576531288403:android:398fb28a5ed4ffd87811a6","fileOutput":"android/app/google-services.json"}},"ios":{"default":{"projectId":"jm-quick","appId":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","uploadDebugSymbols":false,"fileOutput":"ios/Runner/GoogleService-Info.plist"}},"macos":{"default":{"projectId":"jm-quick","appId":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","uploadDebugSymbols":false,"fileOutput":"macos/Runner/GoogleService-Info.plist"}},"dart":{"lib/firebase_options.dart":{"projectId":"jm-quick","configurations":{"ios":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","macos":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","web":"1:576531288403:web:b127cb70ae0f34a77811a6"}}}}}}
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "functions": [{
+    "source": "functions",
+    "codebase": "default",
+    "ignore": ["node_modules", ".git", "firebase-debug.log", "firebase-debug.*.log"]
+  }],
+  "hosting": {
+    "public": "build/web",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "headers": [{
+      "source": "**",
+      "headers": [{
+        "key": "Cache-Control",
+        "value": "no-cache, no-store, max-age=0, must-revalidate"
+      }]
+    }],
+    "rewrites": [{"source": "**", "destination": "/index.html"}]
+  },
+  "flutter": {"platforms":{"android":{"default":{"projectId":"jm-quick","appId":"1:576531288403:android:398fb28a5ed4ffd87811a6","fileOutput":"android/app/google-services.json"}},"ios":{"default":{"projectId":"jm-quick","appId":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","uploadDebugSymbols":false,"fileOutput":"ios/Runner/GoogleService-Info.plist"}},"macos":{"default":{"projectId":"jm-quick","appId":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","uploadDebugSymbols":false,"fileOutput":"macos/Runner/GoogleService-Info.plist"}},"dart":{"lib/firebase_options.dart":{"projectId":"jm-quick","configurations":{"ios":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","macos":"1:576531288403:ios:7f882f7ae59bf7fb7811a6","web":"1:576531288403:web:b127cb70ae0f34a77811a6"}}}}}
+}

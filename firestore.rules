@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function eventExists(eventId) {
+      return eventId is string
+        && exists(/databases/$(database)/documents/events/$(eventId));
+    }
+
+    function participantBelongsToEvent(participantId, eventId) {
+      return get(/databases/$(database)/documents/participants/$(participantId)).data.eventId == eventId;
+    }
+
+    function participantBelongsToEventAfterCommit(participantId, eventId) {
+      return getAfter(/databases/$(database)/documents/participants/$(participantId)).data.eventId == eventId;
+    }
+
+    // TEST OPERATION ONLY: 本番管理者認証導入までは管理画面検証用にreadを許可。
+    match /events/{eventId} {
+      allow read: if true;
+      allow create: if request.resource.data.eventId == eventId;
+      allow update: if resource.data.eventId == eventId
+        && request.resource.data.eventId == eventId;
+      allow delete: if false;
+    }
+
+    match /participants/{participantId} {
+      allow get, list: if resource.data.eventId is string;
+      allow create: if request.resource.data.participantId == participantId
+        && eventExists(request.resource.data.eventId)
+        && request.resource.data.publicId is string
+        && request.resource.data.publicId.size() >= 24
+        && request.resource.data.name is string
+        && request.resource.data.email is string
+        && request.resource.data.registeredCount is int
+        && request.resource.data.registeredCount >= 1
+        && request.resource.data.registrationType == 'preRegistered';
+      allow update: if request.resource.data.eventId == resource.data.eventId
+        && request.resource.data.participantId == resource.data.participantId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'participationConfirmed', 'participationConfirmedAt',
+          'reconfirmed', 'reconfirmedAt', 'attendanceResponse', 'updatedAt'
+        ])
+        && (!request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['attendanceResponse'])
+          || request.resource.data.attendanceResponse in [
+            'attending', 'notAttending'
+          ]);
+      allow delete: if false;
+    }
+
+    match /checkIns/{participantId} {
+      allow get, list: if resource.data.eventId is string;
+      allow create: if eventExists(request.resource.data.eventId)
+        && request.resource.data.participantId == participantId
+        && participantBelongsToEventAfterCommit(participantId, request.resource.data.eventId);
+      allow update: if request.resource.data.eventId == resource.data.eventId
+        && request.resource.data.participantId == participantId
+        && participantBelongsToEvent(participantId, resource.data.eventId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'checkedIn', 'registeredCountSnapshot', 'attendedCount',
+          'checkedInAt', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /mailLogs/{documentId} {
+      allow read, write: if false;
+    }
+
+    match /mailJobs/{jobId} {
+      allow get, list: if resource.data.eventId is string;
+      allow create, update, delete: if false;
+
+      match /items/{participantId} {
+        allow read, write: if false;
+      }
+    }
+
+    match /walkInRegistrations/{registrationId} {
+      allow read, write: if false;
+    }
+  }
+}
