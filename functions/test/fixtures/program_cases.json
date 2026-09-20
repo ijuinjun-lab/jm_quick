@@ -1,0 +1,341 @@
+{
+  "_comment": "Dart(test/confirmed_flow_test.dart)とNode(functions/test/programs.test.js)が共有する検証ケース。片方だけ変更しないこと。",
+  "validProgramIds": [
+    "cat",
+    "dog",
+    "talk",
+    "cat-adoption",
+    "a",
+    "0",
+    "a1",
+    "x-y-z",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "invalidProgramIds": [
+    "",
+    " ",
+    "Cat",
+    "CAT",
+    "a/b",
+    "a_b",
+    "a.b",
+    "-a",
+    "a-",
+    "a b",
+    "..",
+    ".",
+    "日本語",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "a\nb",
+    "__a__",
+    "a　b",
+    "a%2Fb",
+    "cat\n",
+    "\ncat"
+  ],
+  "validParticipantIds": [
+    "p1",
+    "a1",
+    "AbC123xyz",
+    "event-A",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "invalidParticipantIds": [
+    "",
+    "a_b",
+    "a/b",
+    "a b",
+    "__x__",
+    "a.b",
+    "日本",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "attendanceIds": [
+    {
+      "participantId": "p1",
+      "programId": "cat",
+      "id": "p1_cat"
+    },
+    {
+      "participantId": "AbC123xyz",
+      "programId": "cat-adoption",
+      "id": "AbC123xyz_cat-adoption"
+    },
+    {
+      "participantId": "p1",
+      "programId": "dog",
+      "id": "p1_dog"
+    }
+  ],
+  "plannedCounts": {
+    "valid": [
+      1,
+      2,
+      10,
+      999
+    ],
+    "invalid": [
+      0,
+      -1,
+      1000,
+      1.5,
+      null,
+      "2",
+      true
+    ]
+  },
+  "programCases": [
+    {
+      "name": "最小の有効program",
+      "input": {
+        "programId": "cat",
+        "name": "譲渡会（ねこ）"
+      },
+      "errors": []
+    },
+    {
+      "name": "全項目あり",
+      "input": {
+        "programId": "talk",
+        "name": "トークセッション",
+        "order": 2,
+        "startAt": "2026-11-30T13:00:00Z",
+        "endAt": "2026-11-30T14:00:00Z",
+        "note": "定員あり"
+      },
+      "errors": []
+    },
+    {
+      "name": "programId不正",
+      "input": {
+        "programId": "a/b",
+        "name": "x"
+      },
+      "errors": [
+        "programId"
+      ]
+    },
+    {
+      "name": "名称が空",
+      "input": {
+        "programId": "cat",
+        "name": "  "
+      },
+      "errors": [
+        "name"
+      ]
+    },
+    {
+      "name": "orderが負",
+      "input": {
+        "programId": "cat",
+        "name": "x",
+        "order": -1
+      },
+      "errors": [
+        "order"
+      ]
+    },
+    {
+      "name": "終了が開始以前",
+      "input": {
+        "programId": "cat",
+        "name": "x",
+        "startAt": "2026-11-30T13:00:00Z",
+        "endAt": "2026-11-30T13:00:00Z"
+      },
+      "errors": [
+        "timeRange"
+      ]
+    },
+    {
+      "name": "複数エラーは固定順",
+      "input": {
+        "programId": "",
+        "name": "",
+        "order": -5
+      },
+      "errors": [
+        "programId",
+        "name",
+        "order"
+      ]
+    }
+  ],
+  "attendanceCases": [
+    {
+      "name": "有効(未受付)",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 2
+      },
+      "errors": []
+    },
+    {
+      "name": "有効(時間枠つき)",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 1,
+        "slotLabel": "10:00枠",
+        "startAt": "2026-11-30T10:00:00Z",
+        "endAt": "2026-11-30T10:30:00Z"
+      },
+      "errors": []
+    },
+    {
+      "name": "有効(受付済み)",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 2,
+        "checkedIn": true,
+        "attendedCount": 3
+      },
+      "errors": []
+    },
+    {
+      "name": "plannedCountが0",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 0
+      },
+      "errors": [
+        "plannedCount"
+      ]
+    },
+    {
+      "name": "plannedCountが小数",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 1.5
+      },
+      "errors": [
+        "plannedCount"
+      ]
+    },
+    {
+      "name": "plannedCountなし",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat"
+      },
+      "errors": [
+        "plannedCount"
+      ]
+    },
+    {
+      "name": "programId不正",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "a/b",
+        "plannedCount": 1
+      },
+      "errors": [
+        "programId"
+      ]
+    },
+    {
+      "name": "participantId不正(_)",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p_1",
+        "programId": "cat",
+        "plannedCount": 1
+      },
+      "errors": [
+        "participantId"
+      ]
+    },
+    {
+      "name": "eventIdが空",
+      "input": {
+        "eventId": "",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 1
+      },
+      "errors": [
+        "eventId"
+      ]
+    },
+    {
+      "name": "受付済みなのに実人数なし",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 1,
+        "checkedIn": true
+      },
+      "errors": [
+        "attendedCount"
+      ]
+    },
+    {
+      "name": "実人数が負",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 1,
+        "attendedCount": -1
+      },
+      "errors": [
+        "attendedCount"
+      ]
+    },
+    {
+      "name": "時間帯が逆転",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 1,
+        "startAt": "2026-11-30T11:00:00Z",
+        "endAt": "2026-11-30T10:00:00Z"
+      },
+      "errors": [
+        "timeRange"
+      ]
+    },
+    {
+      "name": "slotLabelが空白",
+      "input": {
+        "eventId": "e1",
+        "participantId": "p1",
+        "programId": "cat",
+        "plannedCount": 1,
+        "slotLabel": " "
+      },
+      "errors": [
+        "slotLabel"
+      ]
+    },
+    {
+      "name": "複数エラーは固定順",
+      "input": {
+        "eventId": "",
+        "participantId": "",
+        "programId": "",
+        "plannedCount": 0
+      },
+      "errors": [
+        "eventId",
+        "participantId",
+        "programId",
+        "plannedCount"
+      ]
+    }
+  ]
+}

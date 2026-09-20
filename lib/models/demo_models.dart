@@ -1,12 +1,41 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'event_status.dart';
+import 'program_models.dart';
 
 DateTime? dateFrom(dynamic value) => value is Timestamp
     ? value.toDate()
     : value is DateTime
     ? value
     : null;
+
+/// イベント方式(flow)の値。未設定(null/空/'legacy')は従来方式、'confirmed'は新方式。
+const String eventFlowLegacy = 'legacy';
+const String eventFlowConfirmed = 'confirmed';
+
+/// participant.statusの値。未設定(旧参加者)はactive相当。
+const String participantStatusActive = 'active';
+const String participantStatusCancelled = 'cancelled';
+
+/// flowの値が従来方式を表すか。未設定(null)・空・'legacy'だけがtrue。
+/// 'confirmed'や未知の値(タイプミス等)はfalse(従来方式専用の機能を安全側に倒して拒否する)。
+bool isLegacyFlowValue(String? flow) =>
+    flow == null || flow.isEmpty || flow == eventFlowLegacy;
+
+/// 従来方式専用の操作(旧設定・旧正式登録・旧reconfirm・旧受付・旧参加者作成)を、
+/// 新方式(flow=confirmed)などlegacyでないイベントに対して行おうとしたときの例外。
+/// StateErrorではない(旧受付画面の「既に受付済み」表示と取り違えないため)。
+class ConfirmedFlowException implements Exception {
+  const ConfirmedFlowException(this.operation);
+  final String operation;
+
+  String get message =>
+      'この操作（$operation）は従来方式のイベント専用です。'
+      '新方式のイベントでは、専用の機能が提供されるまで使用できません。';
+
+  @override
+  String toString() => message;
+}
 
 enum AttendanceResponse {
   attending('attending', '参加予定'),
@@ -36,6 +65,8 @@ class DemoEvent {
     this.registrationDeadline,
     this.confirmationSendAt,
     required this.reconfirmEnabled,
+    this.flow,
+    this.programs = const [],
   });
   final String id;
   final String name;
@@ -48,11 +79,26 @@ class DemoEvent {
   final DateTime? confirmationSendAt;
   final bool reconfirmEnabled;
 
-  factory DemoEvent.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? {};
+  /// イベント方式。未設定(null)は従来方式。既存のFirestoreイベントにはflowが無く、
+  /// migrationなしでそのまま従来方式として動く。既存イベントを自動でconfirmedに変換しない。
+  final String? flow;
+
+  /// 新方式のprogram定義(order順)。旧イベントは未設定=空。
+  final List<EventProgram> programs;
+
+  /// 従来方式(flow未設定/null/空/'legacy')。
+  bool get isLegacyFlow => isLegacyFlowValue(flow);
+
+  /// 新方式(flow == 'confirmed')。方式の判定は文字列比較を散在させず、このgetterを使う。
+  bool get isConfirmedFlow => flow == eventFlowConfirmed;
+
+  factory DemoEvent.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) =>
+      DemoEvent.fromData(doc.id, doc.data() ?? {});
+
+  factory DemoEvent.fromData(String id, Map<String, dynamic> data) {
     final name = data['eventName'] as String? ?? 'イベント参加受付';
     return DemoEvent(
-      id: doc.id,
+      id: id,
       name: name,
       senderName: (data['senderName'] as String?)?.trim().isNotEmpty == true
           ? (data['senderName'] as String).trim()
@@ -64,6 +110,8 @@ class DemoEvent {
       registrationDeadline: dateFrom(data['registrationDeadline']),
       confirmationSendAt: dateFrom(data['confirmationSendAt']),
       reconfirmEnabled: data['reconfirmEnabled'] as bool? ?? false,
+      flow: data['flow'] as String?,
+      programs: EventProgram.listFromData(data['programs']),
     );
   }
 
@@ -104,6 +152,12 @@ class Participant {
     this.attendanceResponse,
     required this.reconfirmationMailSent,
     this.reconfirmedAt,
+    this.schemaVersion = 1,
+    this.status = participantStatusActive,
+    this.externalId,
+    this.identityKey,
+    this.importBatchId,
+    this.importRow,
   });
   final String id;
   final String eventId;
@@ -125,12 +179,27 @@ class Participant {
   final bool reconfirmationMailSent;
   final DateTime? reconfirmedAt;
 
-  bool get isWalkIn => registrationType == 'walkIn';
+  // --- 新方式(flow=confirmed)用の任意フィールド。旧参加者には存在せず、既定値で読める ---
+  /// 未設定(旧参加者)は1。
+  final int schemaVersion;
 
-  factory Participant.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? {};
+  /// 未設定(旧参加者)はactive。
+  final String status;
+  final String? externalId;
+  final String? identityKey;
+  final String? importBatchId;
+  final int? importRow;
+
+  bool get isWalkIn => registrationType == 'walkIn';
+  bool get isActive => status == participantStatusActive;
+  bool get isCancelled => status == participantStatusCancelled;
+
+  factory Participant.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) =>
+      Participant.fromData(doc.id, doc.data() ?? {});
+
+  factory Participant.fromData(String id, Map<String, dynamic> data) {
     return Participant(
-      id: doc.id,
+      id: id,
       eventId: data['eventId'] as String? ?? '',
       publicId: data['publicId'] as String? ?? '',
       name: data['name'] as String? ?? '',
@@ -151,6 +220,14 @@ class Participant {
       ),
       reconfirmationMailSent: data['reconfirmationMailSent'] as bool? ?? false,
       reconfirmedAt: dateFrom(data['reconfirmedAt']),
+      schemaVersion: (data['schemaVersion'] as num?)?.toInt() ?? 1,
+      status: (data['status'] as String?)?.isNotEmpty == true
+          ? data['status'] as String
+          : participantStatusActive,
+      externalId: data['externalId'] as String?,
+      identityKey: data['identityKey'] as String?,
+      importBatchId: data['importBatchId'] as String?,
+      importRow: (data['importRow'] as num?)?.toInt(),
     );
   }
 }

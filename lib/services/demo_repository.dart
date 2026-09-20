@@ -14,17 +14,27 @@ class MailSendException implements Exception {
   String toString() => message;
 }
 
+/// イベントのflow値を読む関数(未設定・イベント無しはnull)。テストで差し替えられる。
+typedef EventFlowLoader = Future<String?> Function(String eventId);
+
 class DemoRepository {
   DemoRepository({
     this.selectedEventId,
     FirebaseFirestore? firestore,
     http.Client? httpClient,
-  }) : db = firestore ?? FirebaseFirestore.instance,
-       _httpClient = httpClient ?? http.Client();
+    EventFlowLoader? eventFlowLoader,
+  }) : _firestore = firestore,
+       _httpClient = httpClient ?? http.Client(),
+       _eventFlowLoader = eventFlowLoader;
 
   final String? selectedEventId;
-  final FirebaseFirestore db;
+  FirebaseFirestore? _firestore;
   final http.Client _httpClient;
+  final EventFlowLoader? _eventFlowLoader;
+  final Map<String, String?> _flowCache = {};
+
+  /// Firestoreは最初に使うときに初期化する(従来は構築時。アプリの動作は同じ)。
+  FirebaseFirestore get db => _firestore ??= FirebaseFirestore.instance;
 
   static final Uri _sendParticipantMailUri = Uri.parse(
     'https://asia-northeast1-jm-quick.cloudfunctions.net/sendParticipantMail',
@@ -44,6 +54,32 @@ class DemoRepository {
   static final Uri _registerWalkInUri = Uri.parse(
     'https://asia-northeast1-jm-quick.cloudfunctions.net/registerWalkIn',
   );
+
+  Future<String?> _flowOf(String eventId) async {
+    if (_flowCache.containsKey(eventId)) return _flowCache[eventId];
+    final loader = _eventFlowLoader ?? _loadEventFlow;
+    final flow = await loader(eventId);
+    _flowCache[eventId] = flow;
+    return flow;
+  }
+
+  Future<String?> _loadEventFlow(String eventId) async {
+    final snapshot = await db.collection('events').doc(eventId).get();
+    final flow = snapshot.data()?['flow'];
+    return flow == null ? null : (flow is String ? flow : flow.toString());
+  }
+
+  /// 従来方式のイベントか。新方式・未知のflowならfalse。画面が「従来機能は使えない」と案内するために使う。
+  Future<bool> isLegacyEvent(String eventId) async =>
+      isLegacyFlowValue(await _flowOf(eventId));
+
+  /// 従来方式専用の書込み経路の入口guard。legacyでない(新方式・未知のflow)イベントなら
+  /// 書込み前に ConfirmedFlowException を投げる。Firestore Rulesでも同じ条件を強制している。
+  Future<void> assertLegacyEvent(String eventId, String operation) async {
+    if (!isLegacyFlowValue(await _flowOf(eventId))) {
+      throw ConfirmedFlowException(operation);
+    }
+  }
 
   String get eventId {
     final value = selectedEventId?.trim() ?? '';
@@ -181,19 +217,24 @@ class DemoRepository {
     required DateTime registrationDeadline,
     required TimeOfDay confirmationSendTime,
     String contact = '',
-  }) => eventRef.update(
-    _eventData(
-      id: eventId,
-      eventName: eventName,
-      senderName: senderName,
-      startAt: startAt,
-      endAt: endAt,
-      venue: venue,
-      registrationDeadline: registrationDeadline,
-      confirmationSendTime: confirmationSendTime,
-      contact: contact,
-    )..remove('createdAt'),
-  );
+  }) async {
+    // 旧設定更新は confirmationSendAt の再計算と reconfirmEnabled=false の書込みを伴うため、
+    // 新方式イベントには使わせない(新方式の設定更新は別経路で提供する)。
+    await assertLegacyEvent(eventId, 'イベント設定の更新');
+    await eventRef.update(
+      _eventData(
+        id: eventId,
+        eventName: eventName,
+        senderName: senderName,
+        startAt: startAt,
+        endAt: endAt,
+        venue: venue,
+        registrationDeadline: registrationDeadline,
+        confirmationSendTime: confirmationSendTime,
+        contact: contact,
+      )..remove('createdAt'),
+    );
+  }
 
   Map<String, dynamic> participantData({
     required String participantId,
@@ -255,6 +296,7 @@ class DemoRepository {
     if (name.trim().isEmpty || !email.contains('@') || registeredCount < 1) {
       throw ArgumentError('入力内容を確認してください。');
     }
+    await assertLegacyEvent(eventId, '参加者の追加');
     final ref = db.collection('participants').doc();
     final batch = db.batch();
     batch.set(
@@ -316,7 +358,7 @@ class DemoRepository {
       _updateParticipant(participant, {
         'participationConfirmed': true,
         'participationConfirmedAt': FieldValue.serverTimestamp(),
-      });
+      }, operation: '正式登録');
 
   Future<void> reconfirm(
     Participant participant,
@@ -325,16 +367,19 @@ class DemoRepository {
     'reconfirmed': true,
     'reconfirmedAt': FieldValue.serverTimestamp(),
     'attendanceResponse': response.value,
-  });
+  }, operation: '参加予定の回答');
 
   Future<void> _updateParticipant(
     Participant participant,
-    Map<String, dynamic> update,
-  ) {
+    Map<String, dynamic> update, {
+    String operation = '参加者情報の更新',
+  }) async {
     if (selectedEventId != null && participant.eventId != eventId) {
       throw StateError('event-mismatch');
     }
-    return participantRef(
+    // 正式登録・参加予定確認(reconfirm)は従来方式専用。新方式では二段階登録を使わない。
+    await assertLegacyEvent(participant.eventId, operation);
+    await participantRef(
       participant.id,
     ).update({...update, 'updatedAt': FieldValue.serverTimestamp()});
   }
@@ -437,6 +482,8 @@ class DemoRepository {
   }) async {
     if (participant.eventId != eventId) throw StateError('event-mismatch');
     if (attendedCount < 0) throw ArgumentError('実参加人数は0以上で入力してください。');
+    // participant単位の旧受付。新方式の受付の正本はprogram別(participant×program)のため使わせない。
+    await assertLegacyEvent(participant.eventId, '受付');
     final ref = checkInRef(participant.id);
     await db.runTransaction((transaction) async {
       final current = await transaction.get(ref);
@@ -458,6 +505,7 @@ class DemoRepository {
     int attendedCount,
   ) async {
     if (participant.eventId != eventId) throw StateError('event-mismatch');
+    await assertLegacyEvent(participant.eventId, '実参加人数の修正');
     final snapshot = await checkInRef(participant.id).get();
     if (snapshot.data()?['eventId'] != eventId) {
       throw StateError('event-mismatch');

@@ -14,12 +14,28 @@ service cloud.firestore {
       return getAfter(/databases/$(database)/documents/participants/$(participantId)).data.eventId == eventId;
     }
 
+    // イベント方式(flow)。flow未設定/null/空/'legacy'は従来方式。'confirmed'(新方式)や未知の値は
+    // 従来方式ではない。従来のクライアント直書き経路(設定更新・参加者作成/更新・旧受付)は
+    // 従来方式のイベントだけに許可し、新方式のデータを旧経路から書き換えさせない。
+    function isLegacyEventData(data) {
+      return !('flow' in data) || data.flow == null || data.flow == '' || data.flow == 'legacy';
+    }
+
+    function eventIsLegacy(eventId) {
+      return eventId is string
+        && (!exists(/databases/$(database)/documents/events/$(eventId))
+          || isLegacyEventData(get(/databases/$(database)/documents/events/$(eventId)).data));
+    }
+
     // TEST OPERATION ONLY: 本番管理者認証導入までは管理画面検証用にreadを許可。
     match /events/{eventId} {
       allow read: if true;
-      allow create: if request.resource.data.eventId == eventId;
+      allow create: if request.resource.data.eventId == eventId
+        && isLegacyEventData(request.resource.data);
       allow update: if resource.data.eventId == eventId
-        && request.resource.data.eventId == eventId;
+        && request.resource.data.eventId == eventId
+        && isLegacyEventData(resource.data)
+        && isLegacyEventData(request.resource.data);
       allow delete: if false;
     }
 
@@ -33,8 +49,10 @@ service cloud.firestore {
         && request.resource.data.email is string
         && request.resource.data.registeredCount is int
         && request.resource.data.registeredCount >= 1
-        && request.resource.data.registrationType == 'preRegistered';
+        && request.resource.data.registrationType == 'preRegistered'
+        && eventIsLegacy(request.resource.data.eventId);
       allow update: if request.resource.data.eventId == resource.data.eventId
+        && eventIsLegacy(resource.data.eventId)
         && request.resource.data.participantId == resource.data.participantId
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'participationConfirmed', 'participationConfirmedAt',
@@ -51,9 +69,11 @@ service cloud.firestore {
     match /checkIns/{participantId} {
       allow get, list: if resource.data.eventId is string;
       allow create: if eventExists(request.resource.data.eventId)
+        && eventIsLegacy(request.resource.data.eventId)
         && request.resource.data.participantId == participantId
         && participantBelongsToEventAfterCommit(participantId, request.resource.data.eventId);
       allow update: if request.resource.data.eventId == resource.data.eventId
+        && eventIsLegacy(resource.data.eventId)
         && request.resource.data.participantId == participantId
         && participantBelongsToEvent(participantId, resource.data.eventId)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -74,6 +94,12 @@ service cloud.firestore {
       match /items/{participantId} {
         allow read, write: if false;
       }
+    }
+
+    // 新方式(flow=confirmed)のparticipant×program。クライアントからの直接read/writeは許可しない。
+    // 書込みはFunctions(Admin SDK)経由のみ。許可(allow)を追加する場合は先にセキュリティ設計を行うこと。
+    match /programAttendances/{attendanceId} {
+      allow read, write: if false;
     }
 
     match /walkInRegistrations/{registrationId} {

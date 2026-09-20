@@ -4,6 +4,7 @@ const {defineSecret, defineString} = require("firebase-functions/params");
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {createHash, randomBytes} = require("crypto");
+const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
 
 initializeApp();
 
@@ -42,6 +43,15 @@ function eventSenderName(event) {
   return (senderName || eventName || "イベント事務局").slice(0, 100);
 }
 
+// 旧機能(案内メール・一括メール・当日参加登録など)は従来方式(legacy)のイベント専用。
+// flow=confirmed(新方式)や未知のflowでは、副作用を起こす前に必ず拒否する。
+function assertLegacyEvent(event, operation) {
+  if (!isLegacyFlow(event)) {
+    throw new HttpsError("failed-precondition",
+      `この操作(${operation})は従来方式のイベント専用です。新方式のイベントでは使用できません。`);
+  }
+}
+
 exports.sendParticipantMail = onCall(
   {region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 30},
   async (request) => {
@@ -64,6 +74,7 @@ exports.sendParticipantMail = onCall(
         participant.eventId !== eventId) {
       throw new HttpsError("permission-denied", "イベントまたは公開IDが一致しません。");
     }
+    assertLegacyEvent(eventSnapshot.data(), "案内メール送信");
     if (type === "invitation") {
       await db.runTransaction(async (transaction) => {
         const current = await transaction.get(participantRef);
@@ -199,6 +210,7 @@ exports.registerWalkIn = onCall(
       if (!eventSnapshot.exists || eventSnapshot.data().eventId !== eventId) {
         throw new HttpsError("not-found", "イベントが見つかりません。");
       }
+      assertLegacyEvent(eventSnapshot.data(), "当日参加登録");
       if (existing.exists) {
         throw new HttpsError("already-exists",
           "すでにこのイベントへ登録されています。受付スタッフへお声がけください。");
@@ -299,9 +311,8 @@ exports.sendScheduledConfirmationMail = onSchedule(
     for (const eventSnapshot of events.docs) {
       const eventId = eventSnapshot.id;
       const event = eventSnapshot.data();
-      const sendAt = event.confirmationSendAt?.toDate?.();
-      const startAt = event.startAt?.toDate?.();
-      if (!sendAt || !startAt || now < sendAt || now >= startAt) continue;
+      // flow=confirmed(新方式)は、confirmationSendAtが設定されていても対象外(flow.js)。
+      if (!legacyConfirmationDue(event, now)) continue;
       await eventSnapshot.ref.update({
         reconfirmEnabled: true,
         updatedAt: FieldValue.serverTimestamp(),
@@ -452,6 +463,7 @@ async function startBulkJob(request, type) {
   if (!eventSnapshot.exists || eventSnapshot.data().eventId !== eventId) {
     throw new HttpsError("not-found", "イベントが見つかりません。");
   }
+  assertLegacyEvent(eventSnapshot.data(), "旧一括メール");
   const active = await db.runTransaction(async (transaction) => {
     const current = await transaction.get(jobRef);
     if (current.exists && ["preparing", "queued", "running"].includes(current.data().status)) {
@@ -524,6 +536,12 @@ exports.startBulkReconfirmationMail = onCall(
 
 async function processBulkItem(db, jobSnapshot, itemSnapshot, event) {
   const job = jobSnapshot.data();
+  // 多重防御(3層目): 旧一括メールはlegacyイベントの参加者にしか送らない。
+  if (!isLegacyFlow(event)) {
+    await itemSnapshot.ref.update({status: "skipped", error: "non-legacy-flow",
+      updatedAt: FieldValue.serverTimestamp()});
+    return "skipped";
+  }
   const participantRef = db.collection("participants").doc(itemSnapshot.id);
   let participant;
   const claimed = await db.runTransaction(async (transaction) => {
@@ -617,6 +635,12 @@ exports.processBulkMailJobs = onSchedule(
       const job = jobSnapshot.data();
       const eventSnapshot = await db.collection("events").doc(job.eventId).get();
       if (!eventSnapshot.exists) continue;
+      // 多重防御(2層目): legacy以外のイベントのジョブは実行せず、再処理されないよう停止する。
+      if (!isLegacyFlow(eventSnapshot.data())) {
+        await jobSnapshot.ref.update({status: "blocked", blockedReason: "non-legacy-flow",
+          updatedAt: FieldValue.serverTimestamp()});
+        continue;
+      }
       await jobSnapshot.ref.update({status: "running",
         updatedAt: FieldValue.serverTimestamp()});
       const pending = await jobSnapshot.ref.collection("items")
@@ -650,6 +674,10 @@ exports.deleteParticipant = onCall(
         typeof participantId !== "string" || !participantId) {
       throw new HttpsError("invalid-argument", "削除対象が不正です。");
     }
+    // TODO(PHASE-8-REQUIRED): programAttendancesを作成する実装を入れるまでに、
+    // このparticipantのprogramAttendances(participantId一致)も削除すること。
+    // 未対応のままprogramAttendancesへ書込むと孤児データが残る。
+    // functions/test/confirmed_flow_sources.test.js が未対応のままの書込みを検出して失敗する。
     const db = getFirestore();
     const participantRef = db.collection("participants").doc(participantId);
     const participant = await participantRef.get();
@@ -684,6 +712,9 @@ exports.deleteEvent = onCall(
     if (typeof eventId !== "string" || !eventId) {
       throw new HttpsError("invalid-argument", "削除対象イベントが不正です。");
     }
+    // TODO(PHASE-8-REQUIRED): programAttendancesを作成する実装を入れるまでに、
+    // このeventのprogramAttendances(eventId一致)も削除すること(participantKeys等の新コレクションも同様)。
+    // functions/test/confirmed_flow_sources.test.js が未対応のままの書込みを検出して失敗する。
     const db = getFirestore();
     const eventRef = db.collection("events").doc(eventId);
     const event = await eventRef.get();

@@ -103,6 +103,8 @@ class _ParticipantPageState extends State<ParticipantPage> {
   );
 
   Widget _content(DemoEvent event, Participant p, CheckIn? c) {
+    // 新方式(flow=confirmed)では正式登録・参加予定回答・participant単位のQR受付を使わない。
+    if (!event.isLegacyFlow) return const NonLegacyFlowNotice();
     final receptionUri =
         '/reception?eventId=${Uri.encodeQueryComponent(p.eventId)}&participantId=${p.id}&publicId=${Uri.encodeQueryComponent(p.publicId)}';
     final qrPayload = Uri.base.resolve(receptionUri).toString();

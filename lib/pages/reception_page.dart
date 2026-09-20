@@ -26,6 +26,7 @@ class _ReceptionPageState extends State<ReceptionPage> {
   Object? loadError;
   bool loading = true;
   bool saving = false;
+  bool nonLegacyEvent = false;
   int? lastShownCount;
   String? saveError;
 
@@ -44,6 +45,12 @@ class _ReceptionPageState extends State<ReceptionPage> {
       if (participant != null && participant!.eventId != widget.eventId) {
         participant = null;
         loadError = StateError('event-mismatch');
+      }
+      if (participant != null &&
+          !await repository.isLegacyEvent(participant!.eventId)) {
+        // 新方式(flow=confirmed)の受付はprogram別。participant単位の旧受付では扱わない。
+        nonLegacyEvent = true;
+        participant = null;
       }
       if (participant != null) {
         countController.text = '${participant!.registeredCount}';
@@ -165,6 +172,11 @@ class _ReceptionPageState extends State<ReceptionPage> {
   Widget _body() {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (loadError != null) return ErrorPanel(loadError!);
+    if (nonLegacyEvent) {
+      return const NonLegacyFlowNotice(
+        message: 'このイベントは新方式のイベントです。従来の受付画面では受付できません。新方式の受付機能が提供されるまでお待ちください。',
+      );
+    }
     if (participant == null) {
       return const Card(
         child: Padding(

@@ -118,6 +118,13 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (!event.isLegacyFlow) ...[
+          const NonLegacyFlowNotice(
+            message:
+                'このイベントは新方式のイベントです。この画面の従来機能（設定編集・参加者追加・案内メール・受付など）は使用できません。',
+          ),
+          const SizedBox(height: 16),
+        ],
         _eventSettingsCard(event),
         const SizedBox(height: 16),
         Card(
