@@ -4,11 +4,14 @@ import '../widgets/common.dart';
 import 'access_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
+import 'winner_mail_page.dart';
+import 'winner_mail_service.dart';
 
 /// 管理者に見せる機能(いずれも後続Phaseで実装。この画面は入口とロール別の境界だけ)。
 const List<String> adminFeatureLabels = [
   'イベント設定',
   'CSV取込',
+  '当選メール設定',
   '当選メール送信',
   'リマインド',
   '参加者管理',
@@ -26,22 +29,37 @@ class ConfirmedConsolePage extends StatelessWidget {
     super.key,
     AuthClient? authClient,
     AccessService? accessService,
+    WinnerMailService? winnerMailService,
   }) : authClient = authClient ?? FirebaseAuthClient(),
-       _accessService = accessService;
+       _accessService = accessService,
+       _winnerMailService = winnerMailService;
 
   final AuthClient authClient;
   final AccessService? _accessService;
+  final WinnerMailService? _winnerMailService;
 
   @override
   Widget build(BuildContext context) => AuthGate(
     authClient: authClient,
     accessService:
         _accessService ?? CallableAccessService(authClient: authClient),
+    // 当選メール設定は管理者だけ(受付スタッフには表示せず、サーバー側でもadmin専用)。
     adminBuilder: (context, signOut) => _RoleHome(
       title: '管理機能',
       roleLabel: '管理者',
       features: adminFeatureLabels,
       signOut: signOut,
+      actions: {
+        '当選メール設定': () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => WinnerMailPage(
+              service:
+                  _winnerMailService ??
+                  CallableWinnerMailService(authClient: authClient),
+            ),
+          ),
+        ),
+      },
     ),
     staffBuilder: (context, signOut) => _RoleHome(
       title: '受付',
@@ -58,11 +76,15 @@ class _RoleHome extends StatelessWidget {
     required this.roleLabel,
     required this.features,
     required this.signOut,
+    this.actions = const {},
   });
   final String title;
   final String roleLabel;
   final List<String> features;
   final Future<void> Function() signOut;
+
+  /// 機能名 → 開く処理(実装済みの機能だけ。それ以外は「準備中」)。
+  final Map<String, VoidCallback> actions;
 
   @override
   Widget build(BuildContext context) => PageFrame(
@@ -82,7 +104,13 @@ class _RoleHome extends StatelessWidget {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: Text(feature),
-                subtitle: const Text('準備中'),
+                subtitle: Text(
+                  actions.containsKey(feature) ? '件名・本文の設定とプレビュー' : '準備中',
+                ),
+                trailing: actions.containsKey(feature)
+                    ? const Icon(Icons.chevron_right)
+                    : null,
+                onTap: actions[feature],
               ),
             const SizedBox(height: 12),
             Align(

@@ -40,6 +40,16 @@ test("当選者CSV取込のpreview・commitはadmin専用(staffは実行でき�
   }
 });
 
+test("当選メール(テンプレート・プレビュー・送信ジョブ)のcallableはすべてadmin専用", () => {
+  const names = ["getConfirmedWinnerMailSettings", "updateConfirmedWinnerMailTemplate", "previewConfirmedWinnerMail", "createConfirmedWinnerMailJob",
+    "processConfirmedWinnerMailJob", "retryFailedConfirmedWinnerMails"];
+  for (const name of names) {
+    const found = exportsInIndex.find((e) => e.name === name);
+    assert.ok(found, `${name}が見つかりません`);
+    assert.match(found.rhs, /^confirmedCallable\("admin", /, name);
+  }
+});
+
 test("getMyAccessRoleはstaffOrAdmin(ログイン済みで、accessRolesが有効なstaff/adminのみ)", () => {
   const found = exportsInIndex.find((e) => e.name === "getMyAccessRole");
   assert.ok(found);

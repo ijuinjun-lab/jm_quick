@@ -113,6 +113,22 @@ service cloud.firestore {
       }
     }
 
+    // 新方式の当選メールの送信ジョブと配送記録。クライアントからのread/writeは一切許可しない(Admin SDK・admin専用callableのみ)。
+    // mailDeliveriesは「参加者へメールを送ったか」の正本。旧mailJobsは使わない(旧processorに誤処理されないため)。
+    // 当選メールのテンプレート(events.winnerMailTemplate)も、confirmedイベントはクライアントから更新できない
+    // (events の更新はlegacyイベントだけに許可しているため)。更新は必ずadmin専用callable経由。
+    match /sendJobs/{jobId} {
+      allow read, write: if false;
+
+      match /items/{participantId} {
+        allow read, write: if false;
+      }
+    }
+
+    match /mailDeliveries/{deliveryId} {
+      allow read, write: if false;
+    }
+
     // 新方式(flow=confirmed)のparticipant×program。クライアントからの直接read/writeは許可しない。
     // 書込みはFunctions(Admin SDK)経由のみ。許可(allow)を追加する場合は先にセキュリティ設計を行うこと。
     match /programAttendances/{attendanceId} {

@@ -8,6 +8,10 @@ const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
 const {confirmedCallable} = require("./auth");
 const {getMyAccessRoleHandler} = require("./confirmed/access_role");
 const {createImportApi} = require("./confirmed/import_api");
+const {createWinnerMailApi} = require("./confirmed/winner_mail_api");
+const {createWinnerSendApi} = require("./confirmed/winner_send_api");
+const {generateQrPng} = require("./qr_png");
+const {createMailApiTransport} = require("./mail_transport");
 
 initializeApp();
 
@@ -786,3 +790,23 @@ exports.getMyAccessRole = confirmedCallable("staffOrAdmin", getMyAccessRoleHandl
 const importApi = createImportApi({getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp()});
 exports.previewConfirmedImport = confirmedCallable("admin", importApi.preview);
 exports.commitConfirmedImport = confirmedCallable("admin", importApi.commit, {timeoutSeconds: 300});
+
+// 当選メール(confirmed): テンプレート設定・プレビュー・batch単位の送信ジョブ。すべてadmin専用。
+// - テンプレートの更新は必ずこのcallable経由(Rulesでクライアントからの直接書込みは拒否)
+// - プレビューと実送信は同じレンダラー(renderWinnerMail)を使う
+// - ジョブの作成では1通も送らない。送信は管理者が processConfirmedWinnerMailJob を明示的に実行したときだけ
+//   (前日リマインド等のSchedulerによる自動送信は、このPhaseでは作らない)
+const serverTimestamp = () => FieldValue.serverTimestamp();
+const winnerMailApi = createWinnerMailApi({
+  getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
+});
+const winnerSendApi = createWinnerSendApi({
+  getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
+  getTransport: () => createMailApiTransport({endpoint: mailApiUrl.value(), apiKey: mailApiKey.value()}),
+});
+exports.getConfirmedWinnerMailSettings = confirmedCallable("admin", winnerMailApi.getSettings);
+exports.updateConfirmedWinnerMailTemplate = confirmedCallable("admin", winnerMailApi.updateTemplate);
+exports.previewConfirmedWinnerMail = confirmedCallable("admin", winnerMailApi.preview, {timeoutSeconds: 60});
+exports.createConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.createJob, {timeoutSeconds: 300});
+exports.processConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.processJob, {secrets: [mailApiKey], timeoutSeconds: 300});
+exports.retryFailedConfirmedWinnerMails = confirmedCallable("admin", winnerSendApi.retryFailed, {timeoutSeconds: 120});
