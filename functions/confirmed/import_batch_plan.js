@@ -120,23 +120,39 @@ function summarizeBatch(base, records, blankRecordCount, totalRecords) {
   return {...base, totalRows, ...counts, excludedByOperatorCount, blankRecordCount, totalRecords};
 }
 
-// 取込回の計画を作る。table = {headers, records}(CSVの全レコード)。
-// 戻り値: {ok:true, batch, records, summary} | {ok:false, errors}(必須列の欠落など、ファイル全体の問題)
+// 抽出済みの行から取込回の計画を作る(サーバーAPI用)。
+//   rows: [{sourceRowNumber, cells, structuralIssues?}](空レコードを除く)
+//   blankRecordNumbers: 空レコードの番号 / totalRecords: 元CSVのデータレコード総数(空レコードを含む)
+// 戻り値: {batch, records, summary, blankRecordNumbers}
 //   records は入力の全行と1対1(欠落なし)。batch.readyCount + reviewCount + errorCount === batch.totalRows。
 //   batch.totalRows + batch.blankRecordCount === batch.totalRecords(空レコードも黙って捨てず件数に出す)。
-function planImportBatch({eventId, batchId, sequence, label, sourceFileName, fileHash, mapping, table, eventDate,
-  eventProgramIds}) {
+function planImportBatchFromRows({eventId, batchId, sequence, label, sourceFileName, fileHash, mapping, rows,
+  blankRecordNumbers, totalRecords, eventDate, eventProgramIds}) {
   assertBatchInputs({eventId, batchId, sequence, label, sourceFileName, fileHash});
   // 各関数が検証・正規化を行うため、元のmappingをそのまま渡す(正規化済みの値は再検証の入力にしない)。
   const {version: mappingVersion} = normalizeImportMapping(mapping, {eventProgramIds});
-  const extraction = extractMappedRows(table, mapping);
-  if (!extraction.ok) return {ok: false, errors: extraction.errors};
-  const {results, summary} = planImportRows({rows: extraction.rows, mapping, eventDate, eventProgramIds});
+  const {results, summary} = planImportRows({rows, mapping, eventDate, eventProgramIds});
   const records = results.map((result) => toRecord({eventId, batchId}, result));
   const batch = summarizeBatch({
     batchId, eventId, sequence, label, sourceFileName, fileHash, mappingVersion,
-  }, records, extraction.blankRecordNumbers.length, extraction.totalRecords);
-  return {ok: true, batch, records, summary, blankRecordNumbers: extraction.blankRecordNumbers};
+  }, records, blankRecordNumbers.length, totalRecords);
+  return {batch, records, summary, blankRecordNumbers};
+}
+
+// 取込回の計画を作る。table = {headers, records}(CSVの全レコード)。
+// 戻り値: {ok:true, batch, records, summary} | {ok:false, errors}(必須列の欠落など、ファイル全体の問題)
+function planImportBatch({eventId, batchId, sequence, label, sourceFileName, fileHash, mapping, table, eventDate,
+  eventProgramIds}) {
+  assertBatchInputs({eventId, batchId, sequence, label, sourceFileName, fileHash});
+  normalizeImportMapping(mapping, {eventProgramIds});
+  const extraction = extractMappedRows(table, mapping);
+  if (!extraction.ok) return {ok: false, errors: extraction.errors};
+  const plan = planImportBatchFromRows({
+    eventId, batchId, sequence, label, sourceFileName, fileHash, mapping, rows: extraction.rows,
+    blankRecordNumbers: extraction.blankRecordNumbers, totalRecords: extraction.totalRecords, eventDate,
+    eventProgramIds,
+  });
+  return {ok: true, ...plan};
 }
 
 // 人が明示的に「この行は送らない」と決めた取込レコードを記録した、新しい計画を返す(入力は変更しない)。
@@ -173,6 +189,7 @@ module.exports = {
   participantIdForImportRecord,
   sha256Hex,
   planImportBatch,
+  planImportBatchFromRows,
   markExcludedByOperator,
   // 再エクスポート(呼び出し側が行単位の計画・集計も使えるように)
   planRowSafely,

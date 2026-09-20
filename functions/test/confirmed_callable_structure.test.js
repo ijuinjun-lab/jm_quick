@@ -32,6 +32,14 @@ test("従来方式のexportが増えていない(新しいcallableを認可な�
   assert.deepEqual(legacyFound, [...LEGACY_EXPORTS].sort());
 });
 
+test("当選者CSV取込のpreview・commitはadmin専用(staffは実行できない)", () => {
+  for (const name of ["previewConfirmedImport", "commitConfirmedImport"]) {
+    const found = exportsInIndex.find((e) => e.name === name);
+    assert.ok(found, `${name}が見つかりません`);
+    assert.match(found.rhs, /^confirmedCallable\("admin", importApi\.(preview|commit)/, name);
+  }
+});
+
 test("getMyAccessRoleはstaffOrAdmin(ログイン済みで、accessRolesが有効なstaff/adminのみ)", () => {
   const found = exportsInIndex.find((e) => e.name === "getMyAccessRole");
   assert.ok(found);

@@ -38,21 +38,22 @@ function handlerSource(source, exportName) {
   return source.slice(start, next === -1 ? undefined : next);
 }
 
-test("programAttendancesを書込む実装が入るなら、participant/event削除でも掃除すること(Phase 8までに必須)", () => {
+test("programAttendancesへ書込む実装があるなら、旧削除callable(participant/event)は新方式を拒否するか掃除すること(Phase 8までに専用削除が必須)", () => {
   const usage = /collection\(["']programAttendances["']\)/;
-  const sources = fs.readdirSync(FUNCTIONS_DIR)
+  // 実装ファイル: functions/直下とfunctions/confirmed/直下の.js(テストは含めない)
+  const sourceDirs = [FUNCTIONS_DIR, path.join(FUNCTIONS_DIR, "confirmed")];
+  const sources = sourceDirs.flatMap((dir) => fs.readdirSync(dir)
     .filter((name) => name.endsWith(".js"))
-    .map((name) => read(name));
+    .map((name) => fs.readFileSync(path.join(dir, name), "utf8")));
   const index = read("index.js");
   const deleteHandlers = [handlerSource(index, "deleteParticipant"), handlerSource(index, "deleteEvent")];
-  if (sources.some((source) => usage.test(source))) {
-    for (const handler of deleteHandlers) {
-      assert.match(handler, usage, "削除処理がprogramAttendancesを掃除していません");
+  const writesAttendances = sources.some((source) => usage.test(source));
+  for (const handler of deleteHandlers) {
+    if (writesAttendances) {
+      // 孤児データを残さない: 新方式は拒否する(assertDeletable*)か、programAttendancesを掃除している。
+      assert.ok(/assertDeletable/.test(handler) || usage.test(handler), "旧削除callableが新方式のデータを黙って孤児にします");
     }
-  } else {
-    // まだ実データを作らない間は、忘れないようTODOタグが残っていること。
-    for (const handler of deleteHandlers) {
-      assert.match(handler, /TODO\(PHASE-8-REQUIRED\)/);
-    }
+    // 専用削除(admin認証つきカスケード)を作るまでは、忘れないようTODOタグが残っていること。
+    assert.match(handler, /TODO\(PHASE-8-REQUIRED\)/);
   }
 });

@@ -7,6 +7,7 @@ const {createHash, randomBytes} = require("crypto");
 const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
 const {confirmedCallable} = require("./auth");
 const {getMyAccessRoleHandler} = require("./confirmed/access_role");
+const {createImportApi} = require("./confirmed/import_api");
 
 initializeApp();
 
@@ -52,6 +53,21 @@ function assertLegacyEvent(event, operation) {
     throw new HttpsError("failed-precondition",
       `この操作(${operation})は従来方式のイベント専用です。新方式のイベントでは使用できません。`);
   }
+}
+
+// 新方式(flow=confirmed)のイベント・参加者は、programAttendances・importBatches等と結びついている。
+// 従来のこの削除処理(認証なし)はそれらを掃除できず、孤児データを残すため、専用の削除機能(admin認証・
+// カスケード削除)が提供されるまで拒否する。黙って孤児データを残さない。
+function assertDeletableFlow(event) {
+  if (!isLegacyFlow(event)) {
+    throw new HttpsError("failed-precondition",
+      "新方式のイベント・参加者は、この削除機能では削除できません(専用の削除機能の提供までお待ちください)。");
+  }
+}
+
+async function assertDeletableEvent(db, eventId) {
+  const snapshot = await db.collection("events").doc(eventId).get();
+  if (snapshot.exists) assertDeletableFlow(snapshot.data());
 }
 
 exports.sendParticipantMail = onCall(
@@ -676,10 +692,9 @@ exports.deleteParticipant = onCall(
         typeof participantId !== "string" || !participantId) {
       throw new HttpsError("invalid-argument", "削除対象が不正です。");
     }
-    // TODO(PHASE-8-REQUIRED): programAttendancesを作成する実装を入れるまでに、
-    // このparticipantのprogramAttendances(participantId一致)も削除すること。
-    // 未対応のままprogramAttendancesへ書込むと孤児データが残る。
-    // functions/test/confirmed_flow_sources.test.js が未対応のままの書込みを検出して失敗する。
+    // 新方式(confirmed)の参加者は上のassertDeletableEventで拒否している(programAttendances等の孤児データを残さないため)。
+    // TODO(PHASE-8-REQUIRED): 新方式の参加者削除は、admin認証つきの専用callableで、programAttendances(participantId一致)・
+    // 取込監査(importBatches/*/rows)との整合を保って実装すること。それまでこの旧削除では新方式を拒否し続ける。
     const db = getFirestore();
     const participantRef = db.collection("participants").doc(participantId);
     const participant = await participantRef.get();
@@ -687,6 +702,7 @@ exports.deleteParticipant = onCall(
     if (participant.data().eventId !== eventId) {
       throw new HttpsError("permission-denied", "イベントが一致しません。");
     }
+    await assertDeletableEvent(db, eventId);
     const [logs, jobs, walkInRegistrations] = await Promise.all([
       db.collection("mailLogs").where("participantId", "==", participantId).get(),
       db.collection("mailJobs").where("eventId", "==", eventId).get(),
@@ -714,9 +730,10 @@ exports.deleteEvent = onCall(
     if (typeof eventId !== "string" || !eventId) {
       throw new HttpsError("invalid-argument", "削除対象イベントが不正です。");
     }
-    // TODO(PHASE-8-REQUIRED): programAttendancesを作成する実装を入れるまでに、
-    // このeventのprogramAttendances(eventId一致)も削除すること(participantKeys等の新コレクションも同様)。
-    // functions/test/confirmed_flow_sources.test.js が未対応のままの書込みを検出して失敗する。
+    // 新方式(confirmed)のイベントは下のassertDeletableFlowで拒否している(participants・programAttendances・importBatches等の
+    // 孤児データを残さないため)。
+    // TODO(PHASE-8-REQUIRED): 新方式のイベント削除は、admin認証つきの専用callableで、programAttendances・importBatches(rows含む)を
+    // 含めてカスケード削除すること。それまでこの旧削除では新方式を拒否し続ける。
     const db = getFirestore();
     const eventRef = db.collection("events").doc(eventId);
     const event = await eventRef.get();
@@ -724,6 +741,7 @@ exports.deleteEvent = onCall(
     if (event.data().eventId !== eventId) {
       throw new HttpsError("permission-denied", "イベントIDが一致しません。");
     }
+    assertDeletableFlow(event.data());
     const [participants, checkIns, jobs, logs, walkInRegistrations] = await Promise.all([
       db.collection("participants").where("eventId", "==", eventId).get(),
       db.collection("checkIns").where("eventId", "==", eventId).get(),
@@ -763,3 +781,8 @@ exports.deleteEvent = onCall(
 // 新方式の管理系callableは必ず confirmedCallable(アクセスレベル, ハンドラ) で定義する(認可を通らないと実行されない)。
 // 従来方式のcallableには認証を付けていない(旧JM Quickの認証はPhase 10)。
 exports.getMyAccessRole = confirmedCallable("staffOrAdmin", getMyAccessRoleHandler);
+
+// 当選者CSVの取込(admin専用)。preview=dry-run(書込みなし) / commit=サーバー側で再検証して登録。メールは送らない。
+const importApi = createImportApi({getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp()});
+exports.previewConfirmedImport = confirmedCallable("admin", importApi.preview);
+exports.commitConfirmedImport = confirmedCallable("admin", importApi.commit, {timeoutSeconds: 300});

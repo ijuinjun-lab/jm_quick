@@ -53,10 +53,10 @@ test("純粋関数のみ: Firebase・Firestore・ネットワークを使わな�
   }
 });
 
-test("取込ロジック(import_*)はまだcallableへ接続していない(index.jsがconfirmed/から読み込むのはaccess_roleだけ)", () => {
+test("取込ロジック(import_*)はまだcallableへ接続していない(index.jsがconfirmed/から読み込むのはaccess_roleとimport_api(認可つきで公開)だけ)", () => {
   const index = fs.readFileSync(path.join(FUNCTIONS_DIR, "index.js"), "utf8");
   const required = [...index.matchAll(/require\("\.\/confirmed\/([^"]+)"\)/g)].map((m) => m[1]);
-  assert.deepEqual(required, ["access_role"]);
+  assert.deepEqual(required, ["access_role", "import_api"]);
   assert.doesNotMatch(index, /import_(mapping|rows|batch_plan)/);
 });
 

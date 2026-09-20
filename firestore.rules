@@ -103,6 +103,16 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // 新方式の当選者CSV取込の記録(取込回と、その全行の監査)。クライアントからのread/writeは一切許可しない。
+    // 読み書きはAdmin SDK(admin専用callable)だけ。監査行には個人情報を持たない。
+    match /importBatches/{batchId} {
+      allow read, write: if false;
+
+      match /rows/{rowId} {
+        allow read, write: if false;
+      }
+    }
+
     // 新方式(flow=confirmed)のparticipant×program。クライアントからの直接read/writeは許可しない。
     // 書込みはFunctions(Admin SDK)経由のみ。許可(allow)を追加する場合は先にセキュリティ設計を行うこと。
     match /programAttendances/{attendanceId} {

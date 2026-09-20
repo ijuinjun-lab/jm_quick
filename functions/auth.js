@@ -92,7 +92,13 @@ function confirmedCallable(access, handler, options = {}) {
   const {db, logger, ...callableOptions} = options;
   return onCall({region: "asia-northeast1", timeoutSeconds: 60, ...callableOptions}, async (request) => {
     const identity = await guard(request, {db, logger});
-    return handler({identity, data: request.data, request});
+    try {
+      return await handler({identity, data: request.data, request});
+    } catch (error) {
+      // ハンドラが投げた「想定内のエラー」(ApiError)だけを、そのコードでクライアントへ返す。それ以外は内部エラー扱い。
+      if (error && error.isApiError === true) throw new HttpsError(error.code, error.message, error.details);
+      throw error;
+    }
   });
 }
 
