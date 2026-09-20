@@ -1,12 +1,16 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:csv/csv.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/services/demo_repository.dart';
 import 'package:jm_quick/models/event_status.dart';
 import 'package:jm_quick/services/csv_import_service.dart';
+import 'package:jm_quick/services/participant_csv_export_service.dart';
 import 'package:jm_quick/models/demo_models.dart';
 import 'package:jm_quick/pages/demo_admin_page.dart';
+import 'package:jm_quick/widgets/common.dart';
 
 void main() {
   test('公開IDは推測困難で毎回異なる', () {
@@ -23,6 +27,16 @@ void main() {
       walkInPathForEvent('イベント A'),
       '/e/%E3%82%A4%E3%83%99%E3%83%B3%E3%83%88%20A/walk-in',
     );
+  });
+
+  test('参加予定確認メール送信日時は開催日前日と指定時刻から計算する', () {
+    final result = previousDayAt(
+      DateTime(2026, 8, 10),
+      const TimeOfDay(hour: 10, minute: 0),
+    );
+    expect(result, DateTime(2026, 8, 9, 10));
+    expect(formatDateTimeMinute(result), '2026/08/09 10:00');
+    expect(formatTime24(const TimeOfDay(hour: 16, minute: 0)), '16:00');
   });
 
   test('参加予定回答はFirestore値から日本語表示へ変換できる', () {
@@ -164,5 +178,200 @@ void main() {
     expect(preview.rows, isEmpty);
     expect(preview.errorCount, 3);
     expect(preview.errors, everyElement(contains('人数が正しくありません')));
+  });
+
+  test('参加者一覧CSVは現在のイベントだけを日本語状態で出力する', () {
+    const event = DemoEvent(
+      id: 'event-A',
+      name: 'ペット防災/イベント',
+      senderName: 'ペット防災イベント',
+      venue: '会場A',
+      contact: '',
+      reconfirmEnabled: true,
+    );
+    Participant participant({
+      required String id,
+      required String eventId,
+      required String name,
+      required bool invitationSent,
+      String? invitationMailStatus,
+      required bool confirmed,
+      AttendanceResponse? response,
+      String? furigana,
+      int count = 1,
+    }) => Participant(
+      id: id,
+      eventId: eventId,
+      publicId: 'public-$id',
+      name: name,
+      email: '$id@example.com',
+      furiganaLastName: furigana,
+      registeredCount: count,
+      registrationType: 'preRegistered',
+      invitationSent: invitationSent,
+      invitationMailStatus: invitationMailStatus,
+      participationConfirmed: confirmed,
+      reconfirmed: false,
+      attendanceResponse: response,
+      reconfirmationMailSent: false,
+    );
+    final export = buildParticipantCsv(
+      event: event,
+      participants: [
+        participant(
+          id: 'a2',
+          eventId: 'event-A',
+          name: '伊集院 純',
+          furigana: 'イジュウイン',
+          invitationSent: true,
+          confirmed: true,
+          response: AttendanceResponse.attending,
+          count: 2,
+        ),
+        participant(
+          id: 'a1',
+          eventId: 'event-A',
+          name: '松井 花子',
+          furigana: 'マツイ',
+          invitationSent: false,
+          invitationMailStatus: 'failed',
+          confirmed: false,
+        ),
+        participant(
+          id: 'a3',
+          eventId: 'event-A',
+          name: '渡辺 太郎',
+          invitationSent: false,
+          confirmed: true,
+          response: AttendanceResponse.notAttending,
+        ),
+        participant(
+          id: 'b1',
+          eventId: 'event-B',
+          name: '別イベント参加者',
+          invitationSent: true,
+          confirmed: true,
+        ),
+      ],
+      checkIns: const [
+        CheckIn(
+          participantId: 'a2',
+          eventId: 'event-A',
+          checkedIn: true,
+          attendedCount: 2,
+        ),
+        CheckIn(participantId: 'a1', eventId: 'event-A', checkedIn: false),
+        CheckIn(
+          participantId: 'b1',
+          eventId: 'event-B',
+          checkedIn: true,
+          attendedCount: 9,
+        ),
+      ],
+      exportedAt: DateTime(2026, 8, 8),
+    );
+    final text = utf8.decode(export.bytes);
+    expect(export.bytes.take(3), [0xef, 0xbb, 0xbf]);
+    expect(export.fileName, 'ペット防災_イベント_参加者一覧_20260808.csv');
+    expect(text, contains('伊集院 純,a2@example.com,2,送信済み,登録済み,参加予定,受付済み,2'));
+    expect(text, contains('松井 花子,a1@example.com,1,送信失敗,未登録,未回答,未受付,'));
+    expect(text, contains('渡辺 太郎,a3@example.com,1,未送信,登録済み,不参加予定,未受付,'));
+    expect(text, isNot(contains('別イベント参加者')));
+    expect(text.indexOf('伊集院 純'), lessThan(text.indexOf('松井 花子')));
+  });
+
+  group('参加者一覧CSVの数式インジェクション対策', () {
+    const event = DemoEvent(
+      id: 'event-A',
+      name: '数式テスト',
+      senderName: '数式テスト',
+      venue: '会場A',
+      contact: '',
+      reconfirmEnabled: false,
+    );
+    Participant participant(String id, String name, {String? email}) =>
+        Participant(
+          id: id,
+          eventId: 'event-A',
+          publicId: 'public-$id',
+          name: name,
+          email: email ?? '$id@example.com',
+          registeredCount: 2,
+          registrationType: 'preRegistered',
+          invitationSent: false,
+          participationConfirmed: false,
+          reconfirmed: false,
+          reconfirmationMailSent: false,
+        );
+    List<List<dynamic>> parse(ParticipantCsvExport export) =>
+        const CsvToListConverter(shouldParseNumbers: false).convert(
+          utf8.decode(export.bytes).replaceFirst('﻿', ''),
+        );
+    ParticipantCsvExport export(List<Participant> participants) =>
+        buildParticipantCsv(
+          event: event,
+          participants: participants,
+          checkIns: const [],
+          exportedAt: DateTime(2026, 8, 8),
+        );
+
+    test('数式として解釈される先頭文字の氏名を無害化し、通常の氏名は変えない', () {
+      final result = export([
+        participant('p1', '=1+1'),
+        participant('p2', '+SUM(A1:A2)'),
+        participant('p3', '-1+1'),
+        participant('p4', '@SUM(A1:A2)'),
+        participant('p5', '\t=cmd'),
+        participant('p6', '山田 太郎'),
+      ]);
+      final rows = parse(result);
+      final names = {for (final row in rows.skip(1)) row[2]: row[1]};
+      expect(names['p1@example.com'], "'=1+1");
+      expect(names['p2@example.com'], "'+SUM(A1:A2)");
+      expect(names['p3@example.com'], "'-1+1");
+      expect(names['p4@example.com'], "'@SUM(A1:A2)");
+      expect(names['p5@example.com'], "'\t=cmd");
+      expect(names['p6@example.com'], '山田 太郎');
+      expect(result.bytes.take(3), [0xef, 0xbb, 0xbf]);
+    });
+
+    test('氏名以外のユーザー由来列（メール）にも同じ処理が適用され、数値列は変わらない', () {
+      final rows = parse(
+        export([participant('p1', '山田 太郎', email: '=HYPERLINK@example.com')]),
+      );
+      expect(rows[1][2], "'=HYPERLINK@example.com");
+      expect(rows[1][3], '2');
+      expect(rows[0], contains('申込人数'));
+    });
+
+    test('CRで始まる値も無害化され、CSV上でテキストとして出力される', () {
+      final text = utf8.decode(export([participant('p1', '\r=cmd')]).bytes);
+      expect(text, contains("'\r=cmd"));
+    });
+
+    test('無害化してもカンマ・引用符・改行を含む値は正しく読み込める', () {
+      final rows = parse(
+        export([
+          participant('p1', '田中, "太郎"'),
+          participant('p2', '=A1,B1'),
+          participant('p3', '山田\n花子'),
+        ]),
+      );
+      final names = {for (final row in rows.skip(1)) row[2]: row[1]};
+      expect(names['p1@example.com'], '田中, "太郎"');
+      expect(names['p2@example.com'], "'=A1,B1");
+      expect(names['p3@example.com'], '山田\n花子');
+    });
+
+    test('neutralizeSpreadsheetFormulaは先頭文字だけを対象にし、文字列以外を変更しない', () {
+      for (final value in ['=1+1', '+1', '-1', '@a', '\ta', '\ra']) {
+        expect(neutralizeSpreadsheetFormula(value), "'$value");
+      }
+      for (final value in ['', '山田-太郎', 'a=b', ' =1', "'=1"]) {
+        expect(neutralizeSpreadsheetFormula(value), value);
+      }
+      expect(neutralizeSpreadsheetFormula(2), 2);
+      expect(neutralizeSpreadsheetFormula(null), isNull);
+    });
   });
 }

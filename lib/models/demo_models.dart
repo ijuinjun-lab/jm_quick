@@ -28,6 +28,7 @@ class DemoEvent {
   const DemoEvent({
     required this.id,
     required this.name,
+    required this.senderName,
     required this.venue,
     required this.contact,
     this.startAt,
@@ -38,6 +39,7 @@ class DemoEvent {
   });
   final String id;
   final String name;
+  final String senderName;
   final String venue;
   final String contact;
   final DateTime? startAt;
@@ -48,9 +50,13 @@ class DemoEvent {
 
   factory DemoEvent.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data() ?? {};
+    final name = data['eventName'] as String? ?? 'イベント参加受付';
     return DemoEvent(
       id: doc.id,
-      name: data['eventName'] as String? ?? 'イベント参加受付',
+      name: name,
+      senderName: (data['senderName'] as String?)?.trim().isNotEmpty == true
+          ? (data['senderName'] as String).trim()
+          : name,
       venue: data['venue'] as String? ?? '主催者からのご案内をご確認ください',
       contact: data['contact'] as String? ?? '',
       startAt: dateFrom(data['startAt']),
@@ -84,6 +90,8 @@ class Participant {
     required this.publicId,
     required this.name,
     required this.email,
+    this.furiganaLastName,
+    this.furiganaFirstName,
     required this.registeredCount,
     required this.registrationType,
     required this.invitationSent,
@@ -102,6 +110,8 @@ class Participant {
   final String publicId;
   final String name;
   final String email;
+  final String? furiganaLastName;
+  final String? furiganaFirstName;
   final int registeredCount;
   final String registrationType;
   final bool invitationSent;
@@ -125,6 +135,8 @@ class Participant {
       publicId: data['publicId'] as String? ?? '',
       name: data['name'] as String? ?? '',
       email: data['email'] as String? ?? '',
+      furiganaLastName: data['furiganaLastName'] as String?,
+      furiganaFirstName: data['furiganaFirstName'] as String?,
       registeredCount: (data['registeredCount'] as num?)?.toInt() ?? 0,
       registrationType: data['registrationType'] as String? ?? 'preRegistered',
       invitationSent: data['invitationSent'] as bool? ?? false,

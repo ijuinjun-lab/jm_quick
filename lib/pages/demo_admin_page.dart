@@ -6,6 +6,8 @@ import '../models/demo_models.dart';
 import '../services/demo_repository.dart';
 import '../services/csv_import_service.dart';
 import '../widgets/common.dart';
+import '../services/download_service.dart';
+import '../services/participant_csv_export_service.dart';
 
 String walkInPathForEvent(String eventId) =>
     '/e/${Uri.encodeComponent(eventId)}/walk-in';
@@ -169,6 +171,13 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
               icon: const Icon(Icons.upload_file),
               label: const Text('このイベントの参加者CSVを読み込む'),
             ),
+            OutlinedButton.icon(
+              onPressed: busy
+                  ? null
+                  : () => _exportParticipantCsv(event, participants, checkIns),
+              icon: const Icon(Icons.download),
+              label: const Text('参加者一覧CSVを書き出す'),
+            ),
             FilledButton.tonalIcon(
               onPressed: () => _showWalkInQr(event),
               icon: const Icon(Icons.qr_code_2),
@@ -187,6 +196,23 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
         ),
       ],
     );
+  }
+
+  void _exportParticipantCsv(
+    DemoEvent event,
+    List<Participant> participants,
+    List<CheckIn> checkIns,
+  ) {
+    final export = buildParticipantCsv(
+      event: event,
+      participants: participants,
+      checkIns: checkIns,
+      exportedAt: DateTime.now(),
+    );
+    downloadBytes(export.bytes, export.fileName);
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('${export.fileName}を書き出しました。')));
   }
 
   Future<void> _showWalkInQr(DemoEvent event) async {
@@ -585,8 +611,14 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
             InfoRow('イベント名', event.name),
             InfoRow('開催日時', _eventDateRange(event)),
             InfoRow('会場', event.venue),
-            InfoRow('正式登録締切', formatDateTime(event.registrationDeadline)),
-            InfoRow('参加予定確認送信日時', formatDateTime(event.confirmationSendAt)),
+            InfoRow(
+              '正式登録締切日時',
+              formatDateTimeMinute(event.registrationDeadline),
+            ),
+            InfoRow(
+              '参加予定確認メール送信日時',
+              formatDateTimeMinute(event.confirmationSendAt),
+            ),
             const Divider(height: 24),
             Row(
               children: [
@@ -602,7 +634,7 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
   }
 
   String _eventDateRange(DemoEvent event) {
-    final start = formatDateTime(event.startAt);
+    final start = formatDateTimeMinute(event.startAt);
     if (event.endAt == null) return start;
     final end = event.endAt!;
     String two(int value) => value.toString().padLeft(2, '0');
@@ -611,6 +643,7 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
 
   Future<void> _showEventSettings(DemoEvent event) async {
     final name = TextEditingController(text: event.name);
+    final senderName = TextEditingController(text: event.senderName);
     final venue = TextEditingController(text: event.venue);
     final contact = TextEditingController(text: event.contact);
     var eventDate =
@@ -641,17 +674,24 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
                     controller: name,
                     decoration: const InputDecoration(labelText: 'イベント名'),
                   ),
+                  TextField(
+                    controller: senderName,
+                    decoration: const InputDecoration(
+                      labelText: '送信者名',
+                      helperText: '未設定の場合はイベント名を使用します',
+                    ),
+                  ),
                   _pickerTile('開催日', _dateOnly(eventDate), () async {
                     final value = await _pickDate(eventDate);
                     if (value != null) setDialogState(() => eventDate = value);
                   }),
-                  _pickerTile('開始時刻', startTime.format(context), () async {
+                  _pickerTile('開始時刻', formatTime24(startTime), () async {
                     final value = await _pickTime(startTime);
                     if (value != null) setDialogState(() => startTime = value);
                   }),
                   _pickerTile(
                     '終了時刻（任意）',
-                    endTime?.format(context) ?? '未設定',
+                    endTime == null ? '未設定' : formatTime24(endTime!),
                     () async {
                       final value = await _pickTime(endTime ?? startTime);
                       if (value != null) setDialogState(() => endTime = value);
@@ -669,13 +709,17 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
                     controller: contact,
                     decoration: const InputDecoration(labelText: '問い合わせ先'),
                   ),
-                  _pickerTile('正式登録締切日時', formatDateTime(deadline), () async {
-                    final value = await _pickDateTime(deadline);
-                    if (value != null) setDialogState(() => deadline = value);
-                  }),
+                  _pickerTile(
+                    '正式登録締切日時',
+                    formatDateTimeMinute(deadline),
+                    () async {
+                      final value = await _pickDateTime(deadline);
+                      if (value != null) setDialogState(() => deadline = value);
+                    },
+                  ),
                   _pickerTile(
                     '参加予定確認メール送信時刻',
-                    confirmationTime.format(context),
+                    formatTime24(confirmationTime),
                     () async {
                       final value = await _pickTime(confirmationTime);
                       if (value != null) {
@@ -686,7 +730,8 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
                   Align(
                     alignment: Alignment.centerLeft,
                     child: Text(
-                      '参加予定確認日：${_dateOnly(eventDate.subtract(const Duration(days: 1)))}（開催前日）',
+                      '参加予定確認メール送信日時：'
+                      '${formatDateTimeMinute(previousDayAt(eventDate, confirmationTime))}',
                     ),
                   ),
                 ],
@@ -714,6 +759,7 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
                 }
                 await repository.updateEventSettings(
                   eventName: name.text,
+                  senderName: senderName.text,
                   startAt: start,
                   endAt: end,
                   venue: venue.text,
@@ -730,6 +776,7 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
       ),
     );
     name.dispose();
+    senderName.dispose();
     venue.dispose();
     contact.dispose();
   }
@@ -756,8 +803,14 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
     lastDate: DateTime.now().add(const Duration(days: 3650)),
   );
 
-  Future<TimeOfDay?> _pickTime(TimeOfDay initial) =>
-      showTimePicker(context: context, initialTime: initial);
+  Future<TimeOfDay?> _pickTime(TimeOfDay initial) => showTimePicker(
+    context: context,
+    initialTime: initial,
+    builder: (context, child) => MediaQuery(
+      data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+      child: child!,
+    ),
+  );
 
   Future<DateTime?> _pickDateTime(DateTime initial) async {
     final date = await _pickDate(initial);

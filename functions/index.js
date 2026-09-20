@@ -36,6 +36,12 @@ function formatJapaneseDate(value) {
   }).format(date);
 }
 
+function eventSenderName(event) {
+  const senderName = typeof event?.senderName === "string" ? event.senderName.trim() : "";
+  const eventName = typeof event?.eventName === "string" ? event.eventName.trim() : "";
+  return (senderName || eventName || "イベント事務局").slice(0, 100);
+}
+
 exports.sendParticipantMail = onCall(
   {region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 30},
   async (request) => {
@@ -77,8 +83,8 @@ exports.sendParticipantMail = onCall(
     const subject = type === "invitation"
       ? `【${event.eventName}】正式登録のお願い`
       : isReconfirmation
-      ? `【${event.eventName}】参加予定の確認をお願いします`
-      : `【${event.eventName}】参加のご案内`;
+      ? `【${event.eventName}】参加予定の確認`
+      : `【${event.eventName}】ご登録ありがとうございます`;
     const instruction = isReconfirmation ? "以下のマイページから参加予定をご回答ください。" : type === "walkIn" ? "当日参加登録が完了しました。以下があなたのマイページです。" : "";
     const eventDate = formatJapaneseDateTime(event.startAt);
     const registrationDeadline = formatJapaneseDate(event.registrationDeadline);
@@ -106,6 +112,13 @@ exports.sendParticipantMail = onCall(
     }
     let response;
     try {
+      console.log("Mail API dispatch", {
+        participantId,
+        eventId,
+        type,
+        senderName: eventSenderName(event),
+        endpoint,
+      });
       response = await fetch(`${endpoint}/v1/mail/send`, {
         method: "POST",
         headers: {
@@ -114,6 +127,7 @@ exports.sendParticipantMail = onCall(
         },
         body: JSON.stringify({
           to: participant.email,
+          senderName: eventSenderName(event),
           subject,
           text,
           metadata: {app: "jm-quick", participantId, type},
@@ -236,8 +250,9 @@ exports.registerWalkIn = onCall(
         },
         body: JSON.stringify({
           to: normalizedEmail,
-          subject: "【イベント参加受付】ご登録ありがとうございます",
-          text: `${name.trim()}様\n\n当日参加登録が完了しました。\n\n` +
+          senderName: eventSenderName(event),
+          subject: `【${event.eventName}】ご登録ありがとうございます`,
+          text: `${name.trim()}様\n\n${event.eventName}の当日参加登録が完了しました。\n\n` +
             "以下はご本人様専用のマイページです。必要に応じて登録内容や受付情報をご確認いただけます。\n\n" +
             `${pageUrl}\n`,
           metadata: {app: "jm-quick", participantId: participantRef.id,
@@ -322,8 +337,9 @@ exports.sendScheduledConfirmationMail = onSchedule(
           },
           body: JSON.stringify({
             to: participant.email,
-            subject: `【${event.eventName}】参加予定の確認をお願いします`,
-            text: `${participant.name}様\n\n開催前日の参加予定確認です。\n` +
+            senderName: eventSenderName(event),
+            subject: `【${event.eventName}】参加予定の確認`,
+            text: `${participant.name}様\n\n${event.eventName}の開催前日の参加予定確認です。\n` +
               `以下のマイページからご回答ください。\n\n${pageUrl}\n`,
             metadata: {app: "jm-quick", participantId: snapshot.id,
               type: "reconfirmation"},
@@ -391,7 +407,7 @@ function reconfirmationText(participantId, participant, event) {
   const pageUrl = `${appBaseUrl.value().replace(/\/$/, "")}/p/` +
     `${encodeURIComponent(participantId)}?publicId=` +
     `${encodeURIComponent(participant.publicId)}`;
-  return `${participant.name}様\n\n開催前日の参加予定確認です。\n` +
+  return `${participant.name}様\n\n${event.eventName}の開催前日の参加予定確認です。\n` +
     `以下のマイページからご回答ください。\n\n${pageUrl}\n`;
 }
 
@@ -407,9 +423,10 @@ async function sendBulkMail(participantId, participant, event, type, jobId) {
     },
     body: JSON.stringify({
       to: participant.email,
+      senderName: eventSenderName(event),
       subject: isInvitation
         ? `【${event.eventName}】正式登録のお願い`
-        : `【${event.eventName}】参加予定の確認をお願いします`,
+        : `【${event.eventName}】参加予定の確認`,
       text: isInvitation
         ? invitationText(participantId, participant, event)
         : reconfirmationText(participantId, participant, event),

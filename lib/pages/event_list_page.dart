@@ -97,8 +97,12 @@ class _EventListPageState extends State<EventListPage> {
                     InfoRow('開催日時', formatDateTime(event.startAt)),
                     InfoRow('会場', event.venue),
                     InfoRow(
-                      '正式登録締切',
-                      formatDateTime(event.registrationDeadline),
+                      '正式登録締切日時',
+                      formatDateTimeMinute(event.registrationDeadline),
+                    ),
+                    InfoRow(
+                      '参加予定確認メール送信日時',
+                      formatDateTimeMinute(event.confirmationSendAt),
                     ),
                     Wrap(
                       spacing: 18,
@@ -215,12 +219,20 @@ class _EventListPageState extends State<EventListPage> {
 
   Future<void> _createEvent() async {
     final name = TextEditingController();
+    final senderName = TextEditingController();
     final venue = TextEditingController();
     final contact = TextEditingController();
     var date = DateTime.now().add(const Duration(days: 30));
     var start = const TimeOfDay(hour: 10, minute: 0);
     TimeOfDay? end = const TimeOfDay(hour: 16, minute: 0);
-    var deadline = DateTime.now().add(const Duration(days: 14));
+    final initialDeadline = DateTime.now().add(const Duration(days: 14));
+    var deadline = DateTime(
+      initialDeadline.year,
+      initialDeadline.month,
+      initialDeadline.day,
+      23,
+      59,
+    );
     var confirmation = const TimeOfDay(hour: 10, minute: 0);
 
     await showDialog<void>(
@@ -238,24 +250,29 @@ class _EventListPageState extends State<EventListPage> {
                     controller: name,
                     decoration: const InputDecoration(labelText: 'イベント名'),
                   ),
+                  TextField(
+                    controller: senderName,
+                    decoration: const InputDecoration(
+                      labelText: '送信者名',
+                      helperText: '未設定の場合はイベント名を使用します',
+                    ),
+                  ),
                   _tile('開催日', _date(date), () async {
                     final value = await _pickDate(date);
                     if (value != null) setState(() => date = value);
                   }),
-                  _tile('開始時刻', start.format(context), () async {
-                    final value = await showTimePicker(
-                      context: context,
-                      initialTime: start,
-                    );
+                  _tile('開始時刻', formatTime24(start), () async {
+                    final value = await _pickTime(start);
                     if (value != null) setState(() => start = value);
                   }),
-                  _tile('終了時刻（任意）', end?.format(context) ?? '未設定', () async {
-                    final value = await showTimePicker(
-                      context: context,
-                      initialTime: end ?? start,
-                    );
-                    if (value != null) setState(() => end = value);
-                  }),
+                  _tile(
+                    '終了時刻（任意）',
+                    end == null ? '未設定' : formatTime24(end!),
+                    () async {
+                      final value = await _pickTime(end ?? start);
+                      if (value != null) setState(() => end = value);
+                    },
+                  ),
                   TextField(
                     controller: venue,
                     decoration: const InputDecoration(labelText: '会場'),
@@ -265,23 +282,20 @@ class _EventListPageState extends State<EventListPage> {
                     controller: contact,
                     decoration: const InputDecoration(labelText: '問い合わせ先'),
                   ),
-                  _tile('正式登録締切日', _date(deadline), () async {
-                    final value = await _pickDate(deadline);
+                  _tile('正式登録締切日時', formatDateTimeMinute(deadline), () async {
+                    final value = await _pickDateTime(deadline);
                     if (value != null) setState(() => deadline = value);
                   }),
-                  _tile(
-                    '参加予定確認メール送信時刻',
-                    confirmation.format(context),
-                    () async {
-                      final value = await showTimePicker(
-                        context: context,
-                        initialTime: confirmation,
-                      );
-                      if (value != null) setState(() => confirmation = value);
-                    },
-                  ),
-                  Text(
-                    '参加予定確認日：${_date(date.subtract(const Duration(days: 1)))}',
+                  _tile('参加予定確認メール送信時刻', formatTime24(confirmation), () async {
+                    final value = await _pickTime(confirmation);
+                    if (value != null) setState(() => confirmation = value);
+                  }),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '参加予定確認メール送信日時：'
+                      '${formatDateTimeMinute(previousDayAt(date, confirmation))}',
+                    ),
                   ),
                 ],
               ),
@@ -299,16 +313,11 @@ class _EventListPageState extends State<EventListPage> {
                 }
                 final id = await repository.createEvent(
                   eventName: name.text,
+                  senderName: senderName.text,
                   startAt: _combine(date, start),
                   endAt: end == null ? null : _combine(date, end!),
                   venue: venue.text,
-                  registrationDeadline: DateTime(
-                    deadline.year,
-                    deadline.month,
-                    deadline.day,
-                    23,
-                    59,
-                  ),
+                  registrationDeadline: deadline,
                   confirmationSendTime: confirmation,
                   contact: contact.text,
                 );
@@ -324,6 +333,7 @@ class _EventListPageState extends State<EventListPage> {
       ),
     );
     name.dispose();
+    senderName.dispose();
     venue.dispose();
     contact.dispose();
   }
@@ -341,6 +351,22 @@ class _EventListPageState extends State<EventListPage> {
     firstDate: DateTime.now().subtract(const Duration(days: 365)),
     lastDate: DateTime.now().add(const Duration(days: 3650)),
   );
+
+  Future<TimeOfDay?> _pickTime(TimeOfDay initial) => showTimePicker(
+    context: context,
+    initialTime: initial,
+    builder: (context, child) => MediaQuery(
+      data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+      child: child!,
+    ),
+  );
+
+  Future<DateTime?> _pickDateTime(DateTime initial) async {
+    final date = await _pickDate(initial);
+    if (date == null || !mounted) return null;
+    final time = await _pickTime(TimeOfDay.fromDateTime(initial));
+    return time == null ? null : _combine(date, time);
+  }
 
   DateTime _combine(DateTime date, TimeOfDay time) =>
       DateTime(date.year, date.month, date.day, time.hour, time.minute);

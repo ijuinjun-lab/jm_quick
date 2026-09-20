@@ -108,6 +108,7 @@ class DemoRepository {
 
   Future<String> createEvent({
     required String eventName,
+    required String senderName,
     required DateTime startAt,
     DateTime? endAt,
     required String venue,
@@ -120,6 +121,7 @@ class DemoRepository {
       _eventData(
         id: ref.id,
         eventName: eventName,
+        senderName: senderName,
         startAt: startAt,
         endAt: endAt,
         venue: venue,
@@ -134,6 +136,7 @@ class DemoRepository {
   Map<String, dynamic> _eventData({
     required String id,
     required String eventName,
+    required String senderName,
     required DateTime startAt,
     DateTime? endAt,
     required String venue,
@@ -156,6 +159,7 @@ class DemoRepository {
     return {
       'eventId': id,
       'eventName': eventName.trim(),
+      'senderName': senderName.trim(),
       'startAt': Timestamp.fromDate(startAt),
       'endAt': endAt == null ? null : Timestamp.fromDate(endAt),
       'venue': venue.trim(),
@@ -170,6 +174,7 @@ class DemoRepository {
 
   Future<void> updateEventSettings({
     required String eventName,
+    required String senderName,
     required DateTime startAt,
     DateTime? endAt,
     required String venue,
@@ -180,6 +185,7 @@ class DemoRepository {
     _eventData(
       id: eventId,
       eventName: eventName,
+      senderName: senderName,
       startAt: startAt,
       endAt: endAt,
       venue: venue,

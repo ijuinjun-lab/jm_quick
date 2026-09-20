@@ -59,3 +59,29 @@ String formatDateTime(DateTime? date) {
   String two(int n) => n.toString().padLeft(2, '0');
   return '${date.year}/${two(date.month)}/${two(date.day)} ${two(date.hour)}:${two(date.minute)}:${two(date.second)}';
 }
+
+String formatDateTimeMinute(DateTime? date) {
+  if (date == null) return '未設定';
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${date.year}/${two(date.month)}/${two(date.day)} '
+      '${two(date.hour)}:${two(date.minute)}';
+}
+
+String formatTime24(TimeOfDay time) =>
+    '${time.hour.toString().padLeft(2, '0')}:'
+    '${time.minute.toString().padLeft(2, '0')}';
+
+DateTime previousDayAt(DateTime eventDate, TimeOfDay time) {
+  final previousDay = DateTime(
+    eventDate.year,
+    eventDate.month,
+    eventDate.day,
+  ).subtract(const Duration(days: 1));
+  return DateTime(
+    previousDay.year,
+    previousDay.month,
+    previousDay.day,
+    time.hour,
+    time.minute,
+  );
+}

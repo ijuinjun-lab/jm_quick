@@ -18,10 +18,12 @@ function createMailer(env = process.env, client = sgMail) {
   const fromEmail = cleanString(env.MAIL_FROM, 254);
   if (!apiKey || !EMAIL_PATTERN.test(fromEmail)) throw new Error("mail_not_configured");
   client.setApiKey(apiKey);
-  const fromName = cleanString(env.MAIL_FROM_NAME || "JMイベント事務局", 100);
+  const defaultFromName = cleanString(env.MAIL_FROM_NAME || "JMイベント事務局", 100);
   const replyTo = cleanString(env.MAIL_REPLY_TO || fromEmail, 254);
   return {
-    async send({to, subject, text}) {
+    async send({to, subject, text, senderName}) {
+      const fromName = cleanString(senderName, 100) || defaultFromName;
+      console.log("SendGrid dispatch", {fromEmail, fromName});
       const [response] = await client.send({
         to,
         from: {email: fromEmail, name: fromName},
@@ -50,12 +52,15 @@ function createApp({env = process.env, mailer} = {}) {
     const to = cleanString(req.body?.to, 254).toLowerCase();
     const subject = cleanString(req.body?.subject, 200);
     const text = cleanString(req.body?.text, 20000);
+    const senderName = cleanString(req.body?.senderName, 100);
     if (!EMAIL_PATTERN.test(to) || !subject || !text) {
       return res.status(400).json({ok: false, error: "invalid_mail"});
     }
 
     try {
-      const messageId = await (mailer || createMailer(env)).send({to, subject, text});
+      const messageId = await (mailer || createMailer(env)).send({
+        to, subject, text, senderName,
+      });
       return res.json({ok: true, messageId});
     } catch (error) {
       console.error("mail send failed", {
