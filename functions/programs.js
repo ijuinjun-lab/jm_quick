@@ -86,6 +86,7 @@ function validateProgramAttendance(attendance) {
 
 module.exports = {
   MAX_PLANNED_COUNT,
+  MAX_SLOT_LABEL_LENGTH,
   isValidProgramId,
   isValidParticipantId,
   programAttendanceId,
