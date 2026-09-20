@@ -96,6 +96,13 @@ service cloud.firestore {
       }
     }
 
+    // 権限の正本(Firebase Auth UID → accessRoles/{uid})。クライアントSDKからはread/writeとも一切許可しない
+    // (admin自身も、自分のroleを読めず、書き換えられない)。読み書きはAdmin SDK(Functions・ブートストラップCLI)だけ。
+    // 権限の確認はcallable(getMyAccessRole)経由。ここに allow を追加してはならない。
+    match /accessRoles/{uid} {
+      allow read, write: if false;
+    }
+
     // 新方式(flow=confirmed)のparticipant×program。クライアントからの直接read/writeは許可しない。
     // 書込みはFunctions(Admin SDK)経由のみ。許可(allow)を追加する場合は先にセキュリティ設計を行うこと。
     match /programAttendances/{attendanceId} {

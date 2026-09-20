@@ -5,6 +5,8 @@ const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {createHash, randomBytes} = require("crypto");
 const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
+const {confirmedCallable} = require("./auth");
+const {getMyAccessRoleHandler} = require("./confirmed/access_role");
 
 initializeApp();
 
@@ -756,3 +758,8 @@ exports.deleteEvent = onCall(
     };
   },
 );
+
+// --- 新方式(flow=confirmed)の認証callable ---------------------------------------------
+// 新方式の管理系callableは必ず confirmedCallable(アクセスレベル, ハンドラ) で定義する(認可を通らないと実行されない)。
+// 従来方式のcallableには認証を付けていない(旧JM Quickの認証はPhase 10)。
+exports.getMyAccessRole = confirmedCallable("staffOrAdmin", getMyAccessRoleHandler);

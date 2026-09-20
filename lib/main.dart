@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
+import 'confirmed/console_page.dart';
 import 'firebase_options.dart';
 import 'pages/demo_admin_page.dart';
 import 'pages/event_list_page.dart';
@@ -50,6 +51,8 @@ class JmQuickApp extends StatelessWidget {
         final uri = Uri.parse(settings.name ?? '/');
         final Widget page = switch (uri.path) {
           '/admin' || '/demo-admin' => const EventListPage(),
+          // 新方式(flow=confirmed)の管理・受付。ログイン+サーバー側の権限確認を通った場合だけ機能が表示される。
+          '/console' => ConfirmedConsolePage(),
           '/reception' => ReceptionPage(
             eventId: uri.queryParameters['eventId'],
             participantId: uri.queryParameters['participantId'],

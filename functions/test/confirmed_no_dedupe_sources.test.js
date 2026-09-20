@@ -53,9 +53,10 @@ test("純粋関数のみ: Firebase・Firestore・ネットワークを使わな�
   }
 });
 
-test("Phase 3ではcallable・既存コードへ接続していない(index.jsはconfirmed/を読み込まない)", () => {
+test("取込ロジック(import_*)はまだcallableへ接続していない(index.jsがconfirmed/から読み込むのはaccess_roleだけ)", () => {
   const index = fs.readFileSync(path.join(FUNCTIONS_DIR, "index.js"), "utf8");
-  assert.doesNotMatch(index, /confirmed\//);
+  const required = [...index.matchAll(/require\("\.\/confirmed\/([^"]+)"\)/g)].map((m) => m[1]);
+  assert.deepEqual(required, ["access_role"]);
   assert.doesNotMatch(index, /import_(mapping|rows|batch_plan)/);
 });
 
