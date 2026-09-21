@@ -31,7 +31,11 @@ class FakeSendService implements WinnerSendService {
   int listCalls = 0;
   int getJobCalls = 0;
   int createCalls = 0;
-  int processCalls = 0;
+  int startCalls = 0;
+  int serverProcessed = 0;
+  final Set<String> dispatchActive = {};
+  final Map<String, String> haltedReason = {};
+  WinnerSendException? startError;
   int retryCalls = 0;
   final List<int?> expectedVersions = [];
 
@@ -83,6 +87,8 @@ class FakeSendService implements WinnerSendService {
     targetCount: jobTarget[jobId]!,
     counts: _counts(jobId),
     createdAt: DateTime.utc(2026, 11, 1, 1, 2),
+    dispatchActive: dispatchActive.contains(jobId),
+    dispatchHaltedReason: haltedReason[jobId],
   );
 
   void _settle(String jobId) {
@@ -204,21 +210,41 @@ class FakeSendService implements WinnerSendService {
     );
   }
 
+  /// サーバー側への引き渡し(希望の記録だけ。ここではメールは送られない)。冪等。
   @override
-  Future<ProcessResult> processJob(String jobId, {int limit = 50}) async {
-    processCalls++;
-    final pending =
-        states[jobId]!.entries
-            .where((e) => e.value == DeliveryState.pending)
-            .map((e) => e.key)
-            .toList()
-          ..sort();
-    final work = pending.take(limit).toList();
-    for (final id in work) {
-      states[jobId]![id] = outcomeFor(id);
+  Future<SendJob> startDelivery(String jobId) async {
+    startCalls++;
+    if (startError != null) throw startError!;
+    final pending = states[jobId]!.values.any(
+      (v) => v == DeliveryState.pending || v == DeliveryState.sending,
+    );
+    if (pending) {
+      dispatchActive.add(jobId);
+      haltedReason.remove(jobId);
     }
-    _settle(jobId);
-    return ProcessResult(job: _job(jobId), processed: work.length, skipped: 0);
+    return _job(jobId);
+  }
+
+  /// サーバーの定期実行(ブラウザとは無関係)を模す。引き渡されたジョブを最後まで処理する。
+  /// UI(Flutter)からは呼ばれない。テストが「サーバーが進めた」ことを表すために呼ぶ。
+  void serverSweep({int chunk = 20}) {
+    for (final jobId in dispatchActive.toList()) {
+      final pending =
+          states[jobId]!.entries
+              .where((e) => e.value == DeliveryState.pending)
+              .map((e) => e.key)
+              .toList()
+            ..sort();
+      for (final id in pending.take(chunk)) {
+        states[jobId]![id] = outcomeFor(id);
+      }
+      _settle(jobId);
+      final open = states[jobId]!.values.any(
+        (v) => v == DeliveryState.pending || v == DeliveryState.sending,
+      );
+      if (!open) dispatchActive.remove(jobId);
+      serverProcessed += pending.take(chunk).length;
+    }
   }
 
   @override
@@ -328,22 +354,16 @@ Widget sendPage(FakeSendService service, FakeMailService mail) => MaterialApp(
   ),
 );
 
-Widget jobPage(
-  FakeSendService service, {
-  String batchId = 'batchA',
-  bool autoStart = false,
-  int limit = 50,
-}) => MaterialApp(
-  home: WinnerSendJobPage(
-    service: service,
-    eventId: 'event1',
-    eventName: '架空イベント',
-    jobId: 'winner-$batchId',
-    autoStart: autoStart,
-    pollInterval: poll,
-    processLimit: limit,
-  ),
-);
+Widget jobPage(FakeSendService service, {String batchId = 'batchA'}) =>
+    MaterialApp(
+      home: WinnerSendJobPage(
+        service: service,
+        eventId: 'event1',
+        eventName: '架空イベント',
+        jobId: 'winner-$batchId',
+        pollInterval: poll,
+      ),
+    );
 
 Future<void> settle(WidgetTester tester) => tester.pumpAndSettle();
 
@@ -527,31 +547,46 @@ void main() {
       await tester.tap(find.text('キャンセル'));
       await settle(tester);
       expect(service.createCalls, 0);
-      expect(service.processCalls, 0);
+      expect(service.startCalls, 0);
     });
 
-    testWidgets('「送信を開始」で、確認したversionを添えてジョブを1つ作成し、送信状況画面へ進んで処理が完了する', (
-      tester,
-    ) async {
-      setPhone(tester, height: 4000);
-      final service = FakeSendService(batches: [committed('batchA', 1, 12)]);
-      await tester.pumpWidget(sendPage(service, FakeMailService()));
-      await settle(tester);
-      await previewFirst(tester);
-      await tester.tap(find.text('この取込回へ送信…'));
-      await settle(tester);
-      await tester.tap(find.text('送信を開始'));
-      await settle(tester);
-      expect(service.createCalls, 1);
-      expect(service.expectedVersions, [3]);
-      expect(find.text('送信状況'), findsOneWidget);
-      expect(service.processCalls, greaterThan(0));
-      expect(
-        tester.widget<Text>(find.byKey(const ValueKey('count-sent'))).data,
-        '12',
-      );
-      expect(find.byKey(const ValueKey('banner-completed')), findsOneWidget);
-    });
+    testWidgets(
+      '「送信を開始」で、確認したversionを添えてジョブを1つ作成し、サーバーへ引き渡す(1回)。ブラウザは処理を呼ばず、サーバーの処理が進むと状態が更新される',
+      (tester) async {
+        setPhone(tester, height: 4000);
+        final service = FakeSendService(batches: [committed('batchA', 1, 12)]);
+        await tester.pumpWidget(sendPage(service, FakeMailService()));
+        await settle(tester);
+        await previewFirst(tester);
+        await tester.tap(find.text('この取込回へ送信…'));
+        await settle(tester);
+        expect(find.textContaining('送信はサーバーが行い'), findsOneWidget);
+        await tester.tap(find.text('送信を開始'));
+        await settle(tester);
+        expect(service.createCalls, 1);
+        expect(service.expectedVersions, [3]);
+        expect(service.startCalls, 1, reason: 'サーバーへの引き渡しは1回');
+        expect(find.text('送信状況'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('banner-server-running')),
+          findsOneWidget,
+        );
+        expect(service.serverProcessed, 0, reason: '引き渡しの時点ではメールは送られない');
+        // サーバーの定期実行が進める(この画面はpollingで状態を取得するだけ)
+        service.serverSweep();
+        await tester.pump(poll);
+        await tester.pump();
+        expect(
+          tester.widget<Text>(find.byKey(const ValueKey('count-sent'))).data,
+          '12',
+        );
+        expect(find.byKey(const ValueKey('banner-completed')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('banner-server-running')),
+          findsNothing,
+        );
+      },
+    );
 
     testWidgets('連打しても二重にジョブ作成しない(作成中はボタンが無効)', (tester) async {
       setPhone(tester, height: 4000);
@@ -574,6 +609,7 @@ void main() {
       service.createGate!.complete();
       await settle(tester);
       expect(service.createCalls, 1);
+      expect(service.startCalls, 1, reason: '二重に引き渡さない');
     });
 
     testWidgets('確認した対象人数・テンプレートversionとジョブの内容が違えば、処理を始めない(メールは送らない)', (
@@ -589,7 +625,7 @@ void main() {
       await settle(tester);
       await tester.tap(find.text('送信を開始'));
       await settle(tester);
-      expect(service.processCalls, 0);
+      expect(service.startCalls, 0);
       expect(find.textContaining('メールは送信していません'), findsOneWidget);
     });
 
@@ -611,7 +647,7 @@ void main() {
       await tester.tap(find.text('送信を開始'));
       await settle(tester);
       expect(find.textContaining('テンプレートのバージョンが変更されています'), findsOneWidget);
-      expect(service.processCalls, 0);
+      expect(service.startCalls, 0);
       expect(
         service.listCalls,
         greaterThan(listBefore),
@@ -637,7 +673,7 @@ void main() {
       expect(find.text('送信状況を開く'), findsOneWidget);
       expect(find.textContaining('この取込回へ送信'), findsNothing);
       expect(service.createCalls, 1);
-      expect(service.processCalls, 0, reason: '応答を受け取っていないので勝手に処理しない');
+      expect(service.startCalls, 0, reason: '応答を受け取っていないので勝手に引き渡さない');
     });
   });
 
@@ -773,7 +809,12 @@ void main() {
         await tester.tap(find.text('失敗分を再送'));
         await settle(tester);
         expect(service.retryCalls, 1);
-        expect(service.processCalls, 1);
+        expect(service.startCalls, 1, reason: '再送もサーバーへ引き渡す(ブラウザは処理しない)');
+        expect(service.serverProcessed, 0);
+        // サーバーの定期実行が、failedからpendingに戻った分だけを処理する
+        service.serverSweep();
+        await tester.pump(poll);
+        await tester.pump();
         String count(String s) =>
             tester.widget<Text>(find.byKey(ValueKey('count-$s'))).data!;
         expect(
@@ -793,31 +834,63 @@ void main() {
       },
     );
 
-    testWidgets('未送信分の送信を続ける: 確認ダイアログ → 複数回の処理で全件処理 → 完了。処理中は操作ボタンが無効', (
-      tester,
-    ) async {
+    testWidgets(
+      '未送信が残るのに、サーバーが処理していない(未引き渡し・安全停止)場合だけ「サーバーで送信を再開」が出る。確認ダイアログ → 引き渡し1回。ブラウザは処理しない',
+      (tester) async {
+        setPhone(tester);
+        final service = FakeSendService(batches: [committed('batchA', 1, 25)])
+          ..seedJob('batchA', ids({DeliveryState.pending: 25}));
+        await tester.pumpWidget(jobPage(service));
+        await settle(tester);
+        expect(
+          find.byKey(const ValueKey('banner-server-halted')),
+          findsOneWidget,
+        );
+        expect(find.text('サーバーで送信を再開(25件)'), findsOneWidget);
+        await tester.tap(find.text('サーバーで送信を再開(25件)'));
+        await settle(tester);
+        expect(find.text('未送信：25件'), findsOneWidget);
+        expect(find.text('テンプレート：v3'), findsOneWidget);
+        await tester.tap(find.text('送信を再開'));
+        await settle(tester);
+        expect(service.startCalls, 1);
+        expect(service.serverProcessed, 0, reason: '処理はサーバーが行う。ブラウザは呼ばない');
+        expect(
+          find.byKey(const ValueKey('banner-server-running')),
+          findsOneWidget,
+        );
+        expect(
+          find.text('サーバーで送信を再開(25件)'),
+          findsNothing,
+          reason: '引き渡し後は再開ボタンを出さない',
+        );
+        // サーバーが数回のsweepで最後まで進める(ブラウザの操作なし)
+        service.serverSweep(chunk: 10);
+        service.serverSweep(chunk: 10);
+        service.serverSweep(chunk: 10);
+        await tester.pump(poll);
+        await tester.pump();
+        expect(
+          tester.widget<Text>(find.byKey(const ValueKey('count-sent'))).data,
+          '25',
+        );
+        expect(find.byKey(const ValueKey('banner-completed')), findsOneWidget);
+      },
+    );
+
+    testWidgets('サーバーが停止した理由(安全のための自動停止)が表示され、原因確認後に再開できる', (tester) async {
       setPhone(tester);
-      final service = FakeSendService(batches: [committed('batchA', 1, 25)])
-        ..seedJob('batchA', ids({DeliveryState.pending: 25}));
-      await tester.pumpWidget(jobPage(service, limit: 10));
+      final service = FakeSendService(batches: [committed('batchA', 1, 4)])
+        ..seedJob('batchA', ids({DeliveryState.pending: 4}))
+        ..haltedReason['winner-batchA'] = 'no-progress';
+      await tester.pumpWidget(jobPage(service));
       await settle(tester);
-      expect(find.text('未送信分の送信を続ける(25件)'), findsOneWidget);
-      await tester.tap(find.text('未送信分の送信を続ける(25件)'));
-      await settle(tester);
-      expect(find.text('未送信：25件'), findsOneWidget);
-      expect(find.text('テンプレート：v3'), findsOneWidget);
-      await tester.tap(find.text('送信を続ける'));
-      await settle(tester);
-      expect(service.processCalls, 3, reason: '10+10+5');
-      expect(
-        tester.widget<Text>(find.byKey(const ValueKey('count-sent'))).data,
-        '25',
-      );
-      expect(find.byKey(const ValueKey('banner-completed')), findsOneWidget);
-      expect(find.text('未送信分の送信を続ける(0件)'), findsNothing);
+      expect(find.textContaining('安全のため自動の送信処理を停止しました'), findsOneWidget);
+      expect(find.textContaining('一定時間、処理が進みませんでした'), findsOneWidget);
+      expect(find.text('サーバーで送信を再開(4件)'), findsOneWidget);
     });
 
-    testWidgets('作成直後(autoStart)は、確認済みの操作として自動で処理が始まる。再読込した画面は自動では送信を始めない', (
+    testWidgets('画面を開いただけ(再読込・別端末)では引き渡しも送信もしない。サーバーが処理中のジョブには再開ボタンが出ない', (
       tester,
     ) async {
       setPhone(tester);
@@ -825,13 +898,82 @@ void main() {
         ..seedJob('batchA', ids({DeliveryState.pending: 4}));
       await tester.pumpWidget(jobPage(service));
       await settle(tester);
-      expect(service.processCalls, 0, reason: 'リロードでは自動送信しない(ボタンで明示的に再開)');
-      expect(find.text('未送信分の送信を続ける(4件)'), findsOneWidget);
+      expect(service.startCalls, 0, reason: '開くだけでは何もしない');
       await tester.pumpWidget(const SizedBox());
-      await tester.pumpWidget(jobPage(service, autoStart: true));
+      service.dispatchActive.add('winner-batchA'); // サーバーは処理中
+      await tester.pumpWidget(jobPage(service));
       await settle(tester);
-      expect(service.processCalls, 1);
+      expect(service.startCalls, 0);
+      expect(
+        find.byKey(const ValueKey('banner-server-running')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('サーバーで送信を再開'), findsNothing);
+      expect(find.textContaining('この画面を閉じても'), findsWidgets);
     });
+
+    testWidgets(
+      'ブラウザを閉じても配送は継続する: 引き渡し後に画面を破棄 → サーバーだけで全件処理 → 別画面(再ログイン相当)で完了を確認できる',
+      (tester) async {
+        setPhone(tester);
+        final service = FakeSendService(batches: [committed('batchA', 1, 30)])
+          ..seedJob('batchA', ids({DeliveryState.pending: 30}));
+        await tester.pumpWidget(jobPage(service));
+        await settle(tester);
+        await tester.tap(find.text('サーバーで送信を再開(30件)'));
+        await settle(tester);
+        await tester.tap(find.text('送信を再開'));
+        await settle(tester);
+        expect(service.startCalls, 1);
+        // ブラウザを閉じる(画面を破棄。以後、UIからの呼び出しは一切ない)
+        await tester.pumpWidget(const SizedBox());
+        final getsWhileClosed = service.getJobCalls;
+        service.serverSweep(chunk: 10);
+        service.serverSweep(chunk: 10);
+        service.serverSweep(chunk: 10);
+        await tester.pump(poll * 3);
+        expect(
+          service.getJobCalls,
+          getsWhileClosed,
+          reason: '閉じた画面はpollingしない',
+        );
+        expect(service.startCalls, 1, reason: '引き渡しは1回だけ。UIが処理を呼ぶことはない');
+        expect(service.serverProcessed, 30, reason: 'サーバーだけで全件処理された');
+        // 後から別の端末で開く: サーバーの状態(完了)がそのまま表示される
+        await tester.pumpWidget(jobPage(service));
+        await settle(tester);
+        expect(
+          tester.widget<Text>(find.byKey(const ValueKey('count-sent'))).data,
+          '30',
+        );
+        expect(find.byKey(const ValueKey('banner-completed')), findsOneWidget);
+        expect(service.startCalls, 1);
+      },
+    );
+
+    testWidgets(
+      'pollingが止まっても(画面が古くても)サーバーの配送は継続する。pollingは状態の再取得だけで、処理を起動しない',
+      (tester) async {
+        setPhone(tester);
+        final service = FakeSendService(batches: [committed('batchA', 1, 8)])
+          ..seedJob('batchA', ids({DeliveryState.pending: 8}));
+        service.dispatchActive.add('winner-batchA');
+        await tester.pumpWidget(jobPage(service));
+        await tester.pump();
+        await tester.pump();
+        final before = service.getJobCalls;
+        // 画面のpollingは何度動いても、サーバーの処理を進めない(処理はサーバーの定期実行だけ)
+        await tester.pump(poll);
+        await tester.pump();
+        expect(service.getJobCalls, greaterThan(before));
+        expect(service.serverProcessed, 0);
+        expect(service.startCalls, 0);
+        service.serverSweep();
+        await tester.pump(poll);
+        await tester.pump();
+        expect(find.byKey(const ValueKey('banner-completed')), findsOneWidget);
+      },
+    );
 
     testWidgets('画面の再読込: サーバーの状態(送信中・送信済み・失敗・結果確認)がそのまま復元される(ローカル状態に依存しない)', (
       tester,
@@ -984,13 +1126,13 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.text('準備を完了する'), findsOneWidget);
-      expect(find.textContaining('未送信分の送信を続ける'), findsNothing);
+      expect(find.textContaining('サーバーで送信を再開'), findsNothing);
       await tester.tap(find.text('準備を完了する'));
       await tester.pump();
       await tester.pump();
       expect(service.createCalls, 1);
       expect(service.expectedVersions, [3]);
-      expect(service.processCalls, 0);
+      expect(service.startCalls, 0, reason: '準備の完了は引き渡しではない');
     });
 
     testWidgets('宛先の一覧: 氏名・参加者ID・状態を表示し、状態で絞り込める。メールアドレスは無い', (tester) async {
@@ -1176,12 +1318,12 @@ void main() {
             }, 200);
           }),
         );
-        await s.processJob('winner-a', limit: 10);
+        await s.startDelivery('winner-a');
         await s.retryFailed('winner-a');
         await s.listBatches('e');
         await s.getJob('winner-a', itemStatus: DeliveryState.failed);
         expect(urls, [
-          '/processConfirmedWinnerMailJob',
+          '/startConfirmedWinnerMailDelivery',
           '/retryFailedConfirmedWinnerMails',
           '/listConfirmedWinnerMailBatches',
           '/getConfirmedWinnerMailJob',
@@ -1363,6 +1505,62 @@ void main() {
         expect(source.contains('registeredCount'), isFalse, reason: f);
         expect(source.contains('.email'), isFalse, reason: 'メールアドレスは扱わない');
       }
+    });
+
+    test(
+      'Flutterは配送processorを呼ばない(処理callableの呼び出し・処理ループが無い)。ブラウザは状態表示と引き渡しだけ',
+      () {
+        for (final f in files) {
+          final source = read(f);
+          expect(
+            source.contains('processConfirmedWinnerMailJob'),
+            isFalse,
+            reason: f,
+          );
+          expect(source.contains('processJob'), isFalse, reason: f);
+          expect(source.contains('ProcessResult'), isFalse, reason: f);
+          expect(
+            source.contains('while (mounted)'),
+            isFalse,
+            reason: '処理ループなし: $f',
+          );
+        }
+        final job = read('lib/confirmed/winner_send_job_page.dart');
+        expect(job.contains('startDelivery('), isTrue);
+        expect(
+          job.contains('Timer.periodic'),
+          isFalse,
+          reason: 'pollingは1回ずつ再取得(終端・非処理中で止まる)',
+        );
+      },
+    );
+
+    test('サーバーの状態(dispatch)をモデルに反映する: active・停止理由', () {
+      final job = SendJob.fromView({
+        'jobId': 'winner-a',
+        'batchId': 'a',
+        'status': 'ready',
+        'templateVersion': 1,
+        'targetCount': 2,
+        'counts': {'pending': 2},
+        'conservation': {'consistent': true, 'completedConsistent': true},
+        'dispatch': {
+          'active': false,
+          'haltedReason': 'run-limit',
+          'lastRunAt': '2026-11-01T00:00:00.000Z',
+        },
+      });
+      expect(job.dispatchActive, isFalse);
+      expect(job.dispatchHaltedReason, 'run-limit');
+      expect(job.dispatchLastRunAt, isNotNull);
+      expect(
+        SendJob.fromView({
+          'jobId': 'j',
+          'status': 'ready',
+          'dispatch': {'active': true},
+        }).dispatchActive,
+        isTrue,
+      );
     });
 
     test('再送ボタンの条件: unknown・sentを対象にする再送操作が無い(retryFailed=failedだけ)', () {

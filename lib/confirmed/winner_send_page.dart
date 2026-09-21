@@ -161,7 +161,7 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
         '対象：${batch.label}',
         '送信対象：${batch.targetCount}件',
         'テンプレート：v$version',
-        'この操作でメールが送信されます。',
+        'この操作でメールが送信されます(送信はサーバーが行い、この画面を閉じても続きます)。',
       ],
       confirmLabel: '送信を開始',
     );
@@ -198,10 +198,22 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
       await _load(keepError: true);
       return;
     }
-    await _openJob(job.jobId, autoStart: true);
+    // サーバー側の継続処理へ引き渡す。以後の配送はブラウザを閉じても続く(ブラウザは状態を表示するだけ)。
+    try {
+      await widget.service.startDelivery(job.jobId);
+    } on WinnerSendException catch (e) {
+      if (mounted) {
+        setState(
+          () => error =
+              'ジョブは作成されましたが、サーバーでの送信開始に失敗しました(${e.message})。送信状況画面から再開できます。',
+        );
+      }
+    }
+    if (!mounted) return;
+    await _openJob(job.jobId);
   }
 
-  Future<void> _openJob(String jobId, {bool autoStart = false}) async {
+  Future<void> _openJob(String jobId) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => WinnerSendJobPage(
@@ -209,7 +221,6 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
           eventId: batchList!.eventId,
           eventName: batchList!.eventName,
           jobId: jobId,
-          autoStart: autoStart,
           pollInterval: widget.pollInterval,
         ),
       ),

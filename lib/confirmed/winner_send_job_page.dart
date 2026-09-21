@@ -65,6 +65,16 @@ class KeyValueRow extends StatelessWidget {
   );
 }
 
+/// サーバーが自動処理を停止した理由(dispatchHaltedReason)の表示。
+String haltReasonLabel(String code) => switch (code) {
+  'no-progress' => '一定時間、処理が進みませんでした',
+  'run-limit' => '実行回数の上限に達しました',
+  'conservation-violated' => '件数の保存則が合いません',
+  'job-not-ready' => 'ジョブの状態が不正です',
+  'event-not-confirmed' => 'イベントの状態が不正です',
+  _ => code,
+};
+
 Color deliveryColor(DeliveryState state) => switch (state) {
   DeliveryState.pending => const Color(0xff5c6670),
   DeliveryState.sending => const Color(0xff1d4ed8),
@@ -126,8 +136,9 @@ class DeliveryCountsView extends StatelessWidget {
 /// 送信ジョブの詳細・進行状況(admin専用)。状態はすべてサーバーから取得し、画面の再読込でも復元できる
 /// (ローカル状態を正本にしない)。Firestoreは直接読まず、callableのpollingで更新する(終端状態で停止)。
 ///
-/// 処理(メールの送信)は、管理者が確認ダイアログで確定した操作の間だけ、この画面が処理callableを繰り返し呼ぶ。
-/// ブラウザを閉じると処理は止まるが、状態はサーバーに残り、再度開いて「続ける」で再開できる(二重送信にはならない)。
+/// この画面は配送処理の実行主体ではない。管理者が確認ダイアログで確定すると、サーバー側の継続処理へ引き渡す(startDelivery)だけで、
+/// 以後の配送はブラウザを閉じても、サーバーの定期実行が最後まで進める。この画面は状態を表示する(pollingで再取得)。
+/// 「サーバーで送信を再開」は、サーバーが安全のため自動処理を止めた場合などに、管理者が明示的に引き渡し直すための操作(冪等)。
 class WinnerSendJobPage extends StatefulWidget {
   const WinnerSendJobPage({
     super.key,
@@ -135,19 +146,13 @@ class WinnerSendJobPage extends StatefulWidget {
     required this.eventId,
     required this.jobId,
     this.eventName = '',
-    this.autoStart = false,
     this.pollInterval = const Duration(seconds: 5),
-    this.processLimit = 50,
   });
   final WinnerSendService service;
   final String eventId;
   final String jobId;
   final String eventName;
-
-  /// 一覧画面の確認ダイアログで送信を確定して開いた場合、読み込み後に処理を始める。
-  final bool autoStart;
   final Duration pollInterval;
-  final int processLimit;
 
   @override
   State<WinnerSendJobPage> createState() => _WinnerSendJobPageState();
@@ -159,17 +164,15 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
   String? nextAfter;
   DeliveryState? filter;
   bool loading = true;
+  // 引き渡し・準備の要求を送信中(二重クリック防止。サーバー側も冪等)。配送そのものはサーバーが行う。
   bool running = false;
-  bool stopRequested = false;
   String? error;
   String? notice;
   Timer? pollTimer;
-  bool autoStartPending = false;
 
   @override
   void initState() {
     super.initState();
-    autoStartPending = widget.autoStart;
     _reload();
   }
 
@@ -179,11 +182,13 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
     super.dispose();
   }
 
-  bool get _canContinue =>
+  // サーバーが送信を続けていない(未引き渡し・安全のため停止)のに未送信が残っている場合の、明示的な(再)引き渡し。
+  bool get _canHandOff =>
       job != null &&
       job!.trustworthy &&
       job!.state == JobState.ready &&
       job!.counts.pending > 0 &&
+      !job!.dispatchActive &&
       !running;
   bool get _canRetry =>
       job != null &&
@@ -215,10 +220,6 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
       if (mounted) setState(() => loading = false);
     }
     _schedulePoll();
-    if (autoStartPending && mounted) {
-      autoStartPending = false;
-      if (_canContinue) await _runProcessing();
-    }
   }
 
   // 処理中(sending)の項目がある間だけ、間隔を空けて再取得する。終端状態(completed/failed)では止める。
@@ -227,7 +228,10 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
     pollTimer = null;
     final current = job;
     if (!mounted || current == null || running || current.isTerminal) return;
-    if (current.counts.sending == 0 && current.state != JobState.preparing) {
+    // サーバーが処理中(dispatchActive)・送信中(sending)・準備中の間だけ再取得する。
+    if (!current.dispatchActive &&
+        current.counts.sending == 0 &&
+        current.state != JobState.preparing) {
       return;
     }
     pollTimer = Timer(widget.pollInterval, () {
@@ -257,36 +261,20 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
     }
   }
 
-  Future<void> _runProcessing({bool retry = false}) async {
+  // サーバー側の継続処理へ引き渡す。retry=trueなら、先に「失敗分だけ」を未送信へ戻す(sent・unknownは対象外)。
+  // 配送は、この後ブラウザを閉じてもサーバーが最後まで進める(この画面から処理を繰り返し呼ぶことはしない)。
+  Future<void> _handOff({bool retry = false}) async {
     if (running) return;
     setState(() {
       running = true;
-      stopRequested = false;
       error = null;
       notice = null;
     });
-    pollTimer?.cancel();
     try {
-      if (retry) {
-        final progress = await widget.service.retryFailed(widget.jobId);
-        if (mounted) setState(() => job = job!.withProgress(progress));
-      }
-      while (mounted) {
-        final result = await widget.service.processJob(
-          widget.jobId,
-          limit: widget.processLimit,
-        );
-        if (!mounted) return;
-        setState(() => job = job!.withProgress(result.job));
-        if (stopRequested) {
-          notice = '処理を停止しました。未送信分は「送信を続ける」で再開できます。';
-          break;
-        }
-        if (!result.job.trustworthy || result.job.counts.pending == 0) break;
-        if (result.processed == 0) {
-          notice = 'これ以上処理を進められませんでした。状態を更新して確認してください。';
-          break;
-        }
+      if (retry) await widget.service.retryFailed(widget.jobId);
+      await widget.service.startDelivery(widget.jobId);
+      if (mounted) {
+        setState(() => notice = 'サーバーで送信処理を開始しました。この画面を閉じても、処理は続きます。');
       }
     } on WinnerSendException catch (e) {
       if (mounted) setState(() => error = e.message);
@@ -301,20 +289,21 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
     if (mounted) await _reload(silent: true);
   }
 
-  Future<void> _confirmContinue() async {
+  Future<void> _confirmHandOff() async {
     final current = job!;
     final ok = await confirmSendAction(
       context,
-      title: '未送信分の送信を続けます',
+      title: 'サーバーで送信を再開します',
       lines: [
         if (widget.eventName.isNotEmpty) 'イベント：${widget.eventName}',
         '対象：${current.batchLabel.isEmpty ? current.batchId : current.batchLabel}',
         '未送信：${current.counts.pending}件',
         'テンプレート：v${current.templateVersion}',
+        '送信はサーバーが行います(この画面を閉じても続きます)。',
       ],
-      confirmLabel: '送信を続ける',
+      confirmLabel: '送信を再開',
     );
-    if (ok && mounted) await _runProcessing();
+    if (ok && mounted) await _handOff();
   }
 
   Future<void> _confirmRetry() async {
@@ -326,10 +315,11 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
         '再送対象：失敗 ${current.counts.failed}件',
         '送信済み・結果確認が必要な宛先は再送しません。',
         'テンプレート：v${current.templateVersion}(このジョブに固定)',
+        '再送はサーバーが行います(この画面を閉じても続きます)。',
       ],
       confirmLabel: '失敗分を再送',
     );
-    if (ok && mounted) await _runProcessing(retry: true);
+    if (ok && mounted) await _handOff(retry: true);
   }
 
   Future<void> _finishPreparation() async {
@@ -457,6 +447,23 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
                   const Color(0xff067647),
                   key: const ValueKey('banner-completed'),
                 ),
+              if (current.state == JobState.ready && current.dispatchActive)
+                _banner(
+                  'サーバーで送信処理中です。この画面を閉じても、処理は最後まで続きます(この画面は状態を表示しています)。',
+                  const Color(0xff1d4ed8),
+                  key: const ValueKey('banner-server-running'),
+                ),
+              if (current.state == JobState.ready &&
+                  !current.dispatchActive &&
+                  current.counts.pending > 0)
+                _banner(
+                  current.dispatchHaltedReason == null
+                      ? '未送信が残っていますが、サーバーでの送信処理は開始されていません。「サーバーで送信を再開」で引き渡してください。'
+                      : 'サーバーが安全のため自動の送信処理を停止しました(${haltReasonLabel(current.dispatchHaltedReason!)})。'
+                            '原因を確認のうえ、「サーバーで送信を再開」で再開できます。',
+                  const Color(0xffb54708),
+                  key: const ValueKey('banner-server-halted'),
+                ),
               if (current.state == JobState.preparing)
                 _banner(
                   'ジョブの準備が完了していません。「準備を完了する」で、同じ取込回の続きから完了できます(メールは送信されません)。',
@@ -473,10 +480,10 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                if (_canContinue)
+                if (_canHandOff)
                   FilledButton(
-                    onPressed: _confirmContinue,
-                    child: Text('未送信分の送信を続ける(${current.counts.pending}件)'),
+                    onPressed: _confirmHandOff,
+                    child: Text('サーバーで送信を再開(${current.counts.pending}件)'),
                   ),
                 if (_canRetry)
                   OutlinedButton(
@@ -488,13 +495,6 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
                     onPressed: _finishPreparation,
                     child: const Text('準備を完了する'),
                   ),
-                if (running && current.state != JobState.preparing)
-                  OutlinedButton(
-                    onPressed: stopRequested
-                        ? null
-                        : () => setState(() => stopRequested = true),
-                    child: Text(stopRequested ? '停止しています…' : '処理を停止'),
-                  ),
                 TextButton(
                   onPressed: running || loading ? null : () => _reload(),
                   child: const Text('状態を更新'),
@@ -504,7 +504,7 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
             if (running)
               const Padding(
                 padding: EdgeInsets.only(top: 10),
-                child: Text('送信処理中です。この画面を開いたままお待ちください(閉じても状態は保存され、再開できます)。'),
+                child: Text('サーバーへ引き渡し中です…'),
               ),
           ],
         ),

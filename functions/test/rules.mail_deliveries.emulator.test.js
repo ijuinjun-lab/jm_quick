@@ -32,6 +32,9 @@ describe("Firestore Rules: 当選メール(ローカルEmulator)", {skip: skipRe
         assert.equal(await emu.create("sendJobs", "winner-b2", {eventId: "e-conf", status: "completed"}, token), 403);
         assert.equal(await emu.update("sendJobs/winner-b1", {status: "completed", sentCount: 99}, token), 403);
         assert.equal(await emu.update("sendJobs/winner-b1", {templateVersion: 2}, token), 403);
+        // サーバー側の継続処理の状態(dispatch*)も、クライアントから書き換えられない(配送を勝手に起動・停止できない)
+        assert.equal(await emu.update("sendJobs/winner-b1", {dispatchActive: true, dispatchRequestSeq: 1}, token), 403);
+        assert.equal(await emu.update("sendJobs/winner-b1", {dispatchActive: false, dispatchHaltedReason: null, dispatchWorkerId: null}, token), 403);
         assert.equal(await emu.remove("sendJobs/winner-b1", token), 403);
       });
       test("sendJobs/{id}/items: get / list / create / update / delete がすべて拒否される", async () => {

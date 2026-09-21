@@ -12,6 +12,7 @@ const {buildMailSnapshot} = require("./mail_view_model");
 const {loadConfirmedEvent} = require("./winner_mail_api");
 const {composeWinnerMailFor, buildMailApiMessage} = require("./winner_mail_message");
 const {createSendJobEngine, DELIVERY} = require("./send_jobs");
+const {createDeliveryWorker} = require("./delivery_worker");
 const {toDate} = require("./mail_view_model");
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -30,10 +31,12 @@ function parseKeys(data, allowed) {
   return data;
 }
 
-function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl, getTransport, engineOptions = {}}) {
+function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl, getTransport, engineOptions = {}, workerOptions = {}}) {
   const engine = createSendJobEngine({
     serverTimestamp, generateQrPng, getAppBaseUrl, composeMail: composeWinnerMailFor, buildMessage: buildMailApiMessage, ...engineOptions,
   });
+  // サーバー側の継続処理(引き渡し・定期実行)。配送の状態・claim・leaseは engine(send_jobs.js)が正本。
+  const worker = createDeliveryWorker({engine, serverTimestamp, ...(engineOptions.now ? {now: engineOptions.now} : {}), ...workerOptions});
 
   const parseJobId = (value) => {
     if (typeof value !== "string" || !JOB_ID_PATTERN.test(value)) throw invalid("invalid-job-id");
@@ -85,6 +88,18 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     return engine.processJob({db, jobId, limit, transport});
   }
 
+  // 管理者の「送信開始」: サーバー側の継続処理へ引き渡す(希望をsendJobsに記録するだけ。メールはここでは送らない。冪等)。
+  // 引き渡した後は、ブラウザを閉じても、定期実行(runSweep)が最後まで処理する。
+  async function startDelivery({identity, data}) {
+    const request = parseKeys(data, ["jobId"]);
+    return worker.requestDelivery({db: getDb(), identity, jobId: parseJobId(request.jobId)});
+  }
+
+  // 定期実行の入口(内部処理。ブラウザ・callableからは呼べない): dispatchActiveのジョブだけを処理する。
+  async function runSweep() {
+    return worker.sweep({db: getDb(), getTransport});
+  }
+
   // 失敗(確実に渡っていない)の項目だけを送信待ちに戻す。sent・unknownは対象外。送信はprocessで行う。
   async function retryFailed({data}) {
     const request = parseKeys(data, ["jobId"]);
@@ -113,6 +128,12 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       excludedInactiveCount: summary.excludedInactiveCount,
       counts: {pending: summary.pendingCount, sending: summary.sendingCount, sent: summary.sentCount, failed: summary.failedCount, unknown: summary.unknownCount},
       createdAt: iso(jobDoc.createdAt), completedAt: iso(jobDoc.completedAt),
+      // サーバー側の継続処理の状態(active=サーバーが送信を続けている / haltedReason=安全のため停止した理由)
+      dispatch: {
+        active: jobDoc.dispatchActive === true, haltedReason: typeof jobDoc.dispatchHaltedReason === "string" ? jobDoc.dispatchHaltedReason : null,
+        requestedAt: iso(jobDoc.dispatchRequestedAt), lastRunAt: iso(jobDoc.dispatchLastRunAt), finishedAt: iso(jobDoc.dispatchFinishedAt),
+        runCount: Number.isInteger(jobDoc.dispatchRunCount) ? jobDoc.dispatchRunCount : 0,
+      },
       conservation: conservationOf(summary),
     };
   }
@@ -216,7 +237,7 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     };
   }
 
-  return {createJob, processJob, retryFailed, listBatches, getJob, engine};
+  return {createJob, processJob, retryFailed, startDelivery, runSweep, listBatches, getJob, engine, worker};
 }
 
 module.exports = {createWinnerSendApi};

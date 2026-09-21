@@ -120,11 +120,17 @@ class SendJob {
     this.completedAt,
     this.serverConsistent = true,
     this.serverCompletedConsistent = true,
+    this.dispatchActive = false,
+    this.dispatchHaltedReason,
+    this.dispatchLastRunAt,
   });
 
   factory SendJob.fromView(Map<String, dynamic> json) {
     final conservation = json['conservation'] is Map
         ? json['conservation'] as Map
+        : const {};
+    final dispatch = json['dispatch'] is Map
+        ? json['dispatch'] as Map
         : const {};
     return SendJob(
       jobId: json['jobId'] as String? ?? '',
@@ -144,6 +150,11 @@ class SendJob {
           : null,
       serverConsistent: conservation['consistent'] == true,
       serverCompletedConsistent: conservation['completedConsistent'] == true,
+      dispatchActive: dispatch['active'] == true,
+      dispatchHaltedReason: dispatch['haltedReason'] as String?,
+      dispatchLastRunAt: dispatch['lastRunAt'] is String
+          ? DateTime.tryParse(dispatch['lastRunAt'] as String)
+          : null,
     );
   }
 
@@ -157,6 +168,7 @@ class SendJob {
     excludedInactiveCount:
         (json['excludedInactiveCount'] as num?)?.toInt() ?? 0,
     counts: DeliveryCounts.fromFlat(json),
+    dispatchActive: json['dispatchActive'] == true,
   );
 
   final String jobId;
@@ -173,6 +185,13 @@ class SendJob {
   final DateTime? completedAt;
   final bool serverConsistent;
   final bool serverCompletedConsistent;
+
+  /// サーバーが送信を続けている(定期実行が処理中)。ブラウザが閉じられていても処理は続く。
+  final bool dispatchActive;
+
+  /// サーバーが安全のため自動処理を止めた理由(例: no-progress / run-limit / conservation-violated)。
+  final String? dispatchHaltedReason;
+  final DateTime? dispatchLastRunAt;
 
   /// 件数の保存則: 未送信+送信中+送信済み+失敗+結果確認 == 対象件数(サーバーの判定とクライアントの再計算の両方)。
   bool get countsConsistent => serverConsistent && counts.total == targetCount;
@@ -195,20 +214,6 @@ class SendJob {
 
   bool get isTerminal =>
       state == JobState.completed || state == JobState.failed;
-
-  /// process / retry の応答(件数と状態だけを持つ)を、既に画面にある表示情報(取込回名・作成日時など)へ反映する。
-  SendJob withProgress(SendJob progress) => SendJob(
-    jobId: jobId,
-    batchId: batchId,
-    batchLabel: batchLabel,
-    state: progress.state,
-    templateVersion: templateVersion,
-    targetCount: progress.targetCount,
-    counts: progress.counts,
-    excludedInactiveCount: excludedInactiveCount,
-    createdAt: createdAt,
-    completedAt: completedAt,
-  );
 }
 
 class SendBatch {
@@ -351,18 +356,6 @@ class SendJobDetail {
   final String? nextAfter;
 }
 
-/// process の応答(1回の処理後のジョブの状態)。
-class ProcessResult {
-  const ProcessResult({
-    required this.job,
-    required this.processed,
-    required this.skipped,
-  });
-  final SendJob job;
-  final int processed;
-  final int skipped;
-}
-
 /// 当選メール送信管理(admin専用)。状態はすべてサーバーから取得する(Firestoreを直接読まない)。
 /// 対象者の計算・件数・状態の判定はサーバーが行い、クライアントはそれを表示する。
 abstract class WinnerSendService {
@@ -383,10 +376,11 @@ abstract class WinnerSendService {
     required int expectedTemplateVersion,
   });
 
-  /// 未送信の項目を最大limit件処理する(実際にメールを送る操作)。
-  Future<ProcessResult> processJob(String jobId, {int limit = 50});
+  /// サーバー側の継続処理へ引き渡す(希望を記録するだけ。冪等)。以後の配送は、ブラウザを閉じても定期実行が最後まで進める。
+  /// ブラウザは配送の実行主体ではない(処理を繰り返し呼び出す入口は、この画面には無い)。
+  Future<SendJob> startDelivery(String jobId);
 
-  /// failedの項目だけを未送信に戻す(sent・unknownは対象外)。送信は processJob で行う。
+  /// failedの項目だけを未送信に戻す(sent・unknownは対象外)。送信はサーバー側の継続処理(startDelivery)が行う。
   Future<SendJob> retryFailed(String jobId);
 }
 
@@ -440,17 +434,9 @@ class CallableWinnerSendService implements WinnerSendService {
   );
 
   @override
-  Future<ProcessResult> processJob(String jobId, {int limit = 50}) async {
-    final result = await _call('processConfirmedWinnerMailJob', {
-      'jobId': jobId,
-      'limit': limit,
-    });
-    return ProcessResult(
-      job: SendJob.fromFlat(result),
-      processed: (result['processed'] as num?)?.toInt() ?? 0,
-      skipped: (result['skipped'] as num?)?.toInt() ?? 0,
-    );
-  }
+  Future<SendJob> startDelivery(String jobId) async => SendJob.fromFlat(
+    await _call('startConfirmedWinnerMailDelivery', {'jobId': jobId}),
+  );
 
   @override
   Future<SendJob> retryFailed(String jobId) async => SendJob.fromFlat(

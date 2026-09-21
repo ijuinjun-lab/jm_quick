@@ -811,6 +811,18 @@ exports.previewConfirmedWinnerMail = confirmedCallable("admin", winnerMailApi.pr
 exports.createConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.createJob, {timeoutSeconds: 300});
 exports.processConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.processJob, {secrets: [mailApiKey], timeoutSeconds: 300});
 exports.retryFailedConfirmedWinnerMails = confirmedCallable("admin", winnerSendApi.retryFailed, {timeoutSeconds: 120});
+// サーバー側の継続処理(Phase 9A)。管理者の「送信開始」は、希望(dispatchActive)をsendJobsに記録するだけ。
+// 実際の配送は、下の定期実行が、ブラウザとは無関係に最後まで進める。配送の状態・claim・leaseは従来のsendJobs/mailDeliveriesが正本。
+exports.startConfirmedWinnerMailDelivery = confirmedCallable("admin", winnerSendApi.startDelivery, {timeoutSeconds: 60});
+// 内部の定期実行(ブラウザ・callableからは起動できない)。旧mailJobsのSchedulerとは別のconfirmed専用。mail-apiのSecretは従来の注入方式のまま。
+// maxInstances: 1 で同時実行を1つに抑える(at-least-onceでも二重に動かさない。最終防御はitem単位のclaim)。
+exports.sweepConfirmedMailDelivery = onSchedule(
+  {schedule: "every 1 minutes", timeZone: "Asia/Tokyo", region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 300, maxInstances: 1},
+  async () => {
+    const results = await winnerSendApi.runSweep();
+    console.log("confirmed mail delivery sweep", {jobs: results.length, processed: results.reduce((n, r) => n + (r.processed || 0), 0)});
+  },
+);
 // 送信管理画面用の読み取り専用API(admin専用)。Flutterはsendjobs/items/mailDeliveriesをFirestoreから直接読まず、必ずこれ経由で状態を取得する。
 exports.listConfirmedWinnerMailBatches = confirmedCallable("admin", winnerSendApi.listBatches, {timeoutSeconds: 120});
 exports.getConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.getJob, {timeoutSeconds: 60});

@@ -16,6 +16,8 @@ const LEGACY_EXPORTS = ["sendParticipantMail", "registerWalkIn", "sendScheduledC
 const ACCESS_LEVELS = ["admin", "staffOrAdmin", "authenticated"];
 // ログインなしで公開してよいのは、参加者本人の「参加証の閲覧(読み取り専用)」だけ。増やさない。
 const PUBLIC_PASS_EXPORTS = ["getConfirmedParticipantPass"];
+// confirmedの内部の定期実行(ブラウザ・callableから起動できない)。増やす場合は、認可のない入口にならないことを確認する。
+const INTERNAL_SCHEDULED_EXPORTS = ["sweepConfirmedMailDelivery"];
 
 const exportsInIndex = [...index.matchAll(/^exports\.(\w+)\s*=\s*(.*)$/gm)].map((m) => ({name: m[1], rhs: m[2]}));
 
@@ -23,6 +25,10 @@ test("index.jsのexportは、従来方式の固定一覧か confirmedCallable(�
   assert.ok(exportsInIndex.length >= LEGACY_EXPORTS.length + 1);
   for (const {name, rhs} of exportsInIndex) {
     if (LEGACY_EXPORTS.includes(name)) continue;
+    if (INTERNAL_SCHEDULED_EXPORTS.includes(name)) {
+      assert.match(rhs, /^onSchedule\(/, name);
+      continue;
+    }
     if (PUBLIC_PASS_EXPORTS.includes(name)) {
       assert.match(rhs, /^confirmedPublicPassCallable\(passApi\.getPass\)/, name);
       continue;
@@ -34,7 +40,7 @@ test("index.jsのexportは、従来方式の固定一覧か confirmedCallable(�
 });
 
 test("従来方式のexportが増えていない(新しいcallableを認可なしで足す抜け道を作らない)", () => {
-  const legacyFound = exportsInIndex.filter((e) => !/^confirmedCallable\(/.test(e.rhs) && !PUBLIC_PASS_EXPORTS.includes(e.name)).map((e) => e.name).sort();
+  const legacyFound = exportsInIndex.filter((e) => !/^confirmedCallable\(/.test(e.rhs) && !PUBLIC_PASS_EXPORTS.includes(e.name) && !INTERNAL_SCHEDULED_EXPORTS.includes(e.name)).map((e) => e.name).sort();
   assert.deepEqual(legacyFound, [...LEGACY_EXPORTS].sort());
 });
 
@@ -48,7 +54,7 @@ test("当選者CSV取込のpreview・commitはadmin専用(staffは実行でき�
 
 test("当選メール(テンプレート・プレビュー・送信ジョブ)のcallableはすべてadmin専用", () => {
   const names = ["getConfirmedWinnerMailSettings", "updateConfirmedWinnerMailTemplate", "previewConfirmedWinnerMail", "createConfirmedWinnerMailJob",
-    "processConfirmedWinnerMailJob", "retryFailedConfirmedWinnerMails", "listConfirmedWinnerMailBatches", "getConfirmedWinnerMailJob"];
+    "processConfirmedWinnerMailJob", "retryFailedConfirmedWinnerMails", "listConfirmedWinnerMailBatches", "getConfirmedWinnerMailJob", "startConfirmedWinnerMailDelivery"];
   for (const name of names) {
     const found = exportsInIndex.find((e) => e.name === name);
     assert.ok(found, `${name}が見つかりません`);
@@ -113,6 +119,6 @@ test("confirmedCallableの中で、認可(guard)がハンドラより前に実�
 });
 
 test("index.jsの新方式callableに、認可を通さないonCall直書きが無い(旧8関数以外のonCall)", () => {
-  const onCallExports = exportsInIndex.filter((e) => /^onCall\(/.test(e.rhs) || /^onSchedule\(/.test(e.rhs)).map((e) => e.name).sort();
+  const onCallExports = exportsInIndex.filter((e) => (/^onCall\(/.test(e.rhs) || /^onSchedule\(/.test(e.rhs)) && !INTERNAL_SCHEDULED_EXPORTS.includes(e.name)).map((e) => e.name).sort();
   assert.deepEqual(onCallExports, [...LEGACY_EXPORTS].sort());
 });
