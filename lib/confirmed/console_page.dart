@@ -13,6 +13,7 @@ import 'winner_send_service.dart';
 
 /// 管理者に見せる機能(いずれも後続Phaseで実装。この画面は入口とロール別の境界だけ)。
 const List<String> adminFeatureLabels = [
+  'イベント作成',
   'イベント設定',
   'CSV取込',
   '当選メール設定',
@@ -36,6 +37,7 @@ class ConfirmedConsolePage extends StatelessWidget {
     WinnerMailService? winnerMailService,
     WinnerSendService? winnerSendService,
     ReminderService? reminderService,
+    this.initialEventId,
   }) : authClient = authClient ?? FirebaseAuthClient(),
        _accessService = accessService,
        _winnerMailService = winnerMailService,
@@ -48,6 +50,9 @@ class ConfirmedConsolePage extends StatelessWidget {
   final WinnerSendService? _winnerSendService;
   final ReminderService? _reminderService;
 
+  /// 作成直後のイベントID(新方式イベントの作成後に渡される)。各画面のイベントIDの初期値になる。
+  final String? initialEventId;
+
   @override
   Widget build(BuildContext context) => AuthGate(
     authClient: authClient,
@@ -59,11 +64,17 @@ class ConfirmedConsolePage extends StatelessWidget {
       roleLabel: '管理者',
       features: adminFeatureLabels,
       signOut: signOut,
+      notice: (initialEventId ?? '').isEmpty
+          ? null
+          : '作成したイベントのID: $initialEventId(各機能で自動入力されます)',
       actions: {
+        // 新方式イベントの作成(admin専用。受付スタッフには表示しない)
+        'イベント作成': () => Navigator.of(context).pushNamed('/console/events/new'),
         // 前日リマインド(admin専用。staffには表示しない)
         'リマインド': () => Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => ReminderPage(
+              initialEventId: initialEventId,
               service:
                   _reminderService ??
                   CallableReminderService(authClient: authClient),
@@ -73,6 +84,7 @@ class ConfirmedConsolePage extends StatelessWidget {
         '当選メール送信': () => Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => WinnerSendPage(
+              initialEventId: initialEventId,
               service:
                   _winnerSendService ??
                   CallableWinnerSendService(authClient: authClient),
@@ -85,6 +97,7 @@ class ConfirmedConsolePage extends StatelessWidget {
         '当選メール設定': () => Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => WinnerMailPage(
+              initialEventId: initialEventId,
               service:
                   _winnerMailService ??
                   CallableWinnerMailService(authClient: authClient),
@@ -109,6 +122,7 @@ class _RoleHome extends StatelessWidget {
     required this.features,
     required this.signOut,
     this.actions = const {},
+    this.notice,
   });
   final String title;
   final String roleLabel;
@@ -117,6 +131,7 @@ class _RoleHome extends StatelessWidget {
 
   /// 機能名 → 開く処理(実装済みの機能だけ。それ以外は「準備中」)。
   final Map<String, VoidCallback> actions;
+  final String? notice;
 
   @override
   Widget build(BuildContext context) => PageFrame(
@@ -132,6 +147,10 @@ class _RoleHome extends StatelessWidget {
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 12),
+            if (notice != null) ...[
+              SelectableText(notice!),
+              const SizedBox(height: 12),
+            ],
             for (final feature in features)
               ListTile(
                 contentPadding: EdgeInsets.zero,
@@ -140,6 +159,8 @@ class _RoleHome extends StatelessWidget {
                   actions.containsKey(feature)
                       ? (feature == '当選メール送信'
                             ? '取込回ごとの送信・進行状況・失敗分の再送'
+                            : feature == 'イベント作成'
+                            ? '新方式のイベントの新規作成(メールは送信されません)'
                             : feature == 'リマインド'
                             ? '前日リマインドの設定・プレビュー・送信状況'
                             : '件名・本文の設定とプレビュー')

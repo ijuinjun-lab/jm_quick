@@ -455,48 +455,43 @@ void main() {
     // Phase 10C: 以前は「従来方式のルートはAuthGateで包まれていない」を検査していた。認証境界の導入で、
     // 従来方式の管理画面(/admin・/demo-admin・/admin/events/{id})はadminのログインが必須になった(以前の許可から変更)。
     // 参加者本人のマイページ(/p/{id})と当日参加登録(/e/{id}/walk-in)は、ログイン不要のまま(capability・公開API)。
-    test(
-      'Phase 10C: 従来方式の管理画面はLegacyAdminGateで包まれ、参加者本人・当日参加登録の公開ページは包まれない',
-      () {
-        final main = File('lib/main.dart').readAsStringSync();
-        expect(main, contains("'/console' => ConfirmedConsolePage()"));
-        expect(
-          'ConfirmedConsolePage'.allMatches(main).length,
-          1,
-          reason: '/consoleの1か所だけ',
-        );
-        expect(
-          'LegacyAdminGate('.allMatches(main).length,
-          2,
-          reason: '/admin(・/demo-admin)と/admin/events/{id}の2か所',
-        );
-        // 管理画面は、gateのbuilderの中でだけ作られる(gateの外で直接作られない)
-        final adminIndex = main.indexOf("'/admin' || '/demo-admin'");
-        expect(
-          main.indexOf('EventListPage(api: api)'),
-          greaterThan(adminIndex),
-        );
-        expect(
-          main.indexOf('LegacyAdminGate('),
-          lessThan(main.indexOf('EventListPage(api: api)')),
-        );
-        expect(
-          main,
-          contains('DemoAdminPage(eventId: uri.pathSegments[2], api: api)'),
-        );
-        expect(main, isNot(contains('const EventListPage()')));
-        // 受付QRは入口(ReceptionRoutePage)が、従来方式でもAuthGateで包む
-        expect(
-          File('lib/confirmed/reception_route.dart').readAsStringSync(),
-          contains('AuthGate('),
-        );
-        // ログイン不要の公開ページ(参加者本人・当日参加登録)は、Firestoreを直接読まない
-        for (final legacy in ['WalkInPage(', 'ParticipantPage(']) {
-          final line = main.split('\n').firstWhere((l) => l.contains(legacy));
-          expect(line, isNot(contains('AdminGate')), reason: legacy);
-        }
-      },
-    );
+    test('Phase 10C: 従来方式の管理画面はLegacyAdminGateで包まれ、参加者本人・当日参加登録の公開ページは包まれない', () {
+      final main = File('lib/main.dart').readAsStringSync();
+      // Phase 11A: 作成直後のイベントIDを引き継ぐため、/console は initialEventId を受け取る(認可の構造は変わらない)
+      expect(main, contains("'/console' => ConfirmedConsolePage("));
+      expect(
+        'ConfirmedConsolePage'.allMatches(main).length,
+        1,
+        reason: '/consoleの1か所だけ',
+      );
+      expect(
+        'LegacyAdminGate('.allMatches(main).length,
+        2,
+        reason: '/admin(・/demo-admin)と/admin/events/{id}の2か所',
+      );
+      // 管理画面は、gateのbuilderの中でだけ作られる(gateの外で直接作られない)
+      final adminIndex = main.indexOf("'/admin' || '/demo-admin'");
+      expect(main.indexOf('EventListPage(api: api)'), greaterThan(adminIndex));
+      expect(
+        main.indexOf('LegacyAdminGate('),
+        lessThan(main.indexOf('EventListPage(api: api)')),
+      );
+      expect(
+        main,
+        contains('DemoAdminPage(eventId: uri.pathSegments[2], api: api)'),
+      );
+      expect(main, isNot(contains('const EventListPage()')));
+      // 受付QRは入口(ReceptionRoutePage)が、従来方式でもAuthGateで包む
+      expect(
+        File('lib/confirmed/reception_route.dart').readAsStringSync(),
+        contains('AuthGate('),
+      );
+      // ログイン不要の公開ページ(参加者本人・当日参加登録)は、Firestoreを直接読まない
+      for (final legacy in ['WalkInPage(', 'ParticipantPage(']) {
+        final line = main.split('\n').firstWhere((l) => l.contains(legacy));
+        expect(line, isNot(contains('AdminGate')), reason: legacy);
+      }
+    });
   });
 }
 

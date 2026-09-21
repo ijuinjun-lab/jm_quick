@@ -11,6 +11,7 @@ const {createRateLimiter, clientIpOf} = require("./rate_limit");
 const {RATE_LIMIT_POLICIES, RATE_LIMIT_RETENTION_MS, WALK_IN_EVENT_LIMIT} = require("./public_limits");
 const {getMyAccessRoleHandler} = require("./confirmed/access_role");
 const {createImportApi} = require("./confirmed/import_api");
+const {createEventCreateApi} = require("./confirmed/event_create_api");
 const {createWinnerMailApi} = require("./confirmed/winner_mail_api");
 const {createWinnerSendApi} = require("./confirmed/winner_send_api");
 const {createPassApi} = require("./confirmed/pass_api");
@@ -843,6 +844,10 @@ exports.commitConfirmedImport = confirmedCallable("admin", importApi.commit, {ti
 // - ジョブの作成では1通も送らない。送信は管理者が processConfirmedWinnerMailJob を明示的に実行したときだけ
 //   (前日リマインド等のSchedulerによる自動送信は、このPhaseでは作らない)
 const serverTimestamp = () => FieldValue.serverTimestamp();
+// 新方式イベントの作成(admin専用)。Phase 11A。flowはサーバーが"confirmed"に固定し、メールは一切動かさない(reminderEnabled=false、テンプレート・ジョブなし)。
+// 作成後の取込・当選メール設定・リマインド設定は、既存のadmin専用callableを使う。legacyのcreateLegacyEventとは別(意味を拡張しない)。
+const eventCreateApi = createEventCreateApi({getDb: getFirestore, serverTimestamp});
+exports.createConfirmedEvent = confirmedCallable("admin", eventCreateApi.createEvent, {timeoutSeconds: 30});
 const winnerMailApi = createWinnerMailApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
 });

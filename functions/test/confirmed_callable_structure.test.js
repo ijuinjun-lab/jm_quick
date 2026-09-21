@@ -31,7 +31,7 @@ const INTERNAL_SCHEDULED_EXPORTS = ["sweepConfirmedMailDelivery", ...LEGACY_SCHE
 const exportsInIndex = [...index.matchAll(/^exports\.(\w+)\s*=\s*(.*)$/gm)].map((m) => ({name: m[1], rhs: m[2]}));
 
 test("index.jsのexportは、Scheduler・公開入口(固定一覧)・confirmedCallable(アクセスレベル, ...) のいずれかだけ", () => {
-  assert.ok(exportsInIndex.length >= 44);
+  assert.ok(exportsInIndex.length >= 45);
   for (const {name, rhs} of exportsInIndex) {
     if (INTERNAL_SCHEDULED_EXPORTS.includes(name)) {
       assert.match(rhs, /^onSchedule\(/, name);
@@ -216,5 +216,22 @@ test("Phase 10D: rate limitの上限値はpublic_limits.jsに集約され、他�
     assert.doesNotMatch(source, /windowMs\s*[:=]\s*\d/, `${file}: 時間窓の数値`);
     assert.doesNotMatch(source, /limit\s*[:=]\s*\d+\s*[,}]/, `${file}: 上限の数値`);
     assert.doesNotMatch(source, /walkInCount\s*>=\s*\d/, `${file}: walk-in上限の数値`);
+  }
+});
+
+// Phase 11A: 新方式イベントの作成はadmin専用の1本(createConfirmedEvent)。公開callableは増やさない。
+test("Phase 11A: createConfirmedEventはadmin専用で、legacyの作成(createLegacyEvent)とは別のcallable。公開callableは5本のまま", () => {
+  const found = exportsInIndex.find((e) => e.name === "createConfirmedEvent");
+  assert.ok(found, "createConfirmedEventが見つかりません");
+  assert.match(found.rhs, /^confirmedCallable\("admin", eventCreateApi\.createEvent/);
+  const legacy = exportsInIndex.find((e) => e.name === "createLegacyEvent");
+  assert.notEqual(found.rhs, legacy.rhs);
+  const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs));
+  assert.equal(publicOnes.length, 5);
+  const source = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, "confirmed", "event_create_api.js"), "utf8"));
+  assert.doesNotMatch(source, /\b(tx|ref|db)\.(set|update|delete)\(|\bmerge\b/, "createのみ(set/update/merge/deleteで既存イベントを上書きしない)");
+  assert.match(source, /tx\.create\(/);
+  for (const forbidden of ["winnerMailTemplate:", "reminderMailTemplate:", "reminderSendAt:", "sendJobs", "mailDeliveries", "mailLogs", "fetch("]) {
+    assert.equal(source.includes(forbidden), false, `作成APIはメール関連を作らない: ${forbidden}`);
   }
 });

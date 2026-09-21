@@ -37,10 +37,24 @@ class _EventListPageState extends State<EventListPage> {
           children: [
             Align(
               alignment: Alignment.centerRight,
-              child: FilledButton.icon(
-                onPressed: _createEvent,
-                icon: const Icon(Icons.add),
-                label: const Text('新しいイベントを作成'),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.end,
+                children: [
+                  // 新方式(当選確定済みの参加者を取り込むイベント)。従来方式の作成とは別の入口
+                  OutlinedButton.icon(
+                    onPressed: () =>
+                        Navigator.pushNamed(context, '/console/events/new'),
+                    icon: const Icon(Icons.add),
+                    label: const Text('新方式のイベントを作成'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: _createEvent,
+                    icon: const Icon(Icons.add),
+                    label: const Text('新しいイベントを作成'),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 16),
