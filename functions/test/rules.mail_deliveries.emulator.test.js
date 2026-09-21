@@ -83,8 +83,9 @@ describe("Firestore Rules: 当選メール(ローカルEmulator)", {skip: skipRe
     const deliveries = rules.match(/match \/mailDeliveries\/\{[^}]+\}\s*\{([^}]*)\}/);
     assert.deepEqual(deliveries[1].match(/allow[^;]*;/g), ["allow read, write: if false;"]);
     assert.doesNotMatch(rules, /match\s+\/\{[^}]*=\*\*\}/);
-    // 旧mailJobs(旧processor用)は従来のまま: 読取は限定的に許可・書込みは禁止(Phase 10まで変更しない)
+    // 旧mailJobs(旧processor用): Phase 10Cで、以前の「読取は限定的に許可」も閉じた(進捗は管理者向けAPI経由)。書込みは従来どおり禁止
     const legacy = rules.match(/match \/mailJobs\/\{jobId\}\s*\{([\s\S]*?)\n      match/);
-    assert.ok(legacy && /allow create, update, delete: if false;/.test(legacy[1]));
+    assert.ok(legacy);
+    assert.deepEqual(legacy[1].match(/allow[^;]*;/g), ["allow read, write: if false;"]);
   });
 });

@@ -9,6 +9,7 @@ import 'confirmed/reception_route.dart';
 import 'firebase_options.dart';
 import 'pages/demo_admin_page.dart';
 import 'pages/event_list_page.dart';
+import 'pages/legacy_admin_gate.dart';
 import 'pages/participant_page.dart';
 import 'pages/reception_page.dart';
 import 'pages/walk_in_page.dart';
@@ -53,10 +54,14 @@ class JmQuickApp extends StatelessWidget {
       onGenerateRoute: (settings) {
         final uri = Uri.parse(settings.name ?? '/');
         final Widget page = switch (uri.path) {
-          '/admin' || '/demo-admin' => const EventListPage(),
+          // 従来方式の管理画面(Phase 10C): admin(Firebase Auth + accessRoles)としてログインするまで、何も取得・表示しない。
+          '/admin' || '/demo-admin' => LegacyAdminGate(
+            builder: (_, api) => EventListPage(api: api),
+          ),
           // 新方式(flow=confirmed)の管理・受付。ログイン+サーバー側の権限確認を通った場合だけ機能が表示される。
           '/console' => ConfirmedConsolePage(),
-          // 受付用QR。従来方式のイベントは従来の受付画面、新方式(confirmed)はログイン必須のprogram別受付画面。
+          // 受付用QR。従来方式は従来の受付画面、新方式(confirmed)はprogram別受付画面。どちらもstaff/adminのログインが必要(Phase 10C)。
+          // 未知のflow・存在しないイベント・読み取り失敗では、どちらの受付画面も出さない。
           '/reception' => ReceptionRoutePage(
             eventId: uri.queryParameters['eventId'],
             participantId: uri.queryParameters['participantId'],
@@ -71,7 +76,10 @@ class JmQuickApp extends StatelessWidget {
               when uri.pathSegments.length == 3 &&
                   uri.pathSegments[0] == 'admin' &&
                   uri.pathSegments[1] == 'events' =>
-            DemoAdminPage(eventId: uri.pathSegments[2]),
+            LegacyAdminGate(
+              builder: (_, api) =>
+                  DemoAdminPage(eventId: uri.pathSegments[2], api: api),
+            ),
           _
               when uri.pathSegments.length == 3 &&
                   uri.pathSegments[0] == 'e' &&

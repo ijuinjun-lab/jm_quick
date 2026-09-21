@@ -1,11 +1,12 @@
-const {onCall, HttpsError} = require("firebase-functions/v2/https");
+const {HttpsError} = require("firebase-functions/v2/https");
 const {onSchedule} = require("firebase-functions/v2/scheduler");
 const {defineSecret, defineString} = require("firebase-functions/params");
 const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {createHash, randomBytes} = require("crypto");
 const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
-const {confirmedCallable, confirmedPublicPassCallable} = require("./auth");
+const {confirmedCallable, confirmedPublicPassCallable, publicCapabilityCallable} = require("./auth");
+const {createLegacyApi} = require("./legacy/legacy_api");
 const {getMyAccessRoleHandler} = require("./confirmed/access_role");
 const {createImportApi} = require("./confirmed/import_api");
 const {createWinnerMailApi} = require("./confirmed/winner_mail_api");
@@ -76,10 +77,11 @@ async function assertDeletableEvent(db, eventId) {
   if (snapshot.exists) assertDeletableFlow(snapshot.data());
 }
 
-exports.sendParticipantMail = onCall(
-  {region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 30},
-  async (request) => {
-    const {participantId, publicId, eventId, type} = request.data || {};
+// Phase 10C: 従来方式の個別メール送信はadmin専用(以前は認証なしで、participantId+publicIdを知っていれば誰でも送信できた)。
+// 件名・本文・宛先・送信者名はすべてサーバーがイベント・参加者の保存値から作る(クライアントは対象の指定だけ)。
+exports.sendParticipantMail = confirmedCallable("admin",
+  async ({data}) => {
+    const {participantId, publicId, eventId, type} = data || {};
     if (typeof participantId !== "string" || typeof publicId !== "string" ||
         typeof eventId !== "string" || !eventId ||
         !["invitation", "reconfirmation", "walkIn"].includes(type)) {
@@ -206,19 +208,20 @@ exports.sendParticipantMail = onCall(
     ]);
     return {success: true, messageId: result.messageId || ""};
   },
+  {secrets: [mailApiKey], timeoutSeconds: 30},
 );
 
-exports.registerWalkIn = onCall(
-  {region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 30},
-  async (request) => {
-    const {eventId, name, email, registeredCount} = request.data || {};
-    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
-    if (typeof eventId !== "string" || !eventId ||
-        typeof name !== "string" || !name.trim() ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) ||
-        !Number.isInteger(registeredCount) || registeredCount < 1) {
-      throw new HttpsError("invalid-argument", "入力内容を確認してください。");
-    }
+// 従来方式(legacy)の管理・受付・参加者本人向けAPI(Phase 10C)。認可の定義は functions/legacy/legacy_api.js の冒頭を参照。
+const serverTimestampForLegacy = () => FieldValue.serverTimestamp();
+const legacyApi = createLegacyApi({getDb: getFirestore, serverTimestamp: serverTimestampForLegacy});
+
+// 当日参加登録(公開)。Phase 10C: 公開のままだが、入力を厳格に検証し(想定外のキー・過大な人数・URL等を含む氏名は拒否)、
+// legacyかつ受付可能なイベントだけを対象にする。件名・本文・送信者・participantId・publicIdはサーバーが決める。
+// 同じイベント+メールの二重登録はwalkInRegistrations(hash id)の作成が原子的に拒否する(連打・再送でも1件)。
+// Phase 10D: enforceAppCheck・rate limit・(必要なら)アプリ側の重複メール送信抑止を、この入口に追加する。
+exports.registerWalkIn = publicCapabilityCallable(
+  async ({data}) => {
+    const {eventId, name, email: normalizedEmail, registeredCount} = legacyApi.parseWalkIn(data);
     const db = getFirestore();
     const eventRef = db.collection("events").doc(eventId);
     const participantRef = db.collection("participants").doc();
@@ -235,6 +238,9 @@ exports.registerWalkIn = onCall(
         throw new HttpsError("not-found", "イベントが見つかりません。");
       }
       assertLegacyEvent(eventSnapshot.data(), "当日参加登録");
+      if (!legacyApi.walkInOpen(eventSnapshot.data())) {
+        throw new HttpsError("failed-precondition", "このイベントは現在、当日参加登録を受け付けていません。");
+      }
       if (existing.exists) {
         throw new HttpsError("already-exists",
           "すでにこのイベントへ登録されています。受付スタッフへお声がけください。");
@@ -317,6 +323,7 @@ exports.registerWalkIn = onCall(
         mailSent: false, mailError: "確認メールを送信できませんでした。"};
     }
   },
+  {secrets: [mailApiKey], timeoutSeconds: 30},
 );
 
 exports.sendScheduledConfirmationMail = onSchedule(
@@ -548,15 +555,12 @@ async function startBulkJob(request, type) {
     totalCount: eligible.length};
 }
 
-exports.startBulkInvitationMail = onCall(
-  {region: "asia-northeast1", timeoutSeconds: 60},
-  (request) => startBulkJob(request, "invitation"),
-);
+// Phase 10C: 一括メールの開始はadmin専用(以前は認証なし)。対象はlegacyのイベントの参加者だけ(startBulkJobのassertLegacyEvent)。
+exports.startBulkInvitationMail = confirmedCallable("admin",
+  ({data}) => startBulkJob({data}, "invitation"), {timeoutSeconds: 60});
 
-exports.startBulkReconfirmationMail = onCall(
-  {region: "asia-northeast1", timeoutSeconds: 60},
-  (request) => startBulkJob(request, "reconfirmation"),
-);
+exports.startBulkReconfirmationMail = confirmedCallable("admin",
+  ({data}) => startBulkJob({data}, "reconfirmation"), {timeoutSeconds: 60});
 
 async function processBulkItem(db, jobSnapshot, itemSnapshot, event) {
   const job = jobSnapshot.data();
@@ -690,10 +694,10 @@ exports.processBulkMailJobs = onSchedule(
   },
 );
 
-exports.deleteParticipant = onCall(
-  {region: "asia-northeast1", timeoutSeconds: 60},
-  async (request) => {
-    const {eventId, participantId} = request.data || {};
+// Phase 10C: 参加者・イベントの削除はadmin専用(以前は認証なし)。
+exports.deleteParticipant = confirmedCallable("admin",
+  async ({data}) => {
+    const {eventId, participantId} = data || {};
     if (typeof eventId !== "string" || !eventId ||
         typeof participantId !== "string" || !participantId) {
       throw new HttpsError("invalid-argument", "削除対象が不正です。");
@@ -727,12 +731,12 @@ exports.deleteParticipant = onCall(
     await writer.close();
     return {success: true};
   },
+  {timeoutSeconds: 60},
 );
 
-exports.deleteEvent = onCall(
-  {region: "asia-northeast1", timeoutSeconds: 120},
-  async (request) => {
-    const {eventId} = request.data || {};
+exports.deleteEvent = confirmedCallable("admin",
+  async ({data}) => {
+    const {eventId} = data || {};
     if (typeof eventId !== "string" || !eventId) {
       throw new HttpsError("invalid-argument", "削除対象イベントが不正です。");
     }
@@ -781,11 +785,12 @@ exports.deleteEvent = onCall(
       retainedMailLogCount: logs.size,
     };
   },
+  {timeoutSeconds: 120},
 );
 
 // --- 新方式(flow=confirmed)の認証callable ---------------------------------------------
 // 新方式の管理系callableは必ず confirmedCallable(アクセスレベル, ハンドラ) で定義する(認可を通らないと実行されない)。
-// 従来方式のcallableには認証を付けていない(旧JM Quickの認証はPhase 10)。
+// 従来方式のcallableもPhase 10Cで、admin/staffOrAdmin(認証+accessRoles)または参加者capability(publicId)に統一した(認証なしの管理系callableは残していない)。
 exports.getMyAccessRole = confirmedCallable("staffOrAdmin", getMyAccessRoleHandler);
 
 // 当選者CSVの取込(admin専用)。preview=dry-run(書込みなし) / commit=サーバー側で再検証して登録。メールは送らない。
@@ -857,3 +862,19 @@ exports.checkInConfirmedProgram = confirmedCallable("staffOrAdmin", passApi.chec
 // 受付後の訂正・取消はadminだけ(staffは初回受付のみ)。受付状態の正本はprogramAttendancesのまま。実変更ごとにhistoryを1件追記する。
 exports.correctConfirmedProgramAttendance = confirmedCallable("admin", passApi.correct);
 exports.cancelConfirmedProgramCheckIn = confirmedCallable("admin", passApi.cancel);
+
+// 従来方式(legacy)の管理・受付・参加者本人API(Phase 10C)。旧画面がFirestoreを直接読み書きしていた経路の置き換え。
+// admin: イベント一覧・詳細(参加者・受付・一括メール進捗)・作成・設定更新・参加者の手動登録
+// staffOrAdmin: 受付(表示・受付実行・実参加人数の修正。参加者のメールアドレスは返さない)。書込みはサーバーのtransactionで再検証する
+// 参加者本人(participantId+publicId): マイページの取得・正式登録・参加予定の回答。応答は最小限で、無効な理由はすべて同じ応答
+exports.listLegacyEvents = confirmedCallable("admin", legacyApi.listEvents, {timeoutSeconds: 60});
+exports.getLegacyEventAdminView = confirmedCallable("admin", legacyApi.getEventAdminView, {timeoutSeconds: 60});
+exports.createLegacyEvent = confirmedCallable("admin", legacyApi.createEvent, {timeoutSeconds: 30});
+exports.updateLegacyEventSettings = confirmedCallable("admin", legacyApi.updateEventSettings, {timeoutSeconds: 30});
+exports.createLegacyParticipant = confirmedCallable("admin", legacyApi.createParticipant, {timeoutSeconds: 30});
+exports.getLegacyReceptionView = confirmedCallable("staffOrAdmin", legacyApi.getReceptionView, {timeoutSeconds: 30});
+exports.checkInLegacyParticipant = confirmedCallable("staffOrAdmin", legacyApi.checkInParticipant, {timeoutSeconds: 30});
+exports.updateLegacyAttendedCount = confirmedCallable("staffOrAdmin", legacyApi.updateAttendedCount, {timeoutSeconds: 30});
+exports.getLegacyParticipantPage = publicCapabilityCallable(legacyApi.getParticipantPage);
+exports.confirmLegacyParticipation = publicCapabilityCallable(legacyApi.confirmParticipation);
+exports.answerLegacyReconfirmation = publicCapabilityCallable(legacyApi.answerReconfirmation);

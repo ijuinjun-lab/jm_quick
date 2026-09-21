@@ -45,8 +45,13 @@ const NON_LEGACY = [
 let net;
 afterEach(() => net?.restore());
 
+// Phase 10C: 個別メール・一括メール開始・削除はadmin専用になった(以前は認証なしで呼べた)。
+// このファイルの従来の検証(legacyは従来どおり動く/confirmed・未知のflowは副作用ゼロで拒否)は、adminが呼んだ場合として維持している。
+// 認証なし・権限なしの拒否は legacy_auth_boundary.test.js が検証する。
+const ADMIN = {uid: "admin1"};
+const ADMIN_ROLE = {"accessRoles/admin1": {role: "admin", active: true}};
 function setup(seed) {
-  const db = new FakeFirestore(seed);
+  const db = new FakeFirestore({...ADMIN_ROLE, ...seed});
   net = stubFetch();
   const index = loadIndex(db);
   return {db, index, mail: net.calls};
@@ -91,7 +96,7 @@ describe("旧一括メール(startBulk*/processBulkMailJobs)", () => {
       "events/e1": baseEvent("e1"),
       "participants/p1": participant("p1", "e1", {participationConfirmed: false}),
     });
-    const result = await index.startBulkInvitationMail.run({data: {eventId: "e1"}});
+    const result = await index.startBulkInvitationMail.run({auth: ADMIN, data: {eventId: "e1"}});
     assert.equal(result.success, true);
     assert.equal(result.totalCount, 1);
     assert.equal(db.store.get("mailJobs/e1_invitation").status, "queued");
@@ -105,7 +110,7 @@ describe("旧一括メール(startBulk*/processBulkMailJobs)", () => {
           "events/e1": baseEvent("e1", flow),
           "participants/p1": participant("p1", "e1"),
         });
-        await rejectsPrecondition(index[start].run({data: {eventId: "e1"}}));
+        await rejectsPrecondition(index[start].run({auth: ADMIN, data: {eventId: "e1"}}));
         assert.equal(db.writes.length, 0);
       });
     }
@@ -144,7 +149,7 @@ describe("旧一括メール(startBulk*/processBulkMailJobs)", () => {
 
 describe("個別案内メール・旧再確認メール(sendParticipantMail)", () => {
   const call = (index, eventId, type) => index.sendParticipantMail.run({
-    data: {participantId: "p1", publicId: participant("p1", eventId).publicId, eventId, type},
+    auth: ADMIN, data: {participantId: "p1", publicId: participant("p1", eventId).publicId, eventId, type},
   });
 
   test("legacyイベントは従来どおり案内メールを送る", async () => {

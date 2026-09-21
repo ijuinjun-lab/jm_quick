@@ -1,34 +1,45 @@
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
-import '../models/demo_models.dart';
 import '../services/demo_repository.dart';
+import '../services/legacy_api.dart';
 import '../widgets/common.dart';
 
+/// 従来方式(legacy)の受付画面。受付スタッフ(staff)または管理者(admin)としてログインしている場合だけ表示される
+/// (入口の ReceptionRoutePage が AuthGate で包む)。Phase 10C以降、Firestoreは直接読み書きせず、
+/// サーバーの受付API(表示・受付・人数修正)を呼ぶ。QRのeventId・participantId・publicIdはサーバーが毎回再検証する。
 class ReceptionPage extends StatefulWidget {
   const ReceptionPage({
     super.key,
     this.eventId,
     this.participantId,
     this.publicId,
+    this.repository,
   });
   final String? eventId;
   final String? participantId;
   final String? publicId;
+
+  /// テスト用。既定は認証つきの受付APIを使う。
+  final DemoRepository? repository;
   @override
   State<ReceptionPage> createState() => _ReceptionPageState();
 }
 
 class _ReceptionPageState extends State<ReceptionPage> {
-  late final repository = DemoRepository(selectedEventId: widget.eventId);
+  late final repository =
+      widget.repository ?? DemoRepository(selectedEventId: widget.eventId);
   final countController = TextEditingController();
-  Participant? participant;
+  ReceptionView? view;
   Object? loadError;
   bool loading = true;
   bool saving = false;
-  bool nonLegacyEvent = false;
   int? lastShownCount;
   String? saveError;
+
+  bool get _hasKey =>
+      (widget.eventId ?? '').isNotEmpty &&
+      (widget.participantId ?? '').isNotEmpty &&
+      (widget.publicId ?? '').isNotEmpty;
 
   @override
   void initState() {
@@ -36,27 +47,33 @@ class _ReceptionPageState extends State<ReceptionPage> {
     _load();
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool initial = true}) async {
+    if (!_hasKey) {
+      // 従来どおり「有効な受付用QRコードまたはリンクから開いてください」と案内する(通信しない)
+      if (mounted) setState(() => loading = false);
+      return;
+    }
     try {
-      participant = await repository.resolveParticipant(
-        widget.participantId,
-        widget.publicId,
+      final loaded = await repository.receptionView(
+        widget.participantId!,
+        widget.publicId!,
       );
-      if (participant != null && participant!.eventId != widget.eventId) {
-        participant = null;
-        loadError = StateError('event-mismatch');
-      }
-      if (participant != null &&
-          !await repository.isLegacyEvent(participant!.eventId)) {
-        // 新方式(flow=confirmed)の受付はprogram別。participant単位の旧受付では扱わない。
-        nonLegacyEvent = true;
-        participant = null;
-      }
-      if (participant != null) {
-        countController.text = '${participant!.registeredCount}';
+      view = loaded;
+      loadError = null;
+      if (initial) {
+        countController.text = '${loaded.registeredCount}';
+      } else if (loaded.checkedIn && !saving) {
+        lastShownCount = loaded.attendedCount;
+        countController.text = '${loaded.attendedCount ?? 0}';
       }
     } catch (error) {
-      loadError = error;
+      // 受付できないQR(publicId不一致・別イベント・新方式・存在しない参加者)は、表示可能な同じ案内にする
+      if (error is LegacyApiException &&
+          (error.isFailedPrecondition || error.isNotFound)) {
+        view = null;
+      } else {
+        loadError = error;
+      }
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -87,10 +104,15 @@ class _ReceptionPageState extends State<ReceptionPage> {
     });
     try {
       if (update) {
-        await repository.updateAttendedCount(participant!, count);
+        await repository.updateAttendedCountByKey(
+          participantId: widget.participantId!,
+          publicId: widget.publicId!,
+          attendedCount: count,
+        );
       } else {
-        await repository.checkIn(
-          participant: participant!,
+        await repository.checkInByKey(
+          participantId: widget.participantId!,
+          publicId: widget.publicId!,
           attendedCount: count,
         );
       }
@@ -99,34 +121,25 @@ class _ReceptionPageState extends State<ReceptionPage> {
           SnackBar(content: Text(update ? '実参加人数を修正しました。' : '受付が完了しました。')),
         );
       }
-    } on StateError catch (error, stackTrace) {
-      _logSaveFailure(error, stackTrace, update: update);
+    } on StateError {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('この参加者は既に受付済みです。')));
       }
-    } on FirebaseException catch (error, stackTrace) {
-      _logSaveFailure(error, stackTrace, update: update);
-      final detail =
-          'Firebase保存エラー\n'
-          'code: ${error.code}\n'
-          'message: ${error.message ?? '詳細メッセージなし'}';
+    } on LegacyApiException catch (error) {
       if (mounted) {
-        setState(() => saveError = detail);
+        setState(() => saveError = error.message);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(detail),
+            content: Text(error.message),
             duration: const Duration(seconds: 10),
           ),
         );
       }
-    } catch (error, stackTrace) {
-      _logSaveFailure(error, stackTrace, update: update);
-      final detail =
-          'コード上の保存エラー\n'
-          'type: ${error.runtimeType}\n'
-          'message: $error';
+    } catch (error) {
+      // 内部の情報(参加者ID・publicId・スタックトレース)は表示にもログにも出さない
+      final detail = '保存できませんでした。もう一度お試しください。(${error.runtimeType})';
       if (mounted) {
         setState(() => saveError = detail);
         ScaffoldMessenger.of(context).showSnackBar(
@@ -139,30 +152,8 @@ class _ReceptionPageState extends State<ReceptionPage> {
     } finally {
       if (mounted) setState(() => saving = false);
     }
-  }
-
-  void _logSaveFailure(
-    Object error,
-    StackTrace stackTrace, {
-    required bool update,
-  }) {
-    final targetParticipantId = participant?.id ?? widget.participantId;
-    debugPrint('=== JM Quick 受付保存失敗 ===');
-    debugPrint(
-      'operation: ${update ? 'attendedCount update' : 'initial check-in'}',
-    );
-    debugPrint('Firestore path: checkIns/$targetParticipantId');
-    debugPrint('participantId: $targetParticipantId');
-    debugPrint('publicId: ${participant?.publicId ?? widget.publicId}');
-    if (error is FirebaseException) {
-      debugPrint('FirebaseException.code: ${error.code}');
-      debugPrint('FirebaseException.message: ${error.message}');
-      debugPrint('FirebaseException.plugin: ${error.plugin}');
-    } else {
-      debugPrint('exception type: ${error.runtimeType}');
-      debugPrint('exception: $error');
-    }
-    debugPrintStack(stackTrace: stackTrace);
+    // 受付・修正の結果(または既に受付済みだった場合の現在の状態)を、サーバーの値で表示し直す
+    await _load(initial: false);
   }
 
   @override
@@ -172,12 +163,7 @@ class _ReceptionPageState extends State<ReceptionPage> {
   Widget _body() {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (loadError != null) return ErrorPanel(loadError!);
-    if (nonLegacyEvent) {
-      return const NonLegacyFlowNotice(
-        message: 'このイベントは新方式のイベントです。従来の受付画面では受付できません。新方式の受付機能が提供されるまでお待ちください。',
-      );
-    }
-    if (participant == null) {
+    if (view == null) {
       return const Card(
         child: Padding(
           padding: EdgeInsets.all(24),
@@ -185,16 +171,10 @@ class _ReceptionPageState extends State<ReceptionPage> {
         ),
       );
     }
-    return StreamBuilder<CheckIn?>(
-      stream: repository.watchCheckIn(participant!.id),
-      builder: (context, snapshot) {
-        if (snapshot.hasError) return ErrorPanel(snapshot.error!);
-        final checkIn = snapshot.data;
-        final checkedIn = checkIn?.checkedIn ?? false;
-        if (checkedIn && checkIn?.attendedCount != lastShownCount && !saving) {
-          lastShownCount = checkIn?.attendedCount;
-          countController.text = '${checkIn?.attendedCount ?? 0}';
-        }
+    final current = view!;
+    final checkedIn = current.checkedIn;
+    return Builder(
+      builder: (context) {
         return Card(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -220,22 +200,19 @@ class _ReceptionPageState extends State<ReceptionPage> {
                   const SizedBox(height: 18),
                 ],
                 Text(
-                  '${participant!.name}様',
+                  '${current.participantName}様',
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.bold,
                   ),
                 ),
                 const SizedBox(height: 12),
-                InfoRow('申込人数', '${participant!.registeredCount}名'),
-                InfoRow(
-                  '参加予定確認',
-                  participant!.reconfirmed ? '参加予定確認済み' : '参加予定未確認',
-                ),
+                InfoRow('申込人数', '${current.registeredCount}名'),
+                InfoRow('参加予定確認', current.reconfirmed ? '参加予定確認済み' : '参加予定未確認'),
                 InfoRow('受付状態', checkedIn ? '受付済み' : '未受付'),
                 if (checkedIn)
-                  InfoRow('前回受付日時', formatDateTime(checkIn?.checkedInAt)),
+                  InfoRow('前回受付日時', formatDateTime(current.checkedInAt)),
                 if (checkedIn)
-                  InfoRow('現在の実参加人数', '${checkIn?.attendedCount ?? 0}名'),
+                  InfoRow('現在の実参加人数', '${current.attendedCount ?? 0}名'),
                 const SizedBox(height: 16),
                 if (saveError != null) ...[
                   Container(

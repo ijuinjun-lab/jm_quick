@@ -1,17 +1,17 @@
-// Phase 10B: confirmed参加者の未認証(および認証済み・role無し)Firestore直接readの遮断を、ローカルEmulator(localhostのみ)で固定する。
+// Phase 10B(confirmed参加者のread遮断)+ Phase 10C(従来方式のクライアント直接read/writeを閉じる)を、ローカルEmulator(localhostのみ)で固定する。
 //
-//   participants / checkIns のread(get・list/query)は「参照先のイベントが存在し、かつlegacyと明確に判定できる」場合だけ許可。
-//   confirmed・未知のflow・孤児(イベントが存在しない)・eventId欠落/不正 は、すべて拒否(fail-closed)。documentごと拒否する(フィールド単位ではない)。
-//   Rulesはクエリ結果のフィルタではないため、confirmedのeventIdを明示したqueryも、eventIdを絞らないqueryも、複数イベント混在のqueryも拒否される。
+// Phase 10B: confirmed・未知のflow・孤児(イベントが存在しない)・eventId欠落/不正 の participants / checkIns は、get・queryとも拒否(fail-closed)。
+//   Rulesはクエリ結果のフィルタではないため、confirmedのeventIdを明示したqueryも、絞り込みなしのqueryも、複数イベント混在のqueryも拒否される。
+// Phase 10C: 従来方式(legacy)の participants / checkIns / mailJobs も、read・writeとも全面拒否になった(以前のlegacy公開read・legacy直書きは、
+//   意図的に拒否へ変更した。同じ操作は認証つきのサーバーAPIで行う)。eventsのreadだけはPhase 10Dまで公開のまま(受付QRの方式判定用)、eventsのwriteは拒否。
 //
 // データはすべて完全な架空(実在人物・実メール・実CSV由来のデータではない)。メールは予約TLD .invalid。
-// 注意: この時点で legacy の participants / checkIns / events / mailJobs は、まだ公開read(Phase 10C・10Dで閉じる)。
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const {after, before, describe, test} = require("node:test");
 const {PROJECT, RULES_PATH, skipReason, startEmulator, unsignedToken} = require("../test_support/rules_harness");
 
-describe("Firestore Rules(Phase 10B): confirmed参加者のread遮断・legacyのread互換(ローカルEmulator)", {skip: skipReason()}, () => {
+describe("Firestore Rules(Phase 10B/10C): 参加者・受付のread/write遮断(confirmedも従来方式も)(ローカルEmulator)", {skip: skipReason()}, () => {
   let emu;
   let root;
   const NOBODY = unsignedToken("u-nobody", {});
@@ -157,26 +157,32 @@ describe("Firestore Rules(Phase 10B): confirmed参加者のread遮断・legacy�
         assert.ok(denied(await query("checkIns", [], token)), "絞り込みなしのlistも拒否");
       });
 
-      test("legacy(従来どおり公開read): flowなし・null・空文字・'legacy'のイベントの参加者と受付は、get・eventId queryとも許可", async () => {
+      // Phase 10C: 以前は「legacy(従来どおり公開read)」として get・eventId queryとも許可していた。従来方式も全面拒否へ変更した。
+      test("Phase 10C: 従来方式(flowなし・null・空文字・'legacy')の参加者と受付も、get・eventId queryとも拒否(以前は許可)。個人情報を含まない", async () => {
         for (const id of ["e-legacy", "e-legacy-explicit", "e-legacy-null", "e-legacy-empty"]) {
-          assert.equal((await get(`participants/pl-${id}`, token)).status, 200, `participants/pl-${id}`);
-          assert.equal((await get(`checkIns/pl-${id}`, token)).status, 200, `checkIns/pl-${id}`);
-          const participants = await query("participants", [["eventId", "EQUAL", id]], token);
-          assert.deepEqual([participants.status, participants.docs], [200, [`pl-${id}`]], `participants query ${id}`);
-          const checkIns = await query("checkIns", [["eventId", "EQUAL", id]], token);
-          assert.deepEqual([checkIns.status, checkIns.docs], [200, [`pl-${id}`]], `checkIns query ${id}`);
+          for (const path of [`participants/pl-${id}`, `checkIns/pl-${id}`]) {
+            const result = await get(path, token);
+            assert.equal(result.status, 403, path);
+            for (const secret of ["旧 太郎", "legacy-participant@example.invalid", PUBLIC_ID("l")]) assert.ok(!result.text.includes(secret), `${path}: 応答に ${secret}`);
+          }
+          assert.ok(denied(await query("participants", [["eventId", "EQUAL", id]], token)), `participants query ${id}`);
+          assert.ok(denied(await query("checkIns", [["eventId", "EQUAL", id]], token)), `checkIns query ${id}`);
         }
+        assert.ok(denied(await query("participants", [], token)), "絞り込みなしのlistも拒否");
+        assert.ok(denied(await query("participants", [["email", "EQUAL", "legacy-participant@example.invalid"]], token)), "emailでのquery(個人の探索)も拒否");
       });
     });
   }
 
-  describe("読み取り境界の意味(legacyはまだ公開・eventsなどは今回変更なし)", () => {
-    test("今回まだ公開のままのもの: events(confirmedのイベントも)・mailJobs・legacyの参加者/受付は、未認証で読める(Phase 10C・10Dで閉じる)", async () => {
-      assert.equal((await get("events/e-conf")).status, 200, "eventsのreadは維持(/receptionのflow判定に必要)");
+  describe("読み取り境界の意味(eventsのreadだけが、Phase 10Dまで公開のまま)", () => {
+    test("残しているもの: eventsのread(get・list)だけ。participants・checkIns・mailJobs(従来方式も)は、未認証で読めない", async () => {
+      assert.equal((await get("events/e-conf")).status, 200, "eventsのreadは維持(/receptionのflow判定に必要。Phase 10Dで閉じる)");
       assert.equal((await get("events/e-legacy")).status, 200);
-      assert.equal((await get("participants/pl-e-legacy")).status, 200, "legacyの参加者はまだ公開read");
+      assert.equal((await get("participants/pl-e-legacy")).status, 403, "Phase 10C: 従来方式の参加者も拒否(以前は公開read)");
+      assert.equal((await get("checkIns/pl-e-legacy")).status, 403, "Phase 10C: 従来方式の受付も拒否(以前は公開read)");
       await seed("mailJobs/e-legacy_invitation", {eventId: "e-legacy", type: "invitation", status: "queued"});
-      assert.equal((await get("mailJobs/e-legacy_invitation")).status, 200, "mailJobsのreadは維持(legacy管理画面の進捗表示)");
+      assert.equal((await get("mailJobs/e-legacy_invitation")).status, 403, "Phase 10C: mailJobsのreadも拒否(以前は限定的に許可。進捗は管理者向けAPI)");
+      assert.ok(denied(await query("mailJobs", [["eventId", "EQUAL", "e-legacy"]])), "mailJobsのqueryも拒否");
       assert.equal((await get("mailJobs/e-legacy_invitation/items/x")).status, 403, "itemsは従来どおり拒否");
     });
 
@@ -196,13 +202,22 @@ describe("Firestore Rules(Phase 10B): confirmed参加者のread遮断・legacy�
     });
   });
 
-  describe("writeは今回変更なし: legacyは従来どおり許可、confirmedは従来どおり拒否", () => {
-    test("legacy: 正式登録・参加予定の回答(participants update)・旧受付(checkIns update)・イベント設定更新が、従来どおり許可される", async () => {
-      assert.equal(await emu.update("participants/pl-e-legacy", {participationConfirmed: true, updatedAt: new Date()}), 200);
-      assert.equal(await emu.update("participants/pl-e-legacy", {reconfirmed: true, attendanceResponse: "attending", updatedAt: new Date()}), 200);
-      assert.equal(await emu.update("checkIns/pl-e-legacy", {checkedIn: true, attendedCount: 1, registeredCountSnapshot: 1, checkedInAt: new Date(), updatedAt: new Date()}), 200);
-      assert.equal(await emu.update("events/e-legacy", {eventName: "旧(更新)"}), 200);
-      assert.equal(await emu.create("participants", "pl-new", {...legacyParticipant("pl-new", "e-legacy")}), 200, "legacyの参加者作成");
+  describe("Phase 10C: writeはすべて拒否(従来方式・confirmed・孤児とも)", () => {
+    test("Phase 10C: 従来方式の正式登録・参加予定の回答・旧受付・イベント設定更新・参加者作成・イベント作成は、すべて拒否(以前は許可)", async () => {
+      for (const [label, token] of CLIENTS) {
+        assert.equal(await emu.update("participants/pl-e-legacy", {participationConfirmed: true, updatedAt: new Date()}, token), 403, `${label}: 正式登録`);
+        assert.equal(await emu.update("participants/pl-e-legacy", {reconfirmed: true, attendanceResponse: "attending", updatedAt: new Date()}, token), 403, `${label}: 回答`);
+        assert.equal(await emu.update("checkIns/pl-e-legacy", {checkedIn: true, attendedCount: 1, registeredCountSnapshot: 1, checkedInAt: new Date(), updatedAt: new Date()}, token), 403, `${label}: 旧受付`);
+        assert.equal(await emu.update("events/e-legacy", {eventName: "旧(更新)"}, token), 403, `${label}: イベント設定更新`);
+        assert.equal(await emu.create("participants", "pl-new", {...legacyParticipant("pl-new", "e-legacy")}, token), 403, `${label}: 参加者作成`);
+        assert.equal(await emu.create("checkIns", "pl-new", checkIn("pl-new", "e-legacy"), token), 403, `${label}: 受付作成`);
+        assert.equal(await emu.create("events", "e-new-legacy", {eventId: "e-new-legacy", eventName: "新規"}, token), 403, `${label}: イベント作成`);
+        assert.equal(await emu.remove("participants/pl-e-legacy", token), 403, `${label}: 参加者削除`);
+        assert.equal(await emu.remove("checkIns/pl-e-legacy", token), 403, `${label}: 受付削除`);
+        assert.equal(await emu.remove("events/e-legacy", token), 403, `${label}: イベント削除`);
+        assert.equal(await emu.create("mailJobs", "e-legacy_invitation2", {eventId: "e-legacy", type: "invitation", status: "queued"}, token), 403, `${label}: mailJobs作成`);
+        assert.equal(await emu.update("mailJobs/e-legacy_invitation", {status: "completed"}, token), 403, `${label}: mailJobs更新`);
+      }
     });
 
     test("confirmed: 参加者・受付・イベントへのクライアント直接write(create・update・delete)は、従来どおりすべて拒否", async () => {
@@ -217,26 +232,36 @@ describe("Firestore Rules(Phase 10B): confirmed参加者のread遮断・legacy�
       }
     });
 
-    test("(既存のwriteの性質の記録・今回は変更しない) 孤児の参加者(参照先イベントなし)へのlegacy形式のupdateは、write用helperがイベント不存在をlegacy扱いにするため、従来どおり許可される。Phase 10Cで扱う", async () => {
-      assert.equal(await emu.update("participants/po", {participationConfirmed: true, updatedAt: new Date()}), 200);
-      // ただしreadは今回の変更で拒否される(孤児を公開しない)
+    // Phase 10C: 以前は「既存のwriteの性質の記録」として、孤児の参加者(参照先イベントなし)へのlegacy形式のupdateが許可されていた
+    // (write用helperがイベント不存在をlegacy扱いにしていたため)。全面拒否になり、孤児・未知のflow・eventId欠落・型不正のいずれもwriteできない。
+    test("Phase 10C: 孤児・未知のflow・eventId欠落・eventIdが数値・パスを壊すeventId の参加者・受付へのwriteは、すべて拒否(以前は孤児へのupdateが許可されていた)", async () => {
+      for (const [label, token] of CLIENTS) {
+        for (const id of ["po", "pn", "pnum", "pslash", "pu-e-typo", "pu-e-number"]) {
+          assert.equal(await emu.update(`participants/${id}`, {participationConfirmed: true, updatedAt: new Date()}, token), 403, `${label}: participants/${id} update`);
+          assert.equal(await emu.update(`checkIns/${id}`, {checkedIn: true, attendedCount: 1, registeredCountSnapshot: 1, checkedInAt: new Date(), updatedAt: new Date()}, token), 403, `${label}: checkIns/${id} update`);
+          assert.equal(await emu.remove(`participants/${id}`, token), 403, `${label}: participants/${id} delete`);
+        }
+      }
       assert.equal((await get("participants/po")).status, 403);
     });
   });
 
-  test("Rulesの静的検査: read用helperは「イベントの存在」を必須とし、participants/checkInsのreadはそれを使う。write用の既存helperとwriteの許可条件は変更されていない", () => {
+  test("Rulesの静的検査(Phase 10C): participants・checkIns・mailJobsは read, write とも if false のみ。eventsはreadだけ公開、writeは拒否。旧helperは残っていない", () => {
     const rules = fs.readFileSync(RULES_PATH, "utf8");
-    const helper = rules.match(/function eventIsReadableLegacy\(eventId\) \{([\s\S]*?)\n    \}/);
-    assert.ok(helper, "read用helperが必要");
-    assert.match(helper[1], /exists\(/, "イベントの存在を必須にする");
-    assert.doesNotMatch(helper[1], /!exists\(/, "存在しないイベントをlegacy扱いにしない");
-    assert.match(rules, /match \/participants\/\{participantId\} \{\s*allow get, list: if eventIsReadableLegacy\(resource\.data\.eventId\);/);
-    assert.match(rules, /match \/checkIns\/\{participantId\} \{\s*allow get, list: if eventIsReadableLegacy\(resource\.data\.eventId\);/);
-    // 既存のwrite用helper(存在しないイベントもtrueにする従来の判定)はそのまま
-    assert.match(rules, /function eventIsLegacy\(eventId\) \{\s*return eventId is string\s*&& \(!exists\(/);
-    assert.equal((rules.match(/eventIsReadableLegacy\(/g) || []).length, 3, "定義1 + participants + checkIns");
-    // eventsとmailJobsのreadは今回変更していない
-    assert.match(rules, /match \/events\/\{eventId\} \{\s*allow read: if true;/);
-    assert.match(rules, /match \/mailJobs\/\{jobId\} \{\s*allow get, list: if resource\.data\.eventId is string;/);
+    const allowsOf = (name) => {
+      const match = rules.match(new RegExp(`match /${name}/\\{[^}]+\\}\\s*\\{([\\s\\S]*?)\\n    \\}`));
+      assert.ok(match, `${name}のmatchが必要`);
+      // 子match(mailJobs/items)は除いて、そのcollection自身のallowを取る
+      const own = match[1].split(/\n\s*match /)[0];
+      return own.match(/allow[^;]*;/g);
+    };
+    assert.deepEqual(allowsOf("participants"), ["allow read, write: if false;"]);
+    assert.deepEqual(allowsOf("checkIns"), ["allow read, write: if false;"]);
+    assert.deepEqual(allowsOf("mailJobs"), ["allow read, write: if false;"]);
+    assert.deepEqual(allowsOf("events"), ["allow read: if true;", "allow create, update, delete: if false;"]);
+    // 条件つきallowが残っていない(=flow・イベント存在・eventIdの型に依存した許可が無い)
+    for (const helper of ["eventIsReadableLegacy", "eventIsLegacy", "isLegacyEventData", "eventExists"]) assert.doesNotMatch(rules, new RegExp(helper), `${helper}は不要になった`);
+    assert.doesNotMatch(rules, /allow[^;]*:\s*if\s+true[^;]*;[\s\S]*allow[^;]*:\s*if\s+true/, "公開のallowはeventsのreadだけ");
+    assert.equal((rules.match(/if true;/g) || []).length, 1, "if true は events の read の1か所だけ");
   });
 });

@@ -7,6 +7,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/models/demo_models.dart';
 import 'package:jm_quick/models/program_models.dart';
 import 'package:jm_quick/services/demo_repository.dart';
+import 'package:jm_quick/services/legacy_api.dart';
+import 'package:http/testing.dart';
+
+import 'confirmed_auth_test.dart' show FakeAuthClient;
 
 Map<String, dynamic> _fixture() =>
     jsonDecode(
@@ -49,9 +53,20 @@ Map<String, dynamic> _legacyEventData() => {
   'reconfirmEnabled': false,
 };
 
+/// Phase 10C: 旧経路はサーバーAPI経由になった。テストでは通信を一切しない(外部通信0)。
+/// 送信しようとしたリクエストはここに記録され、常に失敗する。guardで止まる経路ではここが空のままでなければならない。
+final List<Uri> _attemptedRequests = [];
+
 DemoRepository _repository(String? flow, {void Function()? onLoad}) =>
     DemoRepository(
       selectedEventId: 'e1',
+      api: LegacyApiClient(
+        authClient: FakeAuthClient(signedIn: true),
+        httpClient: MockClient((request) async {
+          _attemptedRequests.add(request.url);
+          throw StateError('no network in tests');
+        }),
+      ),
       eventFlowLoader: (eventId) async {
         onLoad?.call();
         return flow;
@@ -458,10 +473,12 @@ void main() {
       for (final entry in blockedOperations.entries) {
         test('flow=$flow のイベントで${entry.key}はFirestoreに触れる前に拒否される', () async {
           // Firebase未初期化のテスト環境。guardより先にFirestoreへ触れると別の例外になり失敗する。
+          _attemptedRequests.clear();
           await expectLater(
             entry.value(_repository(flow)),
             throwsA(isA<ConfirmedFlowException>()),
           );
+          expect(_attemptedRequests, isEmpty, reason: 'guardで止まり、サーバーへ送らない');
         });
       }
     }

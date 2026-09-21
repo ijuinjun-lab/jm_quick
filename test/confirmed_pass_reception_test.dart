@@ -11,6 +11,7 @@ import 'package:jm_quick/confirmed/pass_service.dart';
 import 'package:jm_quick/confirmed/reception_page.dart';
 import 'package:jm_quick/confirmed/reception_route.dart';
 import 'package:jm_quick/confirmed/reception_service.dart';
+import 'package:jm_quick/services/event_kind_service.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
@@ -637,7 +638,11 @@ void main() {
       ),
     );
 
-    testWidgets('従来方式のイベントは従来の受付画面(ログインも権限確認も要求しない)', (tester) async {
+    // Phase 10C: 以前は「従来方式の受付画面はログインも権限確認も要求しない」だった。認証境界の導入で、
+    // 従来方式の受付画面もstaff/adminのログインが必要になった(この経路は以前の許可から拒否へ変わった)。
+    testWidgets('Phase 10C: 従来方式のイベントの受付画面も、未ログインではログイン画面だけ。受付画面は出ない', (
+      tester,
+    ) async {
       final auth = FakeAuthClient(signedIn: false);
       final access = FakeAccessService([]);
       await tester.pumpWidget(
@@ -649,9 +654,96 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('LEGACY-RECEPTION'), findsOneWidget);
+      expect(find.text('LEGACY-RECEPTION'), findsNothing);
       expect(access.calls, 0);
     });
+
+    testWidgets(
+      'Phase 10C: 従来方式の受付画面は、staff・adminとして確認できたあとだけ表示される。権限なしでは出ない',
+      (tester) async {
+        for (final role in [AccessRole.staff, AccessRole.admin]) {
+          await tester.pumpWidget(
+            route(
+              legacy: true,
+              auth: FakeAuthClient(signedIn: true),
+              access: FakeAccessService([AccessCheck.granted(role)]),
+              reception: FakeReceptionService(programs: []),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.text('LEGACY-RECEPTION'),
+            findsOneWidget,
+            reason: '$role',
+          );
+          await tester.pumpWidget(const SizedBox());
+        }
+        await tester.pumpWidget(
+          route(
+            legacy: true,
+            auth: FakeAuthClient(signedIn: true),
+            access: FakeAccessService([const AccessCheck.denied()]),
+            reception: FakeReceptionService(programs: []),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('LEGACY-RECEPTION'), findsNothing);
+        expect(find.text('権限がありません'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'Phase 10C: 未知のflow・存在しないイベント・方式を読めないときは、どの受付画面も出さない(fail-closed)',
+      (tester) async {
+        for (final kind in [EventKind.unsupported, EventKind.missing]) {
+          final reception = FakeReceptionService(programs: [...threePrograms]);
+          await tester.pumpWidget(
+            app(
+              ReceptionRoutePage(
+                eventId: 'event1',
+                participantId: 'batchA-000002',
+                publicId: 'pub_x',
+                legacyBuilder: (_) =>
+                    const Scaffold(body: Text('LEGACY-RECEPTION')),
+                authClient: FakeAuthClient(signedIn: true),
+                accessService: FakeAccessService([
+                  AccessCheck.granted(AccessRole.admin),
+                ]),
+                receptionService: reception,
+                eventKind: (_) async => kind,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('LEGACY-RECEPTION'), findsNothing, reason: '$kind');
+          expect(find.text('受付する'), findsNothing, reason: '$kind');
+          expect(reception.viewCalls, 0, reason: '$kind');
+          await tester.pumpWidget(const SizedBox());
+        }
+        final reception = FakeReceptionService(programs: [...threePrograms]);
+        await tester.pumpWidget(
+          app(
+            ReceptionRoutePage(
+              eventId: 'event1',
+              participantId: 'batchA-000002',
+              publicId: 'pub_x',
+              legacyBuilder: (_) =>
+                  const Scaffold(body: Text('LEGACY-RECEPTION')),
+              authClient: FakeAuthClient(signedIn: true),
+              accessService: FakeAccessService([
+                AccessCheck.granted(AccessRole.admin),
+              ]),
+              receptionService: reception,
+              eventKind: (_) async => throw StateError('read failed'),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('LEGACY-RECEPTION'), findsNothing);
+        expect(find.text('再試行'), findsOneWidget);
+        expect(reception.viewCalls, 0);
+      },
+    );
 
     testWidgets('必要なパラメータが欠けたURLは従来の受付画面へ(従来の案内表示)', (tester) async {
       final reception = FakeReceptionService(programs: [...threePrograms]);

@@ -126,6 +126,15 @@ function confirmedPublicPassCallable(handler, options = {}) {
   return defineCallable(async () => null, handler, {...PUBLIC_PASS_CALLABLE_OPTIONS, ...options});
 }
 
+// Phase 10C: 従来方式(legacy)の「ログインなしで呼べる公開入口」。confirmedPublicPassCallableと同じ構造(guardなし+公開用オプション)。
+// 用途は2つだけ: (1) 参加者本人が participantId+publicId(capability)で自分のマイページを閲覧・回答する (2) 当日参加登録(registerWalkIn)。
+// 認可の代わりに、ハンドラがcapability(publicId)・イベントの状態・入力検証を必ず行う。管理・受付・削除・メール一括送信には使ってはならない。
+// Phase 10D: enforceAppCheck と rate limit はこの入口の PUBLIC_PASS_CALLABLE_OPTIONS / ハンドラ側のフックで有効にする。
+function publicCapabilityCallable(handler, options = {}) {
+  if (typeof handler !== "function") throw new Error("publicCapabilityCallable: handler required");
+  return defineCallable(async () => null, handler, {...PUBLIC_PASS_CALLABLE_OPTIONS, ...options});
+}
+
 module.exports = {
   ROLE_ADMIN,
   ROLE_STAFF,
@@ -137,5 +146,6 @@ module.exports = {
   requireAdmin,
   confirmedCallable,
   confirmedPublicPassCallable,
+  publicCapabilityCallable,
   PUBLIC_PASS_CALLABLE_OPTIONS,
 };

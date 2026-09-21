@@ -3,10 +3,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'event_status.dart';
 import 'program_models.dart';
 
+/// Firestoreのタイムスタンプ・DateTime、およびサーバーAPIが返すISO 8601の文字列(Phase 10C)を日時へ変換する。
 DateTime? dateFrom(dynamic value) => value is Timestamp
     ? value.toDate()
     : value is DateTime
     ? value
+    : value is String
+    ? DateTime.tryParse(value)?.toLocal()
     : null;
 
 /// イベント方式(flow)の値。未設定(null/空/'legacy')は従来方式、'confirmed'は新方式。
@@ -67,6 +70,7 @@ class DemoEvent {
     required this.reconfirmEnabled,
     this.flow,
     this.programs = const [],
+    this.summary,
   });
   final String id;
   final String name;
@@ -86,6 +90,9 @@ class DemoEvent {
   /// 新方式のprogram定義(order順)。旧イベントは未設定=空。
   final List<EventProgram> programs;
 
+  /// 従来方式のイベント一覧に表示する参加者の集計(サーバーが計算。イベント一覧APIだけが付ける)。
+  final EventSummary? summary;
+
   /// 従来方式(flow未設定/null/空/'legacy')。
   bool get isLegacyFlow => isLegacyFlowValue(flow);
 
@@ -95,7 +102,11 @@ class DemoEvent {
   factory DemoEvent.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) =>
       DemoEvent.fromData(doc.id, doc.data() ?? {});
 
-  factory DemoEvent.fromData(String id, Map<String, dynamic> data) {
+  factory DemoEvent.fromData(
+    String id,
+    Map<String, dynamic> data, {
+    EventSummary? summary,
+  }) {
     final name = data['eventName'] as String? ?? 'イベント参加受付';
     return DemoEvent(
       id: id,
@@ -112,6 +123,7 @@ class DemoEvent {
       reconfirmEnabled: data['reconfirmEnabled'] as bool? ?? false,
       flow: data['flow'] as String?,
       programs: EventProgram.listFromData(data['programs']),
+      summary: summary,
     );
   }
 
@@ -127,6 +139,42 @@ class DemoEvent {
       endAt: endAt,
       registrationDeadline: registrationDeadline!,
       confirmationSendAt: confirmationSendAt!,
+    );
+  }
+}
+
+/// 従来方式のイベント一覧に表示する集計(申込人数などの合計。サーバーで計算した値)。
+class EventSummary {
+  const EventSummary({
+    required this.participantCount,
+    required this.appliedCount,
+    required this.registeredCount,
+    required this.formallyRegisteredCount,
+    required this.attendingCount,
+    required this.notAttendingCount,
+    required this.unansweredCount,
+    required this.attendedCount,
+  });
+  final int participantCount;
+  final int appliedCount;
+  final int registeredCount;
+  final int formallyRegisteredCount;
+  final int attendingCount;
+  final int notAttendingCount;
+  final int unansweredCount;
+  final int attendedCount;
+
+  factory EventSummary.fromData(Map<String, dynamic> data) {
+    int number(String key) => (data[key] as num?)?.toInt() ?? 0;
+    return EventSummary(
+      participantCount: number('participantCount'),
+      appliedCount: number('appliedCount'),
+      registeredCount: number('registeredCount'),
+      formallyRegisteredCount: number('formallyRegisteredCount'),
+      attendingCount: number('attendingCount'),
+      notAttendingCount: number('notAttendingCount'),
+      unansweredCount: number('unansweredCount'),
+      attendedCount: number('attendedCount'),
     );
   }
 }
@@ -256,11 +304,13 @@ class BulkMailJob {
   bool get isRunning =>
       const {'preparing', 'queued', 'running'}.contains(status);
 
-  factory BulkMailJob.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? {};
+  factory BulkMailJob.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) =>
+      BulkMailJob.fromData(doc.id, doc.data() ?? {});
+
+  factory BulkMailJob.fromData(String id, Map<String, dynamic> data) {
     int number(String key) => (data[key] as num?)?.toInt() ?? 0;
     return BulkMailJob(
-      id: doc.id,
+      id: id,
       eventId: data['eventId'] as String? ?? '',
       type: data['type'] as String? ?? '',
       status: data['status'] as String? ?? '',
@@ -288,10 +338,12 @@ class CheckIn {
   final DateTime? checkedInAt;
   final DateTime? updatedAt;
 
-  factory CheckIn.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
-    final data = doc.data() ?? {};
+  factory CheckIn.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) =>
+      CheckIn.fromData(doc.id, doc.data() ?? {});
+
+  factory CheckIn.fromData(String id, Map<String, dynamic> data) {
     return CheckIn(
-      participantId: data['participantId'] as String? ?? doc.id,
+      participantId: data['participantId'] as String? ?? id,
       eventId: data['eventId'] as String? ?? '',
       checkedIn: data['checkedIn'] as bool? ?? false,
       attendedCount: (data['attendedCount'] as num?)?.toInt(),

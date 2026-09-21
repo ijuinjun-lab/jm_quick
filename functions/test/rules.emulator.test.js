@@ -138,30 +138,33 @@ describe("Firestore Rules(ローカルEmulator)", {skip: skipReason}, () => {
       assert.equal(await create("programAttendances", "y1_cat", {eventId: "e-legacy", participantId: "y1", programId: "cat", plannedCount: 1}), 403));
   });
 
-  describe("旧クライアント直書き経路: legacyイベントは従来どおり許可される(回帰)", () => {
+  // Phase 10C: 以前は「legacyイベントへのクライアント直書きは従来どおり許可される(回帰)」だった。
+  // 認証境界の導入で、events・participants・checkIns のクライアントSDK直接書込みは、legacyも含めてすべて拒否になった
+  // (以前の許可から拒否へ意図的に変更。同じ操作はadmin/staffの認証つきcallableで行う)。eventsのreadだけは10Dまで公開のまま。
+  describe("Phase 10C: 旧クライアント直書き経路は、legacyイベントでもすべて拒否される(以前は許可)", () => {
     for (const eventId of ["e-legacy", "e-legacy-explicit"]) {
-      test(`${eventId}: 設定更新(events update)`, async () =>
-        assert.equal(await update(`events/${eventId}`, {venue: "新会場", reconfirmEnabled: false}), 200));
-      test(`${eventId}: 正式登録(participants update)`, async () =>
-        assert.equal(await update(`participants/p-${eventId}`, {participationConfirmed: true, updatedAt: new Date()}), 200));
-      test(`${eventId}: 参加予定回答/reconfirm(participants update)`, async () =>
-        assert.equal(await update(`participants/p-${eventId}`, {reconfirmed: true, attendanceResponse: "attending", updatedAt: new Date()}), 200));
-      test(`${eventId}: 旧受付(checkIns update)`, async () =>
-        assert.equal(await update(`checkIns/p-${eventId}`, {checkedIn: true, attendedCount: 1, registeredCountSnapshot: 1, checkedInAt: new Date(), updatedAt: new Date()}), 200));
-      test(`${eventId}: 参加者+受付の同時作成(旧createParticipant)`, async () => {
+      test(`${eventId}: 設定更新(events update)は拒否(以前は許可)`, async () =>
+        assert.equal(await update(`events/${eventId}`, {venue: "新会場", reconfirmEnabled: false}), 403));
+      test(`${eventId}: 正式登録(participants update)は拒否(以前は許可)`, async () =>
+        assert.equal(await update(`participants/p-${eventId}`, {participationConfirmed: true, updatedAt: new Date()}), 403));
+      test(`${eventId}: 参加予定回答/reconfirm(participants update)は拒否(以前は許可)`, async () =>
+        assert.equal(await update(`participants/p-${eventId}`, {reconfirmed: true, attendanceResponse: "attending", updatedAt: new Date()}), 403));
+      test(`${eventId}: 旧受付(checkIns update)は拒否(以前は許可)`, async () =>
+        assert.equal(await update(`checkIns/p-${eventId}`, {checkedIn: true, attendedCount: 1, registeredCountSnapshot: 1, checkedInAt: new Date(), updatedAt: new Date()}), 403));
+      test(`${eventId}: 参加者+受付の同時作成(旧createParticipant)は拒否(以前は許可)`, async () => {
         const id = `n-${eventId}`;
         assert.equal(await commit([
           {path: `participants/${id}`, data: participantDoc(id, eventId)},
           {path: `checkIns/${id}`, data: checkInDoc(id, eventId)},
-        ]), 200);
+        ]), 403);
       });
     }
-    test("legacyイベントの新規作成(flowなし)", async () =>
-      assert.equal(await create("events", "e-new-legacy", event("e-new-legacy")), 200));
-    test("events/participants/checkIns のreadは従来どおり(Phase 10で閉じる)", async () => {
-      assert.equal(await read("events/e-legacy"), 200);
-      assert.equal(await read("participants/p-e-legacy"), 200);
-      assert.equal(await read("checkIns/p-e-legacy"), 200);
+    test("legacyイベントの新規作成(flowなし)は拒否(以前は許可)", async () =>
+      assert.equal(await create("events", "e-new-legacy", event("e-new-legacy")), 403));
+    test("participants/checkIns のreadは拒否(以前は許可)。eventsのreadだけはPhase 10Dまで公開のまま", async () => {
+      assert.equal(await read("events/e-legacy"), 200, "eventsのreadは残している(受付QRの方式判定用。Phase 10Dで閉じる)");
+      assert.equal(await read("participants/p-e-legacy"), 403);
+      assert.equal(await read("checkIns/p-e-legacy"), 403);
     });
   });
 

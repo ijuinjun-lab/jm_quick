@@ -1,23 +1,26 @@
 import 'package:flutter/material.dart';
 
-import '../models/demo_models.dart';
 import '../services/demo_repository.dart';
 import '../widgets/common.dart';
 
 class WalkInPage extends StatefulWidget {
-  const WalkInPage({super.key, required this.eventId});
+  const WalkInPage({super.key, required this.eventId, this.repository});
   final String eventId;
+
+  /// テスト用。既定は公開の当日参加登録API(サーバーが入力・イベントの状態を検証し、メールを送る)を使う。
+  final DemoRepository? repository;
   @override
   State<WalkInPage> createState() => _WalkInPageState();
 }
 
 class _WalkInPageState extends State<WalkInPage> {
-  late final repository = DemoRepository(selectedEventId: widget.eventId);
+  late final repository =
+      widget.repository ?? DemoRepository(selectedEventId: widget.eventId);
   final name = TextEditingController();
   final email = TextEditingController();
   final count = TextEditingController(text: '1');
   bool saving = false;
-  Participant? created;
+  ({String participantId, String publicId})? created;
   String? mailError;
 
   @override
@@ -49,7 +52,10 @@ class _WalkInPageState extends State<WalkInPage> {
         email: email.text,
         registeredCount: registeredCount,
       );
-      created = result.participant;
+      created = (
+        participantId: result.participantId,
+        publicId: result.publicId,
+      );
       mailError = result.mailError;
     } on MailSendException catch (e) {
       if (mounted) {
@@ -127,7 +133,7 @@ class _WalkInPageState extends State<WalkInPage> {
                   FilledButton(
                     onPressed: () => Navigator.pushNamed(
                       context,
-                      '/p/${created!.id}?publicId=${Uri.encodeQueryComponent(created!.publicId)}',
+                      '/p/${created!.participantId}?publicId=${Uri.encodeQueryComponent(created!.publicId)}',
                     ),
                     child: const Text('マイページを開く'),
                   ),

@@ -4,6 +4,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../models/demo_models.dart';
 import '../services/demo_repository.dart';
+import '../services/legacy_api.dart';
 import '../services/csv_import_service.dart';
 import '../widgets/common.dart';
 import '../services/download_service.dart';
@@ -13,14 +14,27 @@ String walkInPathForEvent(String eventId) =>
     '/e/${Uri.encodeComponent(eventId)}/walk-in';
 
 class DemoAdminPage extends StatefulWidget {
-  const DemoAdminPage({super.key, required this.eventId});
+  const DemoAdminPage({
+    super.key,
+    required this.eventId,
+    this.api,
+    this.repository,
+  });
   final String eventId;
+
+  /// 管理者としてログイン済みのAPI窓口(入口の LegacyAdminGate が渡す)。
+  final LegacyApiClient? api;
+
+  /// テスト用。
+  final DemoRepository? repository;
   @override
   State<DemoAdminPage> createState() => _DemoAdminPageState();
 }
 
 class _DemoAdminPageState extends State<DemoAdminPage> {
-  late final repository = DemoRepository(selectedEventId: widget.eventId);
+  late final repository =
+      widget.repository ??
+      DemoRepository(selectedEventId: widget.eventId, api: widget.api);
   bool busy = false;
 
   Future<void> run(Future<void> Function() action, String success) async {
@@ -61,6 +75,13 @@ class _DemoAdminPageState extends State<DemoAdminPage> {
         if (eventSnapshot.hasError) return ErrorPanel(eventSnapshot.error!);
         if (eventSnapshot.data == null) {
           return const ErrorPanel('イベントが見つかりません。');
+        }
+        // 新方式(confirmed)・未知のflowのイベントでは、従来の管理機能(設定編集・参加者・受付・メール)を出さず、
+        // 参加者・受付・メール進捗の購読もしない(案内だけ)。
+        if (!eventSnapshot.data!.isLegacyFlow) {
+          return const NonLegacyFlowNotice(
+            message: '新方式のイベントです。新しい管理画面を使用してください。',
+          );
         }
         return StreamBuilder<List<Participant>>(
           stream: repository.watchParticipants(),

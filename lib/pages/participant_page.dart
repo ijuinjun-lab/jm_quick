@@ -10,16 +10,20 @@ class ParticipantPage extends StatefulWidget {
     super.key,
     required this.participantId,
     required this.publicId,
+    this.repository,
   });
   final String? participantId;
   final String? publicId;
+
+  /// テスト用。既定は参加者capability(participantId+publicId)のサーバーAPIを使う。Firestoreは直接読まない。
+  final DemoRepository? repository;
   @override
   State<ParticipantPage> createState() => _ParticipantPageState();
 }
 
 class _ParticipantPageState extends State<ParticipantPage> {
-  final repository = DemoRepository();
-  Participant? resolved;
+  late final repository = widget.repository ?? DemoRepository();
+  ParticipantPageData? data;
   bool loading = true;
   bool saving = false;
   Object? error;
@@ -27,12 +31,13 @@ class _ParticipantPageState extends State<ParticipantPage> {
   @override
   void initState() {
     super.initState();
-    _resolve();
+    _load();
   }
 
-  Future<void> _resolve() async {
+  // 存在しない・publicId不一致・従来方式でない・不正なURLは、サーバーが同じ応答(=data==null)を返す。
+  Future<void> _load() async {
     try {
-      resolved = await repository.resolveParticipant(
+      data = await repository.loadParticipantPage(
         widget.participantId,
         widget.publicId,
       );
@@ -42,11 +47,15 @@ class _ParticipantPageState extends State<ParticipantPage> {
     if (mounted) setState(() => loading = false);
   }
 
-  Future<void> action(Future<void> Function() callback, String message) async {
+  Future<void> action(
+    Future<ParticipantPageData> Function() callback,
+    String message,
+  ) async {
     setState(() => saving = true);
     try {
-      await callback();
+      final updated = await callback();
       if (mounted) {
+        setState(() => data = updated);
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(message)));
@@ -69,48 +78,23 @@ class _ParticipantPageState extends State<ParticipantPage> {
         ? const Center(child: CircularProgressIndicator())
         : error != null
         ? const _ParticipantErrorPanel()
-        : resolved == null
+        : data == null
         ? const Card(
             child: Padding(
               padding: EdgeInsets.all(24),
               child: Text('有効なマイページURLではありません。'),
             ),
           )
-        : StreamBuilder<DemoEvent?>(
-            stream: repository.watchEventById(resolved!.eventId),
-            builder: (context, eventSnapshot) => StreamBuilder<Participant?>(
-              stream: repository.watchParticipant(resolved!.id),
-              builder: (context, participantSnapshot) =>
-                  StreamBuilder<CheckIn?>(
-                    stream: repository.watchCheckIn(resolved!.id),
-                    builder: (context, checkInSnapshot) {
-                      if (eventSnapshot.hasError ||
-                          participantSnapshot.hasError ||
-                          checkInSnapshot.hasError) {
-                        return const _ParticipantErrorPanel();
-                      }
-                      final event = eventSnapshot.data;
-                      final p = participantSnapshot.data;
-                      final c = checkInSnapshot.data;
-                      if (event == null || p == null) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-                      return _content(event, p, c);
-                    },
-                  ),
-            ),
-          ),
+        : _content(data!),
   );
 
-  Widget _content(DemoEvent event, Participant p, CheckIn? c) {
-    // 新方式(flow=confirmed)では正式登録・参加予定回答・participant単位のQR受付を使わない。
-    // 新方式の参加者の参加証は /p/{id} の入口(PassRoutePage)が表示する。ここへ来たのは参加証を確認できなかった場合なので、
-    // 内部の状態(新方式・publicIdなど)を参加者へ示さず、共通の表示にする。
-    if (!event.isLegacyFlow) {
-      return const NonLegacyFlowNotice(message: '参加証を確認できませんでした。');
-    }
+  // 新方式(flow=confirmed)の参加者は、サーバーが「無効なページ」と同じ応答にする(この画面では扱わない)。
+  // 新方式の参加証は /p/{id} の入口(PassRoutePage)が表示する。
+  Widget _content(ParticipantPageData p) {
+    final participantId = widget.participantId!;
+    final publicId = widget.publicId!;
     final receptionUri =
-        '/reception?eventId=${Uri.encodeQueryComponent(p.eventId)}&participantId=${p.id}&publicId=${Uri.encodeQueryComponent(p.publicId)}';
+        '/reception?eventId=${Uri.encodeQueryComponent(p.eventId)}&participantId=${Uri.encodeQueryComponent(participantId)}&publicId=${Uri.encodeQueryComponent(publicId)}';
     final qrPayload = Uri.base.resolve(receptionUri).toString();
     return Card(
       child: Padding(
@@ -119,7 +103,7 @@ class _ParticipantPageState extends State<ParticipantPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              event.name,
+              p.eventName,
               textAlign: TextAlign.center,
               style: Theme.of(
                 context,
@@ -135,8 +119,8 @@ class _ParticipantPageState extends State<ParticipantPage> {
             ),
             const SizedBox(height: 16),
             InfoRow('お申し込み人数', '${p.registeredCount}名'),
-            InfoRow('開催日時', formatDateTime(event.startAt)),
-            InfoRow('会場', event.venue),
+            InfoRow('開催日時', formatDateTime(p.startAt)),
+            InfoRow('会場', p.venue),
             const SizedBox(height: 20),
             if (!p.participationConfirmed)
               Column(
@@ -153,7 +137,10 @@ class _ParticipantPageState extends State<ParticipantPage> {
                     onPressed: saving
                         ? null
                         : () => action(
-                            () => repository.confirmParticipation(p),
+                            () => repository.confirmParticipationByKey(
+                              participantId,
+                              publicId,
+                            ),
                             '正式登録が完了しました。',
                           ),
                     child: const Text('正式登録する'),
@@ -187,7 +174,7 @@ class _ParticipantPageState extends State<ParticipantPage> {
                 ),
               ),
             if (p.participationConfirmed &&
-                event.reconfirmEnabled &&
+                p.reconfirmEnabled &&
                 p.attendanceResponse == null)
               Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -206,8 +193,9 @@ class _ParticipantPageState extends State<ParticipantPage> {
                         onPressed: saving
                             ? null
                             : () => action(
-                                () => repository.reconfirm(
-                                  p,
+                                () => repository.reconfirmByKey(
+                                  participantId,
+                                  publicId,
                                   AttendanceResponse.attending,
                                 ),
                                 '「参加予定」で回答しました。',
@@ -218,8 +206,9 @@ class _ParticipantPageState extends State<ParticipantPage> {
                         onPressed: saving
                             ? null
                             : () => action(
-                                () => repository.reconfirm(
-                                  p,
+                                () => repository.reconfirmByKey(
+                                  participantId,
+                                  publicId,
                                   AttendanceResponse.notAttending,
                                 ),
                                 '「不参加予定」で回答しました。',
@@ -258,13 +247,13 @@ class _ParticipantPageState extends State<ParticipantPage> {
                 '当日は、このQRコードを受付でご提示ください。',
                 textAlign: TextAlign.center,
               ),
-            if (p.participationConfirmed && c?.checkedIn == true)
+            if (p.participationConfirmed && p.checkedIn)
               Container(
                 margin: const EdgeInsets.only(top: 12),
                 padding: const EdgeInsets.all(14),
                 color: const Color(0xffe7f5ec),
                 child: Text(
-                  '受付済み\n実参加人数 ${c?.attendedCount ?? 0}名',
+                  '受付済み\n実参加人数 ${p.attendedCount ?? 0}名',
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     fontSize: 18,

@@ -2,17 +2,24 @@ import 'package:flutter/material.dart';
 
 import '../models/demo_models.dart';
 import '../services/demo_repository.dart';
+import '../services/legacy_api.dart';
 import '../widgets/common.dart';
 
 class EventListPage extends StatefulWidget {
-  const EventListPage({super.key});
+  const EventListPage({super.key, this.api, this.repository});
+
+  /// 管理者としてログイン済みのAPI窓口(入口の LegacyAdminGate が渡す)。
+  final LegacyApiClient? api;
+
+  /// テスト用。
+  final DemoRepository? repository;
 
   @override
   State<EventListPage> createState() => _EventListPageState();
 }
 
 class _EventListPageState extends State<EventListPage> {
-  final repository = DemoRepository();
+  late final repository = widget.repository ?? DemoRepository(api: widget.api);
 
   @override
   Widget build(BuildContext context) => PageFrame(
@@ -52,74 +59,52 @@ class _EventListPageState extends State<EventListPage> {
   );
 
   Widget _eventCard(DemoEvent event) {
-    final scoped = DemoRepository(selectedEventId: event.id);
+    // 集計はサーバー(イベント一覧API)が計算した値。従来方式のイベントにだけ付く(新方式のイベントには付かない)。
+    final summary = event.summary;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
-      child: StreamBuilder<List<Participant>>(
-        stream: scoped.watchParticipants(),
-        builder: (context, participantSnapshot) => StreamBuilder<List<CheckIn>>(
-          stream: scoped.watchCheckIns(),
-          builder: (context, checkInSnapshot) {
-            final participants = participantSnapshot.data ?? [];
-            final checkIns = checkInSnapshot.data ?? [];
-            final registered = participants
-                .where((value) => value.participationConfirmed)
-                .length;
-            final appliedCount = participants.fold<int>(
-              0,
-              (sum, value) => sum + value.registeredCount,
-            );
-            final formallyRegisteredCount = participants
-                .where((value) => value.participationConfirmed)
-                .fold<int>(0, (sum, value) => sum + value.registeredCount);
-            int responseCount(AttendanceResponse? response) => participants
-                .where(
-                  (value) =>
-                      value.participationConfirmed &&
-                      value.attendanceResponse == response,
-                )
-                .fold(0, (sum, value) => sum + value.registeredCount);
-            final attended = checkIns
-                .where((value) => value.checkedIn)
-                .fold<int>(0, (sum, value) => sum + (value.attendedCount ?? 0));
-            return Card(
-              child: Padding(
-                padding: const EdgeInsets.all(18),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Text(
-                      event.name,
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+      child: Builder(
+        builder: (context) {
+          return Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    event.name,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.bold,
                     ),
-                    InfoRow('開催日時', formatDateTime(event.startAt)),
-                    InfoRow('会場', event.venue),
-                    InfoRow(
-                      '正式登録締切日時',
-                      formatDateTimeMinute(event.registrationDeadline),
-                    ),
-                    InfoRow(
-                      '参加予定確認メール送信日時',
-                      formatDateTimeMinute(event.confirmationSendAt),
-                    ),
+                  ),
+                  InfoRow('開催日時', formatDateTime(event.startAt)),
+                  InfoRow('会場', event.venue),
+                  InfoRow(
+                    '正式登録締切日時',
+                    formatDateTimeMinute(event.registrationDeadline),
+                  ),
+                  InfoRow(
+                    '参加予定確認メール送信日時',
+                    formatDateTimeMinute(event.confirmationSendAt),
+                  ),
+                  if (summary == null)
+                    // 新方式(confirmed)・未知のflowのイベント。従来の集計・削除は使わず、新しい管理画面へ案内する
+                    const NonLegacyFlowNotice(
+                      message: '新方式のイベントです。新しい管理画面(/console)を使用してください。',
+                    )
+                  else
                     Wrap(
                       spacing: 18,
                       runSpacing: 8,
                       children: [
-                        Text('登録 ${participants.length}件'),
-                        Text('申込人数 $appliedCount名'),
-                        Text('正式登録 $registered件'),
-                        Text('正式登録人数 $formallyRegisteredCount名'),
-                        Text(
-                          '参加予定 ${responseCount(AttendanceResponse.attending)}名',
-                        ),
-                        Text(
-                          '不参加予定 ${responseCount(AttendanceResponse.notAttending)}名',
-                        ),
-                        Text('未回答 ${responseCount(null)}名'),
-                        Text('受付人数 $attended名'),
+                        Text('登録 ${summary.participantCount}件'),
+                        Text('申込人数 ${summary.appliedCount}名'),
+                        Text('正式登録 ${summary.registeredCount}件'),
+                        Text('正式登録人数 ${summary.formallyRegisteredCount}名'),
+                        Text('参加予定 ${summary.attendingCount}名'),
+                        Text('不参加予定 ${summary.notAttendingCount}名'),
+                        Text('未回答 ${summary.unansweredCount}名'),
+                        Text('受付人数 ${summary.attendedCount}名'),
                         Chip(
                           label: Text(
                             event.statusAt(DateTime.now())?.label ?? '設定未完了',
@@ -127,14 +112,17 @@ class _EventListPageState extends State<EventListPage> {
                         ),
                       ],
                     ),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: Wrap(
-                        spacing: 8,
-                        children: [
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Wrap(
+                      spacing: 8,
+                      children: [
+                        if (summary != null)
                           TextButton.icon(
-                            onPressed: () =>
-                                _confirmDeleteEvent(event, participants.length),
+                            onPressed: () => _confirmDeleteEvent(
+                              event,
+                              summary.participantCount,
+                            ),
                             icon: const Icon(Icons.delete_outline),
                             label: const Text('イベントを削除'),
                             style: TextButton.styleFrom(
@@ -143,22 +131,21 @@ class _EventListPageState extends State<EventListPage> {
                               ).colorScheme.error,
                             ),
                           ),
-                          FilledButton.tonal(
-                            onPressed: () => Navigator.pushNamed(
-                              context,
-                              '/admin/events/${event.id}',
-                            ),
-                            child: const Text('イベント管理を開く'),
+                        FilledButton.tonal(
+                          onPressed: () => Navigator.pushNamed(
+                            context,
+                            '/admin/events/${event.id}',
                           ),
-                        ],
-                      ),
+                          child: const Text('イベント管理を開く'),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            );
-          },
-        ),
+            ),
+          );
+        },
       ),
     );
   }

@@ -1,114 +1,43 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function eventExists(eventId) {
-      return eventId is string
-        && exists(/databases/$(database)/documents/events/$(eventId));
-    }
-
-    function participantBelongsToEvent(participantId, eventId) {
-      return get(/databases/$(database)/documents/participants/$(participantId)).data.eventId == eventId;
-    }
-
-    function participantBelongsToEventAfterCommit(participantId, eventId) {
-      return getAfter(/databases/$(database)/documents/participants/$(participantId)).data.eventId == eventId;
-    }
-
-    // イベント方式(flow)。flow未設定/null/空/'legacy'は従来方式。'confirmed'(新方式)や未知の値は
-    // 従来方式ではない。従来のクライアント直書き経路(設定更新・参加者作成/更新・旧受付)は
-    // 従来方式のイベントだけに許可し、新方式のデータを旧経路から書き換えさせない。
-    function isLegacyEventData(data) {
-      return !('flow' in data) || data.flow == null || data.flow == '' || data.flow == 'legacy';
-    }
-
-    function eventIsLegacy(eventId) {
-      return eventId is string
-        && (!exists(/databases/$(database)/documents/events/$(eventId))
-          || isLegacyEventData(get(/databases/$(database)/documents/events/$(eventId)).data));
-    }
-
-    // read専用(Phase 10B): 「参照先のイベントが存在し、かつlegacyと明確に判定できる」場合だけtrue。
-    // 上の eventIsLegacy(write用)は「イベントが存在しない」場合もtrueにするが、readではそれを使わない
-    // (イベントが存在しない=孤児データを、flowが無いのでlegacyとして公開してはならない)。
-    // confirmed・未知のflow・eventIdが文字列でない/パスを壊す文字を含む・イベントが存在しない場合は、すべてfalse(fail-closed)。
-    // Rulesはクエリ結果のフィルタではない。listでも resource.data.eventId が「クエリの条件から確定している」場合だけ評価が通り、
-    // 確定できないクエリ(絞り込みなし・inで複数イベント混在 等)は、この関数が評価できず拒否される。
-    function eventIsReadableLegacy(eventId) {
-      return eventId is string
-        && !eventId.matches('.*/.*')
-        && exists(/databases/$(database)/documents/events/$(eventId))
-        && isLegacyEventData(get(/databases/$(database)/documents/events/$(eventId)).data);
-    }
-
-    // TEST OPERATION ONLY: 本番管理者認証導入までは管理画面検証用にreadを許可。
+    // Phase 10C: 従来方式(legacy)のクライアントSDK直接read/writeを閉じた。
+    // これまで旧管理画面・旧マイページ・旧受付が、events・participants・checkIns・mailJobs を直接読み書き・購読していたが、
+    // すべて認証つきのサーバーAPI(admin/staffOrAdmin)または参加者capability(participantId+publicId)のcallableへ移した。
+    // Admin SDKはRulesの影響を受けない(Functionsの従来Scheduler・callableは変わらず動く)。
+    //
+    // 【残しているread(Phase 10Dで閉じる予定)】
+    //   events の read だけは公開のまま(受付QR /reception が、従来方式か新方式かを判定するためにイベントを1件読む)。
+    //   eventsには参加者の個人情報を持たないが、イベント名・会場・日時・(confirmedの)テンプレート等を誰でも読める。
+    //   Phase 10Dで、方式判定を認証つきAPIへ移してから閉じること。
+    // 【writeはすべて閉じた】eventsのcreate/update/delete、participants・checkInsの全操作、mailJobsの全操作。
+    //   イベントの作成・更新・参加者登録・受付・削除・一括メールは、すべてサーバーAPI経由(サーバーが認可・legacy判定・入力検証・transactionを行う)。
     match /events/{eventId} {
       allow read: if true;
-      allow create: if request.resource.data.eventId == eventId
-        && isLegacyEventData(request.resource.data);
-      allow update: if resource.data.eventId == eventId
-        && request.resource.data.eventId == eventId
-        && isLegacyEventData(resource.data)
-        && isLegacyEventData(request.resource.data);
-      allow delete: if false;
+      allow create, update, delete: if false;
     }
 
-    // Phase 10B: confirmed(新方式)の参加者(氏名・かな・メール・publicId・sourceReference等)は、未認証・認証済みを問わず
-    // クライアントSDKから直接取得できない(get・list/queryとも拒否)。documentごと拒否する(フィールド単位の制御はしない)。
-    // legacyのイベントの参加者だけ、従来どおりreadを許可する(旧マイページ・旧受付・旧管理画面の互換のため。Phase 10Cで認証境界へ移行)。
-    // 存在しないイベント・未知のflow・eventId欠落の参加者も拒否する。confirmedの参加者情報は、Admin SDK経由のcallableだけが返す。
+    // Phase 10C: participants(氏名・かな・メール・publicId等)は、未認証・認証済みを問わずクライアントSDKから
+    // 直接get/list/create/update/deleteできない。従来方式の参加者もconfirmedの参加者も同じ(参照先イベントの有無・flowに依存しない。
+    // 存在しないイベントの孤児・未知のflow・eventId欠落・型が不正なデータも、読み書きとも拒否される)。
+    // 読み書きはAdmin SDKだけ(admin/staff/参加者capabilityのcallable)。
     match /participants/{participantId} {
-      allow get, list: if eventIsReadableLegacy(resource.data.eventId);
-      allow create: if request.resource.data.participantId == participantId
-        && eventExists(request.resource.data.eventId)
-        && request.resource.data.publicId is string
-        && request.resource.data.publicId.size() >= 24
-        && request.resource.data.name is string
-        && request.resource.data.email is string
-        && request.resource.data.registeredCount is int
-        && request.resource.data.registeredCount >= 1
-        && request.resource.data.registrationType == 'preRegistered'
-        && eventIsLegacy(request.resource.data.eventId);
-      allow update: if request.resource.data.eventId == resource.data.eventId
-        && eventIsLegacy(resource.data.eventId)
-        && request.resource.data.participantId == resource.data.participantId
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'participationConfirmed', 'participationConfirmedAt',
-          'reconfirmed', 'reconfirmedAt', 'attendanceResponse', 'updatedAt'
-        ])
-        && (!request.resource.data.diff(resource.data).affectedKeys()
-              .hasAny(['attendanceResponse'])
-          || request.resource.data.attendanceResponse in [
-            'attending', 'notAttending'
-          ]);
-      allow delete: if false;
+      allow read, write: if false;
     }
 
-    // Phase 10B: checkInsはlegacy専用(confirmedの受付の正本は programAttendances)。confirmed・未知のflow・孤児・eventId欠落は
-    // readを拒否する。legacyのイベントの受付状態だけ、従来どおりreadを許可する。
+    // Phase 10C: checkIns(従来方式の受付状態)も、クライアントSDKからの直接read/writeを全面拒否する。
+    // confirmedの受付の正本は programAttendances(下記)。受付はstaff/adminのcallable経由。
     match /checkIns/{participantId} {
-      allow get, list: if eventIsReadableLegacy(resource.data.eventId);
-      allow create: if eventExists(request.resource.data.eventId)
-        && eventIsLegacy(request.resource.data.eventId)
-        && request.resource.data.participantId == participantId
-        && participantBelongsToEventAfterCommit(participantId, request.resource.data.eventId);
-      allow update: if request.resource.data.eventId == resource.data.eventId
-        && eventIsLegacy(resource.data.eventId)
-        && request.resource.data.participantId == participantId
-        && participantBelongsToEvent(participantId, resource.data.eventId)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'checkedIn', 'registeredCountSnapshot', 'attendedCount',
-          'checkedInAt', 'updatedAt'
-        ]);
-      allow delete: if false;
+      allow read, write: if false;
     }
 
     match /mailLogs/{documentId} {
       allow read, write: if false;
     }
 
+    // Phase 10C: 従来の一括メールジョブ。進捗の表示は管理者向けAPI(getLegacyEventAdminView)へ移したため、readも閉じた。
     match /mailJobs/{jobId} {
-      allow get, list: if resource.data.eventId is string;
-      allow create, update, delete: if false;
+      allow read, write: if false;
 
       match /items/{participantId} {
         allow read, write: if false;
@@ -135,7 +64,7 @@ service cloud.firestore {
     // 新方式の当選メールの送信ジョブと配送記録。クライアントからのread/writeは一切許可しない(Admin SDK・admin専用callableのみ)。
     // mailDeliveriesは「参加者へメールを送ったか」の正本。旧mailJobsは使わない(旧processorに誤処理されないため)。
     // 当選メールのテンプレート(events.winnerMailTemplate)も、confirmedイベントはクライアントから更新できない
-    // (events の更新はlegacyイベントだけに許可しているため)。更新は必ずadmin専用callable経由。
+    // (Phase 10Cで events の書込みは全面拒否した)。更新は必ずadmin専用callable経由。
     match /sendJobs/{jobId} {
       allow read, write: if false;
 
