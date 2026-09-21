@@ -27,12 +27,51 @@ const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const PUBLIC_ID_PATTERN = /^pub_[A-Za-z0-9_-]{20,128}$/;
 const PARTICIPANT_SCHEMA_VERSION = 2;
 const MAX_ATTENDED_COUNT = MAX_PLANNED_COUNT; // 実来場人数の上限(予定人数の上限と同じ)
-const HISTORY_CHECK_IN_ID = "check-in-1"; // 初回受付の履歴の固定ID(1つのattendanceにつき初回受付は1回だけ)
+// 受付履歴(programAttendances/{id}/history)は追記型。IDは `{action}-{sequence}`(sequenceは受付ごとに1ずつ増える連番)。
+//   例: check-in-1 → correction-2 → cancellation-3 → check-in-4。IDの連番で操作順を復元でき、同じIDを奪い合わない。
+//   連番の現在値は attendance.historySequence(同じtransactionで+1)。Phase 7のデータ(historySequenceなし・受付済みで check-in-1 が既にある)は、
+//   migrationなしで「受付済みなら1、未受付なら0」を現在値として扱う(既存のcheck-in-1は上書き・削除しない)。
+const HISTORY_ACTION = Object.freeze({CHECK_IN: "check-in", CORRECTION: "correction", CANCELLATION: "cancellation"});
+const currentHistorySequence = (attendance) => (Number.isInteger(attendance.historySequence) && attendance.historySequence >= 0 ?
+  attendance.historySequence : (attendance.checkedIn === true ? 1 : 0));
+const historyId = (action, sequence) => `${action}-${sequence}`;
 const UNAVAILABLE_MESSAGE = "参加証を確認できませんでした。";
 const STAFF_UNAVAILABLE_MESSAGE = "この参加証は受付できません。";
 
 const optionalText = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
 const iso = (value) => { const d = toDate(value); return d ? d.toISOString() : null; };
+
+// 同じprogramへの同時操作(transactionの競合・ロック待ちタイムアウト = ABORTED)は、少し待って再実行する。
+// 再実行しても安全: 各実行はtransactionで現在状態を読み直して判断するため、二重に反映されない(no-opや拒否になる)。
+const isContention = (error) => Boolean(error) && (error.code === 10 || /ABORTED|lock timeout|too much contention/i.test(String(error.message)));
+async function retryOnContention(run, attempts = 10) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!isContention(error) || attempt >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 + Math.random() * 60 * attempt));
+    }
+  }
+}
+
+// 同じattendanceへの操作は、同じFunctionsインスタンス内では順番に実行する(同時に読み書きして互いにロックを待つ競合を避ける)。
+// これは競合を減らすための工夫で、正しさの根拠ではない。別インスタンスからの同時操作も、Firestoreのtransaction(と上の再実行)が整合を保つ。
+const localLocks = new Map();
+async function withLocalLock(key, run) {
+  const previous = localLocks.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const tail = previous.then(() => gate);
+  localLocks.set(key, tail);
+  await previous;
+  try {
+    return await run();
+  } finally {
+    release();
+    if (localLocks.get(key) === tail) localLocks.delete(key);
+  }
+}
 
 function safeEqual(left, right) {
   const a = Buffer.from(String(left));
@@ -74,10 +113,13 @@ function passProblem({participant, event, batch, publicId, eventId}) {
   return null;
 }
 
-function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, logger}) {
+function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, logger, serializeLocally = true}) {
   const log = logger || console;
   // Phase 10 TODO: 公開の参加証APIのrate limit。ここに実装(例: IP・participantId単位の回数制限)を渡す。
   const rateLimit = checkRateLimit || (async () => {});
+
+  // インスタンス内の直列化(競合を減らす補助。テストでは切って、transaction単体での整合性も確認する)
+  const lockFor = serializeLocally ? withLocalLock : (key, run) => run();
 
   const participantRef = (db, id) => db.collection("participants").doc(id);
   const eventRef = (db, id) => db.collection("events").doc(id);
@@ -212,7 +254,7 @@ function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, l
     const attendanceRef = db.collection("programAttendances").doc(programAttendanceId(input.participantId, input.programId));
 
     // 再読込と検証・書込みを1つのtransactionで行う。同じprogramを同時に受付しても、成立するのは1回だけ。
-    const outcome = await db.runTransaction(async (tx) => {
+    const outcome = await lockFor(attendanceRef.path, () => retryOnContention(() => db.runTransaction(async (tx) => {
       const context = await loadContext(db, tx, input);
       const attendance = dataOf(await tx.get(attendanceRef));
       if (context.problem) return {denied: context.problem};
@@ -224,16 +266,20 @@ function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, l
       if (!normalizePrograms(context.event.programs).some((p) => p.programId === input.programId)) return {denied: "program-not-in-event"};
       if (attendance.checkedIn === true) return {alreadyCheckedIn: true}; // 既存の受付情報は一切変更しない
 
+      // 受付の書込みと履歴(追記)を同じtransactionで行う。再受付(取消後)でも過去の履歴は上書きせず、次の連番で追記する。
+      const sequence = currentHistorySequence(attendance) + 1;
       tx.update(attendanceRef, {
         checkedIn: true,
         checkedInAt: serverTimestamp(),
         attendedCount: input.attendedCount,
         checkedInBy: identity.uid,
+        historySequence: sequence,
         updatedAt: serverTimestamp(),
       });
-      // 初回受付の履歴(誰が・いつ・どのprogramを・何名で)。メールアドレス・氏名は複製しない。
-      tx.create(attendanceRef.collection("history").doc(HISTORY_CHECK_IN_ID), {
-        action: "check-in",
+      // 受付の履歴(誰が・いつ・どのprogramを・何名で)。メールアドレス・氏名は複製しない。
+      tx.create(attendanceRef.collection("history").doc(historyId(HISTORY_ACTION.CHECK_IN, sequence)), {
+        action: HISTORY_ACTION.CHECK_IN,
+        sequence,
         eventId: input.eventId,
         participantId: input.participantId,
         programId: input.programId,
@@ -243,7 +289,7 @@ function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, l
         changedAt: serverTimestamp(),
       });
       return {alreadyCheckedIn: false};
-    });
+    })));
 
     if (outcome.denied) {
       log.warn("check-in denied", {reason: outcome.denied, uid: identity.uid});
@@ -263,7 +309,88 @@ function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, l
     };
   }
 
-  return {getPass, getReceptionView, checkIn};
+  // ---- 受付後の訂正・取消(adminのみ。index.jsで confirmedCallable("admin", ...) により認可) --------------------------------------
+  // 受付状態の正本は programAttendances のまま。訂正は attendedCount だけ、取消は受付状態(checkedIn・checkedInAt・attendedCount・checkedInBy)だけを変える。
+  // plannedCount・participant・publicId・QR・メール配送(sendJobs・mailDeliveries)には一切触れない。
+  // 実変更ごとに history を1件だけ追記し(現在状態の更新と同じtransaction)、変更のない要求(no-op)では history を作らない。
+  const stateOf = (a) => ({
+    checkedIn: a.checkedIn === true, checkedInAt: a.checkedInAt || null,
+    attendedCount: Number.isInteger(a.attendedCount) ? a.attendedCount : null, checkedInBy: a.checkedInBy || null,
+  });
+  const programView = (input, current) => ({
+    programId: input.programId,
+    plannedCount: current.plannedCount,
+    checkedIn: current.checkedIn === true,
+    ...(iso(current.checkedInAt) ? {checkedInAt: iso(current.checkedInAt)} : {}),
+    ...(Number.isInteger(current.attendedCount) ? {attendedCount: current.attendedCount} : {}),
+  });
+
+  // transaction内で participant・event・batch・attendance を再読込・検証してから、decide(attendance)の結果を書く。
+  //   decide → {noop:true, reason?} | {denied: 理由} | {action, update, after}
+  async function mutateAttendance({identity, input, decide}) {
+    const db = getDb();
+    const attendanceRef = db.collection("programAttendances").doc(programAttendanceId(input.participantId, input.programId));
+    const outcome = await lockFor(attendanceRef.path, () => retryOnContention(() => db.runTransaction(async (tx) => {
+      const context = await loadContext(db, tx, input);
+      const attendance = dataOf(await tx.get(attendanceRef));
+      if (context.problem) return {denied: context.problem};
+      if (!attendance) return {denied: "attendance-missing"};
+      if (attendance.eventId !== input.eventId || attendance.participantId !== input.participantId || attendance.programId !== input.programId) {
+        return {denied: "attendance-mismatch"};
+      }
+      if (!normalizePrograms(context.event.programs).some((p) => p.programId === input.programId)) return {denied: "program-not-in-event"};
+      const decision = decide(attendance);
+      if (decision.noop || decision.denied) return decision;
+      const sequence = currentHistorySequence(attendance) + 1;
+      tx.update(attendanceRef, {...decision.update, historySequence: sequence, updatedAt: serverTimestamp()});
+      // 履歴は追記のみ(既存の履歴は変更・削除しない)。氏名・メール・publicId・QRは複製しない。changedByは認証UID、changedAtはサーバー時刻。
+      tx.create(attendanceRef.collection("history").doc(historyId(decision.action, sequence)), {
+        action: decision.action, sequence, eventId: input.eventId, participantId: input.participantId, programId: input.programId,
+        before: stateOf(attendance), after: decision.after, changedBy: identity.uid, changedAt: serverTimestamp(),
+      });
+      return {changed: true, sequence};
+    })));
+    if (outcome.denied) {
+      log.warn("attendance change denied", {reason: outcome.denied, uid: identity.uid});
+      throw staffProblem(outcome.denied);
+    }
+    const current = dataOf(await attendanceRef.get());
+    return {changed: outcome.changed === true, ...(outcome.noop ? {noop: outcome.reason || "no-change"} : {}), program: programView(input, current)};
+  }
+
+  // 実来場人数の訂正。受付済みのprogramだけ(未受付を受付済みにはしない)。plannedCount・checkedInAt・checkedInByは変えない。
+  async function correct({identity, data}) {
+    const input = parseInput(data, ["eventId", "participantId", "publicId", "programId", "attendedCount"]);
+    if (!input || input.eventId === undefined || !validIds(input) || !isValidProgramId(input.programId)) throw staffInvalid("invalid-input");
+    if (!Number.isInteger(input.attendedCount) || input.attendedCount < 1 || input.attendedCount > MAX_ATTENDED_COUNT) throw staffInvalid("invalid-attended-count");
+    return mutateAttendance({identity, input, decide: (attendance) => {
+      if (attendance.checkedIn !== true) return {denied: "attendance-not-checked-in"};
+      // 同じ人数への訂正(応答が届かなかった再試行を含む)は、何も変えず、履歴も作らない。
+      if (attendance.attendedCount === input.attendedCount) return {noop: true, reason: "no-change"};
+      return {
+        action: HISTORY_ACTION.CORRECTION,
+        update: {attendedCount: input.attendedCount},
+        after: {...stateOf(attendance), attendedCount: input.attendedCount},
+      };
+    }});
+  }
+
+  // 受付の取消(このprogramの受付記録を取り消す。参加者のキャンセルではない=participant.statusは変えない)。
+  // 未受付のprogramへの取消は、何も変えず履歴も作らない明示的なno-op(二重取消・応答消失後の再試行でも取消履歴は1件だけ)。
+  async function cancel({identity, data}) {
+    const input = parseInput(data, ["eventId", "participantId", "publicId", "programId"]);
+    if (!input || input.eventId === undefined || !validIds(input) || !isValidProgramId(input.programId)) throw staffInvalid("invalid-input");
+    return mutateAttendance({identity, input, decide: (attendance) => {
+      if (attendance.checkedIn !== true) return {noop: true, reason: "not-checked-in"};
+      return {
+        action: HISTORY_ACTION.CANCELLATION,
+        update: {checkedIn: false, checkedInAt: null, attendedCount: null, checkedInBy: null},
+        after: {checkedIn: false, checkedInAt: null, attendedCount: null, checkedInBy: null},
+      };
+    }});
+  }
+
+  return {getPass, getReceptionView, checkIn, correct, cancel};
 }
 
 module.exports = {createPassApi, passProblem, MAX_ATTENDED_COUNT, UNAVAILABLE_MESSAGE, STAFF_UNAVAILABLE_MESSAGE};

@@ -107,7 +107,43 @@ abstract class ReceptionService {
   });
 }
 
-class CallableReceptionService implements ReceptionService {
+/// 訂正・取消の結果。changed=falseは「変更なし」(同じ人数への訂正・すでに未受付への取消。履歴は増えない)。
+class AttendanceChange {
+  const AttendanceChange({
+    required this.changed,
+    required this.program,
+    this.noop,
+  });
+  final bool changed;
+
+  /// 変更がなかった理由(no-change / not-checked-in)。
+  final String? noop;
+
+  /// サーバーが確定した、そのprogramの現在の受付状態。
+  final ReceptionProgram program;
+}
+
+/// 受付後の訂正・取消(adminのみ。サーバー側もadmin専用)。staffには提供されない(この機能を持つサービスを渡さない)。
+/// 受付状態の正本はサーバーのprogramAttendances。ここで送るのはQRのID・program・訂正後の人数だけ。
+abstract class ReceptionAdminService {
+  Future<AttendanceChange> correct({
+    required String eventId,
+    required String participantId,
+    required String publicId,
+    required String programId,
+    required int attendedCount,
+  });
+
+  Future<AttendanceChange> cancel({
+    required String eventId,
+    required String participantId,
+    required String publicId,
+    required String programId,
+  });
+}
+
+class CallableReceptionService
+    implements ReceptionService, ReceptionAdminService {
   CallableReceptionService({
     required this.authClient,
     http.Client? httpClient,
@@ -161,6 +197,50 @@ class CallableReceptionService implements ReceptionService {
     );
   }
 
+  @override
+  Future<AttendanceChange> correct({
+    required String eventId,
+    required String participantId,
+    required String publicId,
+    required String programId,
+    required int attendedCount,
+  }) async => _change(
+    await _call('correctConfirmedProgramAttendance', {
+      'eventId': eventId,
+      'participantId': participantId,
+      'publicId': publicId,
+      'programId': programId,
+      'attendedCount': attendedCount,
+    }),
+  );
+
+  @override
+  Future<AttendanceChange> cancel({
+    required String eventId,
+    required String participantId,
+    required String publicId,
+    required String programId,
+  }) async => _change(
+    await _call('cancelConfirmedProgramCheckIn', {
+      'eventId': eventId,
+      'participantId': participantId,
+      'publicId': publicId,
+      'programId': programId,
+    }),
+  );
+
+  AttendanceChange _change(Map<String, dynamic> result) {
+    final program = result['program'];
+    if (program is! Map) {
+      throw const ReceptionException('結果を確認できませんでした。受付状況を確認してください。');
+    }
+    return AttendanceChange(
+      changed: result['changed'] == true,
+      noop: result['noop'] as String?,
+      program: ReceptionProgram.fromJson(Map<String, dynamic>.from(program)),
+    );
+  }
+
   Future<Map<String, dynamic>> _call(
     String name,
     Map<String, dynamic> data,
@@ -208,6 +288,13 @@ class CallableReceptionService implements ReceptionService {
       case 'UNAUTHENTICATED':
         return const ReceptionException('ログインが必要です。');
       case 'FAILED_PRECONDITION':
+        if (code == 'attendance-not-checked-in') {
+          // 未受付のprogramは訂正できない(受付済みにはならない)。画面の状態が古い可能性がある。
+          return ReceptionException(
+            'このprogramはまだ受付されていないため、訂正できません。画面を更新してください。',
+            code: code,
+          );
+        }
         return ReceptionException(
           'この参加証は受付できません。',
           code: code,

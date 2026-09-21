@@ -28,6 +28,9 @@ describe("Firestore Rules: 受付・受付履歴(ローカルEmulator)", {skip: 
         assert.equal(await emu.update(ATT, {checkedIn: true}, token), 403);
         assert.equal(await emu.update(ATT, {attendedCount: 99}, token), 403);
         assert.equal(await emu.update(ATT, {plannedCount: 99}, token), 403);
+        // 受付後の訂正・取消(Phase 9C)の書換え・履歴の連番の改ざんも、クライアントからはできない
+        assert.equal(await emu.update(ATT, {checkedIn: false, checkedInAt: null, attendedCount: null, checkedInBy: null, historySequence: 0}, token), 403);
+        assert.equal(await emu.update(ATT, {historySequence: 99}, token), 403);
         assert.equal(await emu.remove(ATT, token), 403);
         assert.equal(await emu.create("programAttendances", "b1-000003_alpha", {eventId: "e-conf", participantId: "b1-000003", programId: "alpha", plannedCount: 1, checkedIn: true}, token), 403);
         assert.equal(await emu.list("programAttendances", token), 403);

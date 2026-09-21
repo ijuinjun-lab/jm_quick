@@ -83,6 +83,14 @@ test("公開の参加証callableのハンドラは読み取り専用(getPassの�
   assert.doesNotMatch(source.slice(start, end), /\.(set|update|create|delete|add)\(|runTransaction|\.batch\(|serverTimestamp\(/);
 });
 
+test("受付の訂正・取消はadmin専用(staffは初回受付のみ)", () => {
+  for (const [name, handler] of [["correctConfirmedProgramAttendance", "correct"], ["cancelConfirmedProgramCheckIn", "cancel"]]) {
+    const found = exportsInIndex.find((e) => e.name === name);
+    assert.ok(found, `${name}が見つかりません`);
+    assert.match(found.rhs, new RegExp(`^confirmedCallable\\("admin", passApi\\.${handler}\\)`), name);
+  }
+});
+
 test("getMyAccessRoleはstaffOrAdmin(ログイン済みで、accessRolesが有効なstaff/adminのみ)", () => {
   const found = exportsInIndex.find((e) => e.name === "getMyAccessRole");
   assert.ok(found);

@@ -854,3 +854,6 @@ const passApi = createPassApi({getDb: getFirestore, serverTimestamp, getAppBaseU
 exports.getConfirmedParticipantPass = confirmedPublicPassCallable(passApi.getPass);
 exports.getConfirmedReceptionView = confirmedCallable("staffOrAdmin", passApi.getReceptionView);
 exports.checkInConfirmedProgram = confirmedCallable("staffOrAdmin", passApi.checkIn);
+// 受付後の訂正・取消はadminだけ(staffは初回受付のみ)。受付状態の正本はprogramAttendancesのまま。実変更ごとにhistoryを1件追記する。
+exports.correctConfirmedProgramAttendance = confirmedCallable("admin", passApi.correct);
+exports.cancelConfirmedProgramCheckIn = confirmedCallable("admin", passApi.cancel);

@@ -76,21 +76,32 @@ class _ReceptionRoutePageState extends State<ReceptionRoutePage> {
       final service =
           widget._receptionService ??
           CallableReceptionService(authClient: authClient);
-      Widget page(BuildContext context, Future<void> Function() signOut) =>
-          ConfirmedReceptionPage(
-            service: service,
-            eventId: widget.eventId!,
-            participantId: widget.participantId!,
-            publicId: widget.publicId!,
-            signOut: signOut,
-          );
+      // 受付後の訂正・取消は、adminとして確認できた場合だけ画面に出す(staffには渡さない。サーバーもadmin専用)。
+      Widget page(
+        BuildContext context,
+        Future<void> Function() signOut, {
+        required bool isAdmin,
+      }) => ConfirmedReceptionPage(
+        service: service,
+        eventId: widget.eventId!,
+        participantId: widget.participantId!,
+        publicId: widget.publicId!,
+        signOut: signOut,
+        adminService: isAdmin
+            ? (service is ReceptionAdminService
+                  ? service as ReceptionAdminService
+                  : null)
+            : null,
+      );
       return AuthGate(
         authClient: authClient,
         accessService:
             widget._accessService ??
             CallableAccessService(authClient: authClient),
-        adminBuilder: page,
-        staffBuilder: page,
+        adminBuilder: (context, signOut) =>
+            page(context, signOut, isAdmin: true),
+        staffBuilder: (context, signOut) =>
+            page(context, signOut, isAdmin: false),
       );
     },
   );
