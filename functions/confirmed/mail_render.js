@@ -27,8 +27,10 @@ const singleLine = (text) => String(text).replace(/[\r\n]+/g, " ").trim();
 const RULE = "────────────────────";
 
 // テキスト版。QR画像は表示できないため、Web参加証URLを必ず載せる。
-function buildText(vm, template) {
+function buildText(vm, template, {showEventName = false} = {}) {
   const lines = [];
+  // 前日リマインドなど: 冒頭にイベント名を明示する(当選メールの出力は変えない)
+  if (showEventName) lines.push(`【${vm.eventName}】`, "");
   lines.push(`${vm.recipientName} 様`, "", template.introBody, "", RULE);
   lines.push("【受付用QRコード】");
   lines.push("当日は、受付用QRコードを受付でご提示ください。");
@@ -53,8 +55,9 @@ const P = "margin:0 0 14px 0;";
 const H2 = "margin:24px 0 8px 0;padding-top:16px;border-top:1px solid #d9dde3;font-size:16px;color:#17324d;";
 const H3 = "margin:14px 0 4px 0;font-size:15px;color:#17324d;";
 
-function buildHtml(vm, template, subject) {
+function buildHtml(vm, template, subject, {showEventName = false} = {}) {
   const parts = [];
+  if (showEventName) parts.push(`<p style="${P}font-size:18px;font-weight:bold;color:#17324d;">${escapeHtml(vm.eventName)}</p>`);
   parts.push(`<p style="${P}font-size:16px;font-weight:bold;">${escapeHtml(vm.recipientName)} 様</p>`);
   parts.push(paragraphsHtml(template.introBody, P));
   parts.push(`<h2 style="${H2}">受付用QRコード</h2>`);
@@ -96,7 +99,7 @@ ${parts.join("\n")}
 //   snapshot: buildMailSnapshot の結果 / participant: {participantId, name, publicId} / attendances: programAttendancesの内容
 //   generateQrPng(payload) → Promise<Buffer>: QR画像(PNG)の生成(注入)。
 // 戻り値: {ok:true, subject, text, html, qrPayload, webPassUrl, attachments, viewModel} | {ok:false, problems}
-async function renderWinnerMail({snapshot, participant, attendances, appBaseUrl, generateQrPng}) {
+async function renderMail({snapshot, participant, attendances, appBaseUrl, generateQrPng, showEventName = false}) {
   const built = buildMailViewModel({snapshot, participant, attendances, appBaseUrl});
   if (!built.ok) return {ok: false, problems: built.problems};
   const vm = built.viewModel;
@@ -106,8 +109,8 @@ async function renderWinnerMail({snapshot, participant, attendances, appBaseUrl,
   return {
     ok: true,
     subject,
-    text: buildText(vm, template),
-    html: buildHtml(vm, template, subject),
+    text: buildText(vm, template, {showEventName}),
+    html: buildHtml(vm, template, subject, {showEventName}),
     qrPayload: vm.qrPayload,
     webPassUrl: vm.webPassUrl,
     attachments: [{
@@ -118,4 +121,10 @@ async function renderWinnerMail({snapshot, participant, attendances, appBaseUrl,
   };
 }
 
-module.exports = {QR_CONTENT_ID, QR_FILENAME, escapeHtml, renderWinnerMail};
+// 当選メール。既存の出力は変わらない。
+const renderWinnerMail = (args) => renderMail(args);
+// 前日リマインド。同じレンダラー・同じview model(program・時間・plannedCount・QR・Web参加証URL・会場)を使い、文章(snapshot.template)と
+// 冒頭のイベント名だけが異なる。QR・publicIdは当選メールと同一(再発行しない)。
+const renderReminderMail = (args) => renderMail({...args, showEventName: true});
+
+module.exports = {QR_CONTENT_ID, QR_FILENAME, escapeHtml, renderWinnerMail, renderReminderMail};

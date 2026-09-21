@@ -11,6 +11,7 @@ const {createImportApi} = require("./confirmed/import_api");
 const {createWinnerMailApi} = require("./confirmed/winner_mail_api");
 const {createWinnerSendApi} = require("./confirmed/winner_send_api");
 const {createPassApi} = require("./confirmed/pass_api");
+const {createReminderApi} = require("./confirmed/reminder_api");
 const {generateQrPng} = require("./qr_png");
 const {createMailApiTransport} = require("./mail_transport");
 
@@ -814,13 +815,31 @@ exports.retryFailedConfirmedWinnerMails = confirmedCallable("admin", winnerSendA
 // サーバー側の継続処理(Phase 9A)。管理者の「送信開始」は、希望(dispatchActive)をsendJobsに記録するだけ。
 // 実際の配送は、下の定期実行が、ブラウザとは無関係に最後まで進める。配送の状態・claim・leaseは従来のsendJobs/mailDeliveriesが正本。
 exports.startConfirmedWinnerMailDelivery = confirmedCallable("admin", winnerSendApi.startDelivery, {timeoutSeconds: 60});
+// 前日リマインド(Phase 9B)。イベント全体の全active participantが対象(取込回は問わない)。当選メールとは別のtype・別のjob・別の配送記録・別のテンプレート。
+// 配送エンジンとサーバー側の継続処理(下のsweep)は当選メールと共通。設定・プレビュー・手動開始・状態・失敗分の再送はすべてadmin専用。
+const reminderApi = createReminderApi({
+  getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(), winnerSendApi,
+});
+exports.getConfirmedReminderSettings = confirmedCallable("admin", reminderApi.getSettings, {timeoutSeconds: 120});
+exports.updateConfirmedReminderSettings = confirmedCallable("admin", reminderApi.updateSettings, {timeoutSeconds: 60});
+exports.previewConfirmedReminderMail = confirmedCallable("admin", reminderApi.preview, {timeoutSeconds: 60});
+exports.startConfirmedReminderDelivery = confirmedCallable("admin", reminderApi.startDelivery, {timeoutSeconds: 300});
+exports.getConfirmedReminderJob = confirmedCallable("admin", reminderApi.getJob, {timeoutSeconds: 60});
+exports.retryFailedConfirmedReminderMails = confirmedCallable("admin", reminderApi.retryFailed, {timeoutSeconds: 120});
 // 内部の定期実行(ブラウザ・callableからは起動できない)。旧mailJobsのSchedulerとは別のconfirmed専用。mail-apiのSecretは従来の注入方式のまま。
+// 1) 前日リマインドの送信時刻に達したイベントのジョブを作成して引き渡す(同じイベントのジョブは1つ) 2) 引き渡されたジョブの配送を進める。
 // maxInstances: 1 で同時実行を1つに抑える(at-least-onceでも二重に動かさない。最終防御はitem単位のclaim)。
 exports.sweepConfirmedMailDelivery = onSchedule(
   {schedule: "every 1 minutes", timeZone: "Asia/Tokyo", region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 300, maxInstances: 1},
   async () => {
+    let reminders = 0;
+    try {
+      reminders = (await reminderApi.reconcileDue({limit: winnerSendApi.worker.limits.maxJobsPerSweep})).created.length;
+    } catch (error) {
+      console.error("reminder reconcile failed", {code: (error && error.code) || "error"}); // 配送のsweepは止めない
+    }
     const results = await winnerSendApi.runSweep();
-    console.log("confirmed mail delivery sweep", {jobs: results.length, processed: results.reduce((n, r) => n + (r.processed || 0), 0)});
+    console.log("confirmed mail delivery sweep", {jobs: results.length, remindersCreated: reminders, processed: results.reduce((n, r) => n + (r.processed || 0), 0)});
   },
 );
 // 送信管理画面用の読み取り専用API(admin専用)。Flutterはsendjobs/items/mailDeliveriesをFirestoreから直接読まず、必ずこれ経由で状態を取得する。

@@ -53,10 +53,10 @@ test("純粋関数のみ: Firebase・Firestore・ネットワークを使わな�
   }
 });
 
-test("取込ロジック(import_*)はまだcallableへ接続していない(index.jsがconfirmed/から読み込むのは、認可つきで公開するAPI(access_role・import_api・winner_mail_api・winner_send_api・pass_api)だけ)", () => {
+test("取込ロジック(import_*)はまだcallableへ接続していない(index.jsがconfirmed/から読み込むのは、認可つきで公開するAPI(access_role・import_api・winner_mail_api・winner_send_api・pass_api・reminder_api)だけ)", () => {
   const index = fs.readFileSync(path.join(FUNCTIONS_DIR, "index.js"), "utf8");
   const required = [...index.matchAll(/require\("\.\/confirmed\/([^"]+)"\)/g)].map((m) => m[1]);
-  assert.deepEqual(required, ["access_role", "import_api", "winner_mail_api", "winner_send_api", "pass_api"]);
+  assert.deepEqual(required, ["access_role", "import_api", "winner_mail_api", "winner_send_api", "pass_api", "reminder_api"]);
   assert.doesNotMatch(index, /import_(mapping|rows|batch_plan)/);
 });
 

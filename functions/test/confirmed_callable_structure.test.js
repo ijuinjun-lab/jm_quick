@@ -54,7 +54,10 @@ test("当選者CSV取込のpreview・commitはadmin専用(staffは実行でき�
 
 test("当選メール(テンプレート・プレビュー・送信ジョブ)のcallableはすべてadmin専用", () => {
   const names = ["getConfirmedWinnerMailSettings", "updateConfirmedWinnerMailTemplate", "previewConfirmedWinnerMail", "createConfirmedWinnerMailJob",
-    "processConfirmedWinnerMailJob", "retryFailedConfirmedWinnerMails", "listConfirmedWinnerMailBatches", "getConfirmedWinnerMailJob", "startConfirmedWinnerMailDelivery"];
+    "processConfirmedWinnerMailJob", "retryFailedConfirmedWinnerMails", "listConfirmedWinnerMailBatches", "getConfirmedWinnerMailJob", "startConfirmedWinnerMailDelivery",
+    // 前日リマインド(Phase 9B)もすべてadmin専用
+    "getConfirmedReminderSettings", "updateConfirmedReminderSettings", "previewConfirmedReminderMail", "startConfirmedReminderDelivery",
+    "getConfirmedReminderJob", "retryFailedConfirmedReminderMails"];
   for (const name of names) {
     const found = exportsInIndex.find((e) => e.name === name);
     assert.ok(found, `${name}が見つかりません`);

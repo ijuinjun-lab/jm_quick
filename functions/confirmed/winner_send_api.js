@@ -10,7 +10,7 @@ const {ApiError} = require("./api_error");
 const {isValidBatchId} = require("./import_batch_plan");
 const {buildMailSnapshot} = require("./mail_view_model");
 const {loadConfirmedEvent} = require("./winner_mail_api");
-const {composeWinnerMailFor, buildMailApiMessage} = require("./winner_mail_message");
+const {composeWinnerMailFor, composeReminderMailFor, buildMailApiMessage} = require("./winner_mail_message");
 const {createSendJobEngine, DELIVERY} = require("./send_jobs");
 const {createDeliveryWorker} = require("./delivery_worker");
 const {toDate} = require("./mail_view_model");
@@ -33,7 +33,10 @@ function parseKeys(data, allowed) {
 
 function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl, getTransport, engineOptions = {}, workerOptions = {}}) {
   const engine = createSendJobEngine({
-    serverTimestamp, generateQrPng, getAppBaseUrl, composeMail: composeWinnerMailFor, buildMessage: buildMailApiMessage, ...engineOptions,
+    serverTimestamp, generateQrPng, getAppBaseUrl, composeMail: composeWinnerMailFor, buildMessage: buildMailApiMessage,
+    // 前日リマインド(reminder-{eventId}のジョブ)だけ、別テンプレートのレンダリングとtype=reminderのメッセージを使う。配送エンジンは共通。
+    mailKinds: {reminder: {composeMail: composeReminderMailFor, buildMessage: (args) => buildMailApiMessage({...args, type: "reminder"})}},
+    ...engineOptions,
   });
   // サーバー側の継続処理(引き渡し・定期実行)。配送の状態・claim・leaseは engine(send_jobs.js)が正本。
   const worker = createDeliveryWorker({engine, serverTimestamp, ...(engineOptions.now ? {now: engineOptions.now} : {}), ...workerOptions});
@@ -194,7 +197,10 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
   // ジョブの状態と、参加者ごとの配送状態(participantId・表示名・状態だけ。メールアドレスは返さない)。
   async function getJob({data}) {
     const request = parseKeys(data, ["jobId", "itemStatus", "limit", "after"]);
-    const jobId = parseJobId(request.jobId);
+    return readJob({...parseReadOptions(request), jobId: parseJobId(request.jobId)});
+  }
+
+  function parseReadOptions(request) {
     if (request.itemStatus !== undefined && !Object.values(DELIVERY).includes(request.itemStatus)) throw invalid("invalid-item-status");
     let limit = DEFAULT_ITEMS_LIMIT;
     if (request.limit !== undefined) {
@@ -202,17 +208,26 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       limit = request.limit;
     }
     if (request.after !== undefined && (typeof request.after !== "string" || !PARTICIPANT_ID_PATTERN.test(request.after))) throw invalid("invalid-after");
+    return {itemStatus: request.itemStatus, limit, after: request.after};
+  }
+
+  // 当選メール・前日リマインドで共通の読み取り(jobIdは呼び出し側が検証済み)。batchLabelを渡せば取込回の名前の代わりに使う。
+  async function readJob({jobId, itemStatus, limit = DEFAULT_ITEMS_LIMIT, after, batchLabel}) {
     const db = getDb();
     const jobSnapshot = await db.collection("sendJobs").doc(jobId).get();
     if (!jobSnapshot.exists) throw new ApiError("not-found", "送信ジョブが見つかりません。");
     const jobDoc = jobSnapshot.data();
     const summary = await engine.summarize(db, jobId);
-    const batchSnapshot = await db.collection("importBatches").doc(jobDoc.batchId).get();
+    let label = batchLabel;
+    if (label === undefined) {
+      const batchSnapshot = typeof jobDoc.batchId === "string" ? await db.collection("importBatches").doc(jobDoc.batchId).get() : null;
+      label = batchSnapshot && batchSnapshot.exists && typeof batchSnapshot.data().label === "string" ? batchSnapshot.data().label : "";
+    }
 
     let query = db.collection("sendJobs").doc(jobId).collection("items");
-    if (request.itemStatus !== undefined) query = query.where("status", "==", request.itemStatus);
+    if (itemStatus !== undefined) query = query.where("status", "==", itemStatus);
     query = query.orderBy("__name__");
-    if (request.after !== undefined) query = query.startAfter(request.after);
+    if (after !== undefined) query = query.startAfter(after);
     const page = (await query.limit(limit + 1).get()).docs;
     const shown = page.slice(0, limit);
     const names = shown.length > 0 ? await db.getAll(...shown.map((doc) => db.collection("participants").doc(doc.id))) : [];
@@ -231,13 +246,20 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       };
     });
     return {
-      job: {...jobView(summary, jobDoc), batchLabel: batchSnapshot.exists && typeof batchSnapshot.data().label === "string" ? batchSnapshot.data().label : ""},
+      job: {...jobView(summary, jobDoc), batchLabel: label},
       items,
       nextAfter: page.length > limit ? shown[shown.length - 1].id : null,
     };
   }
 
-  return {createJob, processJob, retryFailed, startDelivery, runSweep, listBatches, getJob, engine, worker};
+  // ジョブの状態(件数・dispatch)だけの取得(一覧・設定画面用)。存在しなければnull。
+  async function jobViewOf(jobId) {
+    const db = getDb();
+    const snapshot = await db.collection("sendJobs").doc(jobId).get();
+    return snapshot.exists ? jobView(await engine.summarize(db, jobId), snapshot.data()) : null;
+  }
+
+  return {createJob, processJob, retryFailed, startDelivery, runSweep, listBatches, getJob, readJob, parseReadOptions, jobViewOf, engine, worker};
 }
 
 module.exports = {createWinnerSendApi};

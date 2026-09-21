@@ -4,6 +4,8 @@ import '../widgets/common.dart';
 import 'access_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
+import 'reminder_page.dart';
+import 'reminder_service.dart';
 import 'winner_mail_page.dart';
 import 'winner_mail_service.dart';
 import 'winner_send_page.dart';
@@ -33,15 +35,18 @@ class ConfirmedConsolePage extends StatelessWidget {
     AccessService? accessService,
     WinnerMailService? winnerMailService,
     WinnerSendService? winnerSendService,
+    ReminderService? reminderService,
   }) : authClient = authClient ?? FirebaseAuthClient(),
        _accessService = accessService,
        _winnerMailService = winnerMailService,
-       _winnerSendService = winnerSendService;
+       _winnerSendService = winnerSendService,
+       _reminderService = reminderService;
 
   final AuthClient authClient;
   final AccessService? _accessService;
   final WinnerMailService? _winnerMailService;
   final WinnerSendService? _winnerSendService;
+  final ReminderService? _reminderService;
 
   @override
   Widget build(BuildContext context) => AuthGate(
@@ -55,6 +60,16 @@ class ConfirmedConsolePage extends StatelessWidget {
       features: adminFeatureLabels,
       signOut: signOut,
       actions: {
+        // 前日リマインド(admin専用。staffには表示しない)
+        'リマインド': () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ReminderPage(
+              service:
+                  _reminderService ??
+                  CallableReminderService(authClient: authClient),
+            ),
+          ),
+        ),
         '当選メール送信': () => Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => WinnerSendPage(
@@ -125,6 +140,8 @@ class _RoleHome extends StatelessWidget {
                   actions.containsKey(feature)
                       ? (feature == '当選メール送信'
                             ? '取込回ごとの送信・進行状況・失敗分の再送'
+                            : feature == 'リマインド'
+                            ? '前日リマインドの設定・プレビュー・送信状況'
                             : '件名・本文の設定とプレビュー')
                       : '準備中',
                 ),

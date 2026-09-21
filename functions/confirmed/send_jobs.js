@@ -27,14 +27,19 @@ const {ApiError} = require("./api_error");
 
 const DELIVERY = Object.freeze({PENDING: "pending", SENDING: "sending", SENT: "sent", FAILED: "failed", UNKNOWN: "unknown"});
 const JOB = Object.freeze({PREPARING: "preparing", READY: "ready", COMPLETED: "completed", FAILED: "failed"});
+// 配送の種別。jobIdの接頭辞で決まる(winner-{batchId} / reminder-{eventId})。mailDeliveriesのIDも種別ごとに別
+// ({participantId}_winner / {participantId}_reminder)なので、当選メールの配送状態とリマインドの配送状態は混ざらない。
 const TYPE = "winner";
+const TYPES = Object.freeze({WINNER: "winner", REMINDER: "reminder"});
 const DEFAULT_LEASE_MS = 120000;
 const DEFAULT_CONCURRENCY = 5;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const LEASE_EXPIRED_AFTER_DISPATCH = "lease-expired-after-dispatch";
 
 const jobIdForBatch = (batchId) => `winner-${batchId}`;
-const deliveryIdFor = (participantId) => `${participantId}_${TYPE}`;
+const jobIdForReminder = (eventId) => `reminder-${eventId}`;
+const typeOfJobId = (jobId) => (typeof jobId === "string" && jobId.startsWith("reminder-") ? TYPES.REMINDER : TYPES.WINNER);
+const deliveryIdFor = (participantId, type = TYPE) => `${participantId}_${type}`;
 const toMillis = (value) => (value && typeof value.toMillis === "function" ? value.toMillis() : value instanceof Date ? value.getTime() : Number(value) || 0);
 
 async function runPool(items, limit, task) {
@@ -50,10 +55,13 @@ async function runPool(items, limit, task) {
 }
 
 function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs = DEFAULT_LEASE_MS, concurrency = DEFAULT_CONCURRENCY,
-  generateToken = () => randomBytes(16).toString("hex"), composeMail, buildMessage, generateQrPng, getAppBaseUrl}) {
+  generateToken = () => randomBytes(16).toString("hex"), composeMail, buildMessage, generateQrPng, getAppBaseUrl, mailKinds = {}}) {
+  // 種別ごとのメール生成。既定(winner)は composeMail/buildMessage。他の種別(reminder等)は mailKinds[type] で指定する。
+  // 配送エンジン(claim・lease・保存則・状態遷移)は種別によらず共通。違うのは「何のメールを作るか」だけ。
+  const kindFor = (type) => mailKinds[type] || {composeMail, buildMessage};
   const jobRef = (db, jobId) => db.collection("sendJobs").doc(jobId);
   const itemRef = (db, jobId, participantId) => jobRef(db, jobId).collection("items").doc(participantId);
-  const deliveryRef = (db, participantId) => db.collection("mailDeliveries").doc(deliveryIdFor(participantId));
+  const deliveryRef = (db, participantId, type = TYPE) => db.collection("mailDeliveries").doc(deliveryIdFor(participantId, type));
 
   async function countItems(db, jobId, status) {
     const result = await jobRef(db, jobId).collection("items").where("status", "==", status).count().get();
@@ -96,18 +104,27 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
     const excludedInactiveCount = participants.length - targets.length;
     if (targets.length === 0) throw new ApiError("failed-precondition", "送信対象の参加者がいません。", {code: "no-targets"});
 
-    const jobId = jobIdForBatch(batchId);
+    return openJob({
+      db, identity, type: TYPE, jobId: jobIdForBatch(batchId), eventId, batchId, batchSequence: batch.sequence, batchCreatedCount: batch.createdCount,
+      targets, excludedInactiveCount, snapshot,
+    });
+  }
+
+  // ---- ジョブの開設(種別共通) --------------------------------------------------------------------
+  // 対象者(targets)が確定した後の、ジョブ・item・deliveryの作成。当選メール(batch単位)と前日リマインド(イベント全体)で共通。
+  // targetsは「ジョブ作成時点」で確定し、targetCountとして固定する(作成後に参加者が増減しても、既存ジョブへは自動で追加しない)。
+  async function openJob({db, identity, type, jobId, eventId, batchId = null, batchSequence = null, batchCreatedCount = null, targets, excludedInactiveCount, snapshot}) {
     const ref = jobRef(db, jobId);
     const started = await db.runTransaction(async (tx) => {
       const existing = await tx.get(ref);
       if (existing.exists) {
         const job = existing.data();
-        if (job.eventId !== eventId || job.batchId !== batchId) throw new ApiError("failed-precondition", "既存のジョブと一致しません。", {code: "job-conflict"});
+        if (job.eventId !== eventId || (job.batchId === undefined ? null : job.batchId) !== batchId) throw new ApiError("failed-precondition", "既存のジョブと一致しません。", {code: "job-conflict"});
         return {existing: true, status: job.status, targetCount: job.targetCount};
       }
       tx.create(ref, {
-        eventId, batchId, batchSequence: batch.sequence, type: TYPE, status: JOB.PREPARING, targetCount: targets.length,
-        excludedInactiveCount, sentCount: 0, failedCount: 0, unknownCount: 0, batchCreatedCount: batch.createdCount,
+        eventId, batchId, batchSequence, type, status: JOB.PREPARING, targetCount: targets.length,
+        excludedInactiveCount, sentCount: 0, failedCount: 0, unknownCount: 0, batchCreatedCount,
         templateVersion: snapshot.template.version, snapshot, createdAt: serverTimestamp(), createdBy: identity.uid, completedAt: null,
       });
       return {existing: false, status: JOB.PREPARING, targetCount: targets.length};
@@ -122,7 +139,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       // 各参加者の item と delivery を、1トランザクションで冪等に作る(再実行しても増えない・上書きしない)。
       await runPool(targets, concurrency, async (participantId) => {
         const iRef = itemRef(db, jobId, participantId);
-        const dRef = deliveryRef(db, participantId);
+        const dRef = deliveryRef(db, participantId, type);
         await db.runTransaction(async (tx) => {
           const [itemSnap, deliverySnap] = await tx.getAll(iRef, dRef);
           if (itemSnap.exists) return;
@@ -131,7 +148,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
             throw new ApiError("failed-precondition", "この参加者には既に配送記録があります。", {code: "delivery-exists", participantId});
           }
           tx.create(dRef, {
-            eventId, batchId, participantId, type: TYPE, jobId, status: DELIVERY.PENDING, templateVersion: snapshot.template.version,
+            eventId, batchId, participantId, type, jobId, status: DELIVERY.PENDING, templateVersion: snapshot.template.version,
             attemptCount: 0, leaseUntil: null, dispatchStartedAt: null, claimId: null, messageId: null, lastErrorCode: null, sentAt: null,
             createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
           });
@@ -154,7 +171,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       await ref.update({status: JOB.READY, updatedAt: serverTimestamp()});
     } catch (error) {
       if (error && error.isApiError === true) throw error;
-      throw new ApiError("internal", "ジョブの準備を最後まで完了できませんでした。同じ取込回で再実行すると続きから完了できます。", {code: "job-preparation-interrupted"});
+      throw new ApiError("internal", "ジョブの準備を最後まで完了できませんでした。同じ操作をもう一度実行すると、続きから完了できます。", {code: "job-preparation-interrupted"});
     }
     return {...(await summarize(db, jobId)), alreadyExisted: started.existing};
   }
@@ -163,7 +180,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
   // claim: pending、またはlease期限切れで「dispatch前」のsendingだけを取得できる。
   async function claimItem({db, jobId, participantId}) {
     const iRef = itemRef(db, jobId, participantId);
-    const dRef = deliveryRef(db, participantId);
+    const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
     return db.runTransaction(async (tx) => {
       const [deliverySnap, itemSnap] = await tx.getAll(dRef, iRef);
       if (!deliverySnap.exists || !itemSnap.exists) throw new ApiError("failed-precondition", "配送記録が見つかりません。", {code: "delivery-missing"});
@@ -193,7 +210,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
 
   // dispatch開始の記録。これ以降に落ちた場合は「送ったかもしれない」ものとして扱う。claimが失われていれば false(送信しない)。
   async function startDispatch({db, jobId, participantId, claimId}) {
-    const dRef = deliveryRef(db, participantId);
+    const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
     const iRef = itemRef(db, jobId, participantId);
     return db.runTransaction(async (tx) => {
       const [deliverySnap] = await tx.getAll(dRef);
@@ -209,7 +226,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
   // 結果の書込み。claimIdが一致する場合だけ(他のworkerの結果を上書きしない)。
   // 「lease期限切れでunknownにされた後に、同じworkerの結果が遅れて届いた」場合は、その結果で確定できる。
   async function finishItem({db, jobId, participantId, claimId, outcome, messageId, errorCode}) {
-    const dRef = deliveryRef(db, participantId);
+    const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
     const iRef = itemRef(db, jobId, participantId);
     return db.runTransaction(async (tx) => {
       const [deliverySnap] = await tx.getAll(dRef);
@@ -246,9 +263,10 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       const to = typeof participant.email === "string" ? participant.email.trim().toLowerCase() : "";
       if (!EMAIL_PATTERN.test(to)) return await fail("participant-email-invalid");
       // ジョブに固定したsnapshotで生成する(プレビューと同じ composeMail = renderWinnerMail)。
-      const rendered = await composeMail({db, snapshot: job.snapshot, participantId, participant, appBaseUrl: getAppBaseUrl(), generateQrPng});
+      const kind = kindFor(typeOfJobId(jobId));
+      const rendered = await kind.composeMail({db, snapshot: job.snapshot, participantId, participant, appBaseUrl: getAppBaseUrl(), generateQrPng});
       if (!rendered.ok) return await fail(`render-${rendered.problems[0] || "error"}`);
-      message = buildMessage({rendered, to, snapshot: job.snapshot, participantId, jobId});
+      message = kind.buildMessage({rendered, to, snapshot: job.snapshot, participantId, jobId});
     } catch (error) {
       return fail("render-error");
     }
@@ -312,10 +330,11 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
     let retried = 0;
     await runPool(failed.docs.map((doc) => doc.id), concurrency, async (participantId) => {
       const applied = await db.runTransaction(async (tx) => {
-        const [deliverySnap, itemSnap] = await tx.getAll(deliveryRef(db, participantId), itemRef(db, jobId, participantId));
+        const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
+        const [deliverySnap, itemSnap] = await tx.getAll(dRef, itemRef(db, jobId, participantId));
         if (deliverySnap.data().status !== DELIVERY.FAILED || itemSnap.data().status !== DELIVERY.FAILED) return false;
         const reset = {status: DELIVERY.PENDING, leaseUntil: null, dispatchStartedAt: null, updatedAt: serverTimestamp()};
-        tx.update(deliveryRef(db, participantId), {...reset, claimId: null});
+        tx.update(dRef, {...reset, claimId: null});
         tx.update(itemRef(db, jobId, participantId), reset);
         return true;
       });
@@ -325,7 +344,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
     return {...summary, retried};
   }
 
-  return {createJob, processJob, retryFailed, summarize, claimItem, startDispatch, finishItem, refreshJob};
+  return {createJob, openJob, processJob, retryFailed, summarize, claimItem, startDispatch, finishItem, refreshJob};
 }
 
-module.exports = {DELIVERY, JOB, jobIdForBatch, deliveryIdFor, createSendJobEngine};
+module.exports = {DELIVERY, JOB, TYPES, jobIdForBatch, jobIdForReminder, typeOfJobId, deliveryIdFor, createSendJobEngine};

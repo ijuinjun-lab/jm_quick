@@ -99,9 +99,11 @@ function buildProgramItems({programs, attendances, eventId, participantId}) {
 // eventの現在の内容とテンプレートから、送信内容の固定(snapshot)を作る。個人情報は含まない。
 // ジョブ作成時にジョブへ保存し、以後そのジョブの全メールはこのsnapshotで生成する(途中で文章・会場が変わらない)。
 // プレビューも同じ関数でsnapshotを作るため、プレビューと実送信は同じ材料から生成される。
-function buildMailSnapshot(eventId, event) {
-  const problems = [...templateProblems(event && event.winnerMailTemplate)];
-  const template = (event && event.winnerMailTemplate) || {};
+// templateField: 使うテンプレートのフィールド名。当選メール(既定)は winnerMailTemplate、前日リマインドは reminderMailTemplate(別データ)。
+// 会場・住所・アクセス・program・QRなどの正確なデータは、どちらのメールでも同じ正本(event・participant・programAttendances)から作る。
+function buildMailSnapshot(eventId, event, {templateField = "winnerMailTemplate"} = {}) {
+  const problems = [...templateProblems(event && event[templateField])];
+  const template = (event && event[templateField]) || {};
   const start = toDate(event && event.startAt);
   if (!optionalText(event && event.eventName)) problems.push("event-name-missing");
   if (!start) problems.push("event-start-missing");
