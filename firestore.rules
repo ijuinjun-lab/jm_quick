@@ -27,6 +27,19 @@ service cloud.firestore {
           || isLegacyEventData(get(/databases/$(database)/documents/events/$(eventId)).data));
     }
 
+    // read専用(Phase 10B): 「参照先のイベントが存在し、かつlegacyと明確に判定できる」場合だけtrue。
+    // 上の eventIsLegacy(write用)は「イベントが存在しない」場合もtrueにするが、readではそれを使わない
+    // (イベントが存在しない=孤児データを、flowが無いのでlegacyとして公開してはならない)。
+    // confirmed・未知のflow・eventIdが文字列でない/パスを壊す文字を含む・イベントが存在しない場合は、すべてfalse(fail-closed)。
+    // Rulesはクエリ結果のフィルタではない。listでも resource.data.eventId が「クエリの条件から確定している」場合だけ評価が通り、
+    // 確定できないクエリ(絞り込みなし・inで複数イベント混在 等)は、この関数が評価できず拒否される。
+    function eventIsReadableLegacy(eventId) {
+      return eventId is string
+        && !eventId.matches('.*/.*')
+        && exists(/databases/$(database)/documents/events/$(eventId))
+        && isLegacyEventData(get(/databases/$(database)/documents/events/$(eventId)).data);
+    }
+
     // TEST OPERATION ONLY: 本番管理者認証導入までは管理画面検証用にreadを許可。
     match /events/{eventId} {
       allow read: if true;
@@ -39,8 +52,12 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Phase 10B: confirmed(新方式)の参加者(氏名・かな・メール・publicId・sourceReference等)は、未認証・認証済みを問わず
+    // クライアントSDKから直接取得できない(get・list/queryとも拒否)。documentごと拒否する(フィールド単位の制御はしない)。
+    // legacyのイベントの参加者だけ、従来どおりreadを許可する(旧マイページ・旧受付・旧管理画面の互換のため。Phase 10Cで認証境界へ移行)。
+    // 存在しないイベント・未知のflow・eventId欠落の参加者も拒否する。confirmedの参加者情報は、Admin SDK経由のcallableだけが返す。
     match /participants/{participantId} {
-      allow get, list: if resource.data.eventId is string;
+      allow get, list: if eventIsReadableLegacy(resource.data.eventId);
       allow create: if request.resource.data.participantId == participantId
         && eventExists(request.resource.data.eventId)
         && request.resource.data.publicId is string
@@ -66,8 +83,10 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Phase 10B: checkInsはlegacy専用(confirmedの受付の正本は programAttendances)。confirmed・未知のflow・孤児・eventId欠落は
+    // readを拒否する。legacyのイベントの受付状態だけ、従来どおりreadを許可する。
     match /checkIns/{participantId} {
-      allow get, list: if resource.data.eventId is string;
+      allow get, list: if eventIsReadableLegacy(resource.data.eventId);
       allow create: if eventExists(request.resource.data.eventId)
         && eventIsLegacy(request.resource.data.eventId)
         && request.resource.data.participantId == participantId
