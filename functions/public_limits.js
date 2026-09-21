@@ -16,7 +16,9 @@ const RATE_LIMIT_POLICIES = Object.freeze({
   viewTarget: Object.freeze({name: "viewTarget", scope: "target", windowMs: MINUTE, limit: 10, onError: "open"}),
   updateIp: Object.freeze({name: "updateIp", scope: "ip", windowMs: MINUTE, limit: 10, onError: "closed"}),
   updateTarget: Object.freeze({name: "updateTarget", scope: "target", windowMs: MINUTE, limit: 5, onError: "closed"}),
-  walkInIp: Object.freeze({name: "walkInIp", scope: "ip", windowMs: HOUR, limit: 5, onError: "closed"}),
+  // 会場の共有Wi-Fi・NATでは、多数の来場者が同一IPになる。Phase 11で 5回/時 → 30回/時 → 200回/時(100〜200人規模が同一グローバルIPから正常に登録し得る)へ引き上げた
+  // (メール乱用の防止は、宛先単位(3回/日)・イベント単位(500件)・App Check・重複防止も担う)
+  walkInIp: Object.freeze({name: "walkInIp", scope: "ip", windowMs: HOUR, limit: 200, onError: "closed"}),
   walkInTarget: Object.freeze({name: "walkInTarget", scope: "target", windowMs: DAY, limit: 3, onError: "closed"}),
 });
 

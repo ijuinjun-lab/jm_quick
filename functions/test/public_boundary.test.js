@@ -63,6 +63,41 @@ describe("App Check(公開5本。実App Checkには接続しない)", () => {
     });
   }
 
+  // 実際のfirebase-functionsのランタイムのハンドラ(HTTPリクエスト経由。127.0.0.1のみ)で、プラットフォーム側のApp Check強制を確認する
+  test("実ランタイムのハンドラ: X-Firebase-AppCheckが無い・不正な場合は、公開5本すべてがハンドラの前に401(UNAUTHENTICATED)で拒否される。管理系はApp Checkではなくログインで拒否される", async () => {
+    const express = require("express");
+    const {index} = setup(seed());
+    const app = express();
+    app.use(express.json());
+    app.post("/:name", (request, response) => index[request.params.name](request, response));
+    const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+    try {
+      const http = require("node:http");
+      const call = (name, headers) => new Promise((resolve, reject) => {
+        const body = JSON.stringify({data: PUBLIC[name] || {}});
+        const request = http.request({host: "127.0.0.1", port: server.address().port, path: `/${name}`, method: "POST", headers: {"Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), ...headers}}, (response) => {
+          let text = "";
+          response.on("data", (chunk) => { text += chunk; });
+          response.on("end", () => resolve({status: response.statusCode, body: text}));
+        });
+        request.on("error", reject);
+        request.end(body);
+      });
+      for (const name of Object.keys(PUBLIC)) {
+        for (const headers of [{}, {"X-Firebase-AppCheck": "not-a-real-token"}]) {
+          const result = await call(name, headers);
+          assert.equal(result.status, 401, `${name} ${JSON.stringify(headers)}`);
+          assert.match(result.body, /UNAUTHENTICATED/);
+        }
+      }
+      const admin = await call("listLegacyEvents", {});
+      assert.equal(admin.status, 401);
+      assert.match(admin.body, /ログインが必要/);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   test("拒否の応答は理由を区別せず、ログにはトークンを出さず理由コードだけを残す", () => {
     const lines = [];
     const logger = {warn: (...a) => lines.push(a)};
@@ -157,11 +192,11 @@ describe("rate limit(サーバー側・時刻とストレージを注入して�
     for (const name of ["updateIp", "updateTarget", "walkInIp", "walkInTarget"]) assert.equal(RATE_LIMIT_POLICIES[name].onError, "closed");
   });
 
-  test("初期値の目安: 閲覧 IP30/分・対象10/分、更新は閲覧より低い、walk-in IP5/時・宛先3/日。窓の期限にretentionが加わる", async () => {
+  test("初期値の目安: 閲覧 IP30/分・対象10/分、更新は閲覧より低い、walk-in IP200/時・宛先3/日。窓の期限にretentionが加わる", async () => {
     const p = RATE_LIMIT_POLICIES;
     assert.deepEqual([p.viewIp.limit, p.viewIp.windowMs, p.viewTarget.limit, p.viewTarget.windowMs], [30, MINUTE, 10, MINUTE]);
     assert.ok(p.updateIp.limit < p.viewIp.limit && p.updateTarget.limit < p.viewTarget.limit);
-    assert.deepEqual([p.walkInIp.limit, p.walkInIp.windowMs, p.walkInTarget.limit, p.walkInTarget.windowMs], [5, HOUR, 3, DAY]);
+    assert.deepEqual([p.walkInIp.limit, p.walkInIp.windowMs, p.walkInTarget.limit, p.walkInTarget.windowMs], [200, HOUR, 3, DAY]);
     const db = new FakeFirestore();
     const {limiter, clock} = make(db);
     await limiter.check(P, "a");
@@ -239,16 +274,20 @@ describe("registerWalkIn: rate limit・イベント単位上限・拒否時の�
   const walkIn = (index, data, ip) => index.registerWalkIn.run(req(data, ip));
   const snapshotState = (db) => ({participants: db.writesTo("participants/").length, checkIns: db.writesTo("checkIns/").length, walkIns: db.writesTo("walkInRegistrations/").length});
 
-  test("接続元IP単位 5回/時: 6回目は resource-exhausted。拒否時は participant・checkIn・walkInRegistration・メールが0", async () => {
+  test("接続元IP単位 200回/時(Phase 11で5回→200回へ引き上げ): 200回目までは許可され、201回目は resource-exhausted。拒否時は participant・checkIn・walkInRegistration・メールが0", async () => {
     freezeClock();
     const {db, index, mail} = setup({"events/e1": event("e1")});
-    for (let n = 1; n <= RATE_LIMIT_POLICIES.walkInIp.limit; n++) assert.equal(await code(walkIn(index, input(n), "198.51.100.10")), "ok");
+    assert.equal(RATE_LIMIT_POLICIES.walkInIp.limit, 200, "会場の共有Wi-Fi・NAT向けの正式値(100〜200人規模)");
+    assert.equal(RATE_LIMIT_POLICIES.walkInIp.windowMs, HOUR);
+    for (let n = 1; n <= 200; n++) assert.equal(await code(walkIn(index, input(n), "198.51.100.10")), "ok", `${n}回目`);
+    assert.equal(db.writesTo("participants/").filter((w) => w.op === "create").length, 200);
+    assert.equal(mail.length, 200);
     const before = snapshotState(db);
     const mails = mail.length;
-    assert.equal(await code(walkIn(index, input(99), "198.51.100.10")), "resource-exhausted");
+    assert.equal(await code(walkIn(index, input(201), "198.51.100.10")), "resource-exhausted", "201回目");
     assert.deepEqual(snapshotState(db), before);
     assert.equal(mail.length, mails);
-    assert.equal(await code(walkIn(index, input(100), "198.51.100.11")), "ok", "別のIPは独立");
+    assert.equal(await code(walkIn(index, input(1000), "198.51.100.11")), "ok", "別のIPは独立");
   });
 
   test("宛先(メール)単位 3回/日: 同じメールでの4回目は拒否。イベントが違っても同じ宛先の枠。応答にメールを含まない", async () => {
