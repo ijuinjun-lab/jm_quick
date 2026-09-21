@@ -848,6 +848,8 @@ const serverTimestamp = () => FieldValue.serverTimestamp();
 // 作成後の取込・当選メール設定・リマインド設定は、既存のadmin専用callableを使う。legacyのcreateLegacyEventとは別(意味を拡張しない)。
 const eventCreateApi = createEventCreateApi({getDb: getFirestore, serverTimestamp});
 exports.createConfirmedEvent = confirmedCallable("admin", eventCreateApi.createEvent, {timeoutSeconds: 30});
+// 新方式イベントの基本情報とprogramの読み取り(admin専用。CSV取込画面の「どのイベントへ取り込むか」の表示用。Phase 11B)
+exports.getConfirmedEventSummary = confirmedCallable("admin", eventCreateApi.getSummary, {timeoutSeconds: 30});
 const winnerMailApi = createWinnerMailApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
 });

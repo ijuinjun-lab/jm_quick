@@ -158,7 +158,28 @@ function createEventCreateApi({getDb, serverTimestamp, logger, now = () => Date.
     return {eventId, eventName: outcome.name, kind: "confirmed", created: outcome.created};
   }
 
-  return {createEvent};
+  // 取込画面などが「どのイベントか」を表示するための読み取り専用API(admin専用)。Phase 11B。
+  // 返すのは、イベントの基本情報とprogram(表示順=order)だけ。テンプレート・監査情報・reminder設定などは返さない。
+  // 存在しない・legacy・未知のflowは、区別できない同一のエラー(fail-closed)。
+  async function getSummary({data}) {
+    keysOf(data, ["eventId"], "");
+    if (typeof data.eventId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(data.eventId)) throw invalid("invalid-event-id", {path: "eventId"});
+    const snapshot = await getDb().collection("events").doc(data.eventId).get();
+    const event = snapshot.exists ? snapshot.data() : null;
+    if (!event || event.flow !== "confirmed") throw new ApiError("failed-precondition", "新方式のイベントを確認できませんでした。");
+    const iso = (value) => {
+      const d = value && typeof value.toDate === "function" ? value.toDate() : value instanceof Date ? value : null;
+      return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null;
+    };
+    const programs = (Array.isArray(event.programs) ? event.programs : [])
+      .filter((p) => p && isValidProgramId(p.programId) && typeof p.name === "string")
+      .map((p, index) => ({programId: p.programId, name: p.name, order: Number.isInteger(p.order) ? p.order : index}))
+      .sort((a, b) => a.order - b.order);
+    return {eventId: data.eventId, eventName: typeof event.eventName === "string" ? event.eventName : "", startAt: iso(event.startAt), endAt: iso(event.endAt),
+      venue: typeof event.venue === "string" ? event.venue : "", programs};
+  }
+
+  return {createEvent, getSummary};
 }
 
 module.exports = {createEventCreateApi, parseCreateRequest, deriveEventId, LIMITS, REQUEST_ID_PATTERN};

@@ -68,6 +68,12 @@ class ConfirmedConsolePage extends StatelessWidget {
           ? null
           : '作成したイベントのID: $initialEventId(各機能で自動入力されます)',
       actions: {
+        // 参加者CSVの取込(admin専用。受付スタッフには表示しない)。作成直後のイベントIDを引き継ぐ
+        'CSV取込': () => Navigator.of(context).pushNamed(
+          (initialEventId ?? '').isEmpty
+              ? '/console/import'
+              : '/console/import?eventId=${Uri.encodeQueryComponent(initialEventId!)}',
+        ),
         // 新方式イベントの作成(admin専用。受付スタッフには表示しない)
         'イベント作成': () => Navigator.of(context).pushNamed('/console/events/new'),
         // 前日リマインド(admin専用。staffには表示しない)
@@ -159,6 +165,8 @@ class _RoleHome extends StatelessWidget {
                   actions.containsKey(feature)
                       ? (feature == '当選メール送信'
                             ? '取込回ごとの送信・進行状況・失敗分の再送'
+                            : feature == 'CSV取込'
+                            ? '当選者CSVの取込(プレビュー確認後に確定・メールは送信されません)'
                             : feature == 'イベント作成'
                             ? '新方式のイベントの新規作成(メールは送信されません)'
                             : feature == 'リマインド'

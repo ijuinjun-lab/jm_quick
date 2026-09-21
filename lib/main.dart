@@ -4,6 +4,7 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'confirmed/console_page.dart';
 import 'confirmed/event_create_page.dart';
+import 'confirmed/import_page.dart';
 import 'confirmed/pass_page.dart';
 import 'confirmed/pass_service.dart';
 import 'confirmed/reception_route.dart';
@@ -69,6 +70,10 @@ class JmQuickApp extends StatelessWidget {
           ),
           // 新方式のイベント作成(admin専用)
           '/console/events/new' => ConfirmedEventCreateRoute(),
+          // 新方式の参加者CSV取込(admin専用)
+          '/console/import' => ConfirmedImportRoute(
+            eventId: uri.queryParameters['eventId'],
+          ),
           // 受付用QR。従来方式は従来の受付画面、新方式(confirmed)はprogram別受付画面。どちらもstaff/adminのログインが必要(Phase 10C)。
           // 未知のflow・存在しないイベント・読み取り失敗では、どちらの受付画面も出さない。
           '/reception' => ReceptionRoutePage(

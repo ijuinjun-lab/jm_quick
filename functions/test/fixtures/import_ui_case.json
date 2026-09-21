@@ -1,0 +1,204 @@
+{
+  "note": "完全な架空データ。Flutterの取込UI(リクエスト生成)とサーバーAPIの契約が一致することを両側のテストが共有して確認する。",
+  "csvText": "区分,rd,氏名,かな,メールアドレス,都道府県,午前参加時間,午前参加人数,午後参加時間,午後参加人数,トークショー,トークショー人数,キャンセル待希望人数,思いやご意見,登録日時\r\n新規申込,R0001,架空テスト001,かくうてすと,synthetic1@example.invalid,架空県,10:00-11:00,2,参加を希望しない,,参加を希望する,1,9名,この値は取り込まれない列の架空テキスト,2026年01月02日 03時04分05秒\r\n新規申込,R0002,\"架空テスト,002 \"\"引用\"\"\",かくうてすと,synthetic2@example.invalid,架空県,10:00-11:00,2,参加を希望しない,,参加を希望する,1,9名,\"1行目\n2行目(未取込の自由記述・架空)\",2026年01月02日 03時04分05秒\r\n,,,,,,,,,,,,,,\r\n対象外,R0004,架空テスト004,かくうてすと,synthetic4@example.invalid,架空県,10:00-11:00,abc,参加を希望しない,,参加を希望する,1,9名,この値は取り込まれない列の架空テキスト,2026年01月02日 03時04分05秒\r\n新規申込,R0005,架空テスト005,かくうてすと,synthetic5@example.invalid,架空県,参加を希望しない,,13:00-14:00,3,参加を希望しない,,9名,この値は取り込まれない列の架空テキスト,2026年01月02日 03時04分05秒\r\n",
+  "mapping": {
+    "version": 1,
+    "participant": {
+      "externalIdColumn": "rd",
+      "nameColumn": "氏名",
+      "kanaColumn": "かな",
+      "emailColumn": "メールアドレス",
+      "registeredAtColumn": "登録日時"
+    },
+    "rowChecks": [
+      {
+        "column": "区分",
+        "allowedValues": [
+          "新規申込"
+        ]
+      }
+    ],
+    "programs": [
+      {
+        "programId": "program-a",
+        "participationColumn": "午前参加時間",
+        "notAttendingValues": [
+          "参加を希望しない"
+        ],
+        "slotColumn": "午前参加時間",
+        "slotFormat": "timeRange",
+        "countColumn": "午前参加人数"
+      },
+      {
+        "programId": "program-b",
+        "participationColumn": "午後参加時間",
+        "notAttendingValues": [
+          "参加を希望しない"
+        ],
+        "slotColumn": "午後参加時間",
+        "slotFormat": "timeRange",
+        "countColumn": "午後参加人数"
+      },
+      {
+        "programId": "custom-zeta-9",
+        "participationColumn": "トークショー",
+        "attendingValues": [
+          "参加を希望する"
+        ],
+        "notAttendingValues": [
+          "参加を希望しない"
+        ],
+        "countColumn": "トークショー人数"
+      }
+    ]
+  },
+  "eventId": "evfixture0123456789",
+  "fileName": "架空取込.csv",
+  "fileHash": "24c0d87eedb3ff817316af4930f4f15cde210465847209bed05b57becc6d6ad4",
+  "batchId": "b9506fa239299ed5666e287b94925cd",
+  "expectedRequest": {
+    "eventId": "evfixture0123456789",
+    "clientRequestId": "b9506fa239299ed5666e287b94925cd",
+    "sourceFileName": "架空取込.csv",
+    "fileHash": "24c0d87eedb3ff817316af4930f4f15cde210465847209bed05b57becc6d6ad4",
+    "mapping": {
+      "version": 1,
+      "participant": {
+        "externalIdColumn": "rd",
+        "nameColumn": "氏名",
+        "kanaColumn": "かな",
+        "emailColumn": "メールアドレス",
+        "registeredAtColumn": "登録日時"
+      },
+      "rowChecks": [
+        {
+          "column": "区分",
+          "allowedValues": [
+            "新規申込"
+          ]
+        }
+      ],
+      "programs": [
+        {
+          "programId": "program-a",
+          "participationColumn": "午前参加時間",
+          "notAttendingValues": [
+            "参加を希望しない"
+          ],
+          "slotColumn": "午前参加時間",
+          "slotFormat": "timeRange",
+          "countColumn": "午前参加人数"
+        },
+        {
+          "programId": "program-b",
+          "participationColumn": "午後参加時間",
+          "notAttendingValues": [
+            "参加を希望しない"
+          ],
+          "slotColumn": "午後参加時間",
+          "slotFormat": "timeRange",
+          "countColumn": "午後参加人数"
+        },
+        {
+          "programId": "custom-zeta-9",
+          "participationColumn": "トークショー",
+          "attendingValues": [
+            "参加を希望する"
+          ],
+          "notAttendingValues": [
+            "参加を希望しない"
+          ],
+          "countColumn": "トークショー人数"
+        }
+      ]
+    },
+    "headers": [
+      "rd",
+      "氏名",
+      "かな",
+      "メールアドレス",
+      "登録日時",
+      "区分",
+      "午前参加時間",
+      "午前参加人数",
+      "午後参加時間",
+      "午後参加人数",
+      "トークショー",
+      "トークショー人数"
+    ],
+    "rows": [
+      {
+        "rowNumber": 2,
+        "values": [
+          "R0001",
+          "架空テスト001",
+          "かくうてすと",
+          "synthetic1@example.invalid",
+          "2026年01月02日 03時04分05秒",
+          "新規申込",
+          "10:00-11:00",
+          "2",
+          "参加を希望しない",
+          "",
+          "参加を希望する",
+          "1"
+        ]
+      },
+      {
+        "rowNumber": 3,
+        "values": [
+          "R0002",
+          "架空テスト,002 \"引用\"",
+          "かくうてすと",
+          "synthetic2@example.invalid",
+          "2026年01月02日 03時04分05秒",
+          "新規申込",
+          "10:00-11:00",
+          "2",
+          "参加を希望しない",
+          "",
+          "参加を希望する",
+          "1"
+        ]
+      },
+      {
+        "rowNumber": 5,
+        "values": [
+          "R0004",
+          "架空テスト004",
+          "かくうてすと",
+          "synthetic4@example.invalid",
+          "2026年01月02日 03時04分05秒",
+          "対象外",
+          "10:00-11:00",
+          "abc",
+          "参加を希望しない",
+          "",
+          "参加を希望する",
+          "1"
+        ]
+      },
+      {
+        "rowNumber": 6,
+        "values": [
+          "R0005",
+          "架空テスト005",
+          "かくうてすと",
+          "synthetic5@example.invalid",
+          "2026年01月02日 03時04分05秒",
+          "新規申込",
+          "参加を希望しない",
+          "",
+          "13:00-14:00",
+          "3",
+          "参加を希望しない",
+          ""
+        ]
+      }
+    ],
+    "totalRecords": 5,
+    "blankRecordNumbers": [
+      4
+    ]
+  }
+}

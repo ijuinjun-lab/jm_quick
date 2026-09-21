@@ -277,3 +277,38 @@ describe("ログ・純粋関数", () => {
     assert.equal(deriveEventId("u1", REQ).includes(REQ), false);
   });
 });
+
+describe("getConfirmedEventSummary(Phase 11B。取込画面のイベント表示用。admin専用・読み取りだけ)", () => {
+  const summary = (index, auth, data) => index.getConfirmedEventSummary.run({auth, data});
+  const seeded = {"events/evconfirmed1": {flow: "confirmed", eventName: "架空", venue: "架空ホール", startAt: ts(new Date("2030-01-01T01:00:00Z")), programs: [
+    {programId: "b", name: "B", order: 1}, {programId: "a", name: "A", order: 0}, {programId: "bad id", name: "不正"}], secret: "x", winnerMailTemplate: {subject: "s"}},
+  "events/evlegacy1": {flow: "legacy", eventName: "旧"}, "events/evnoflow1": {eventName: "flowなし"}};
+  test("認可: 未認証・権限なし・active=false・staffは拒否し、adminだけ成功する。何も書き込まない", async () => {
+    const {db, index} = setup(seeded);
+    assert.equal(await code(summary(index, undefined, {eventId: "evconfirmed1"})), "unauthenticated");
+    assert.equal(await code(summary(index, {uid: "nobody"}, {eventId: "evconfirmed1"})), "permission-denied");
+    assert.equal(await code(summary(index, {uid: "off1"}, {eventId: "evconfirmed1"})), "permission-denied");
+    assert.equal(await code(summary(index, {uid: "staff1"}, {eventId: "evconfirmed1"})), "permission-denied");
+    assert.equal(await code(summary(index, ADMIN, {eventId: "evconfirmed1"})), "ok");
+    assert.equal(db.writes.length, 0);
+  });
+  test("要約の項目だけを返し(内部項目・テンプレートは含まない)、programはorder順・不正なprogramIdは除く", async () => {
+    const {index} = setup(seeded);
+    const result = await summary(index, ADMIN, {eventId: "evconfirmed1"});
+    assert.deepEqual(Object.keys(result).sort(), ["endAt", "eventId", "eventName", "programs", "startAt", "venue"]);
+    assert.deepEqual(result.programs.map((p) => p.programId), ["a", "b"]);
+    assert.equal(result.endAt, null);
+    assert.equal(JSON.stringify(result).includes("secret"), false);
+    assert.equal(JSON.stringify(result).includes("subject"), false);
+  });
+  test("legacy・存在しない・flowなしは、同じ拒否(区別できない)。余計なキー・不正なeventIdは拒否", async () => {
+    const {index} = setup(seeded);
+    const outcomes = [];
+    for (const eventId of ["evlegacy1", "evnoflow1", "evmissing1"]) outcomes.push(await summary(index, ADMIN, {eventId}).then(() => "ok", (e) => `${e.code}:${e.message}`));
+    assert.equal(new Set(outcomes).size, 1);
+    assert.match(outcomes[0], /^failed-precondition:/);
+    assert.equal(await code(summary(index, ADMIN, {eventId: "evconfirmed1", extra: 1})), "invalid-argument");
+    assert.equal(await code(summary(index, ADMIN, {eventId: "../x"})), "invalid-argument");
+    assert.equal(await code(summary(index, ADMIN, {})), "invalid-argument");
+  });
+});

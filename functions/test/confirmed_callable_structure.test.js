@@ -31,7 +31,7 @@ const INTERNAL_SCHEDULED_EXPORTS = ["sweepConfirmedMailDelivery", ...LEGACY_SCHE
 const exportsInIndex = [...index.matchAll(/^exports\.(\w+)\s*=\s*(.*)$/gm)].map((m) => ({name: m[1], rhs: m[2]}));
 
 test("index.jsのexportは、Scheduler・公開入口(固定一覧)・confirmedCallable(アクセスレベル, ...) のいずれかだけ", () => {
-  assert.ok(exportsInIndex.length >= 45);
+  assert.ok(exportsInIndex.length >= 46);
   for (const {name, rhs} of exportsInIndex) {
     if (INTERNAL_SCHEDULED_EXPORTS.includes(name)) {
       assert.match(rhs, /^onSchedule\(/, name);
@@ -234,4 +234,19 @@ test("Phase 11A: createConfirmedEventはadmin専用で、legacyの作成(createL
   for (const forbidden of ["winnerMailTemplate:", "reminderMailTemplate:", "reminderSendAt:", "sendJobs", "mailDeliveries", "mailLogs", "fetch("]) {
     assert.equal(source.includes(forbidden), false, `作成APIはメール関連を作らない: ${forbidden}`);
   }
+});
+
+// Phase 11B: 取込画面のイベント表示用に、admin専用の読み取りcallableを1本だけ追加した(既存のadmin APIにprogram一覧を返すものが無いため)。公開callableは増やさない。
+test("Phase 11B: getConfirmedEventSummaryはadmin専用の読み取りだけのcallable。取込のpreview/commitは既存のまま。公開callableは5本のまま", () => {
+  const found = exportsInIndex.find((e) => e.name === "getConfirmedEventSummary");
+  assert.ok(found, "getConfirmedEventSummaryが見つかりません");
+  assert.match(found.rhs, /^confirmedCallable\("admin", eventCreateApi\.getSummary/);
+  const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs));
+  assert.equal(publicOnes.length, 5);
+  assert.equal(exportsInIndex.some((e) => /^(previewConfirmedImport|commitConfirmedImport)$/.test(e.name) && !/^confirmedCallable\("admin"/.test(e.rhs)), false);
+  const source = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, "confirmed", "event_create_api.js"), "utf8"));
+  const body = source.slice(source.indexOf("async function getSummary"), source.indexOf("return {createEvent, getSummary}"));
+  assert.ok(body.length > 100);
+  assert.doesNotMatch(body, /\.(set|update|delete|create)\(|\btx\b|runTransaction|serverTimestamp/, "概要APIは読み取りだけ");
+  assert.doesNotMatch(body, /participants|email|publicId|sendJobs|mailDeliveries/, "個人情報・メール関連を読まない");
 });
