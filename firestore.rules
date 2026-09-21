@@ -131,8 +131,14 @@ service cloud.firestore {
 
     // 新方式(flow=confirmed)のparticipant×program。クライアントからの直接read/writeは許可しない。
     // 書込みはFunctions(Admin SDK)経由のみ。許可(allow)を追加する場合は先にセキュリティ設計を行うこと。
+    // 受付(checkedIn・checkedInAt・attendedCount・checkedInBy)の正本。受付はcallable(checkInConfirmedProgram、staff/adminのみ)経由。
+    // 受付履歴(history)も同じく直接read/write禁止。
     match /programAttendances/{attendanceId} {
       allow read, write: if false;
+
+      match /history/{historyId} {
+        allow read, write: if false;
+      }
     }
 
     match /walkInRegistrations/{registrationId} {

@@ -5,11 +5,12 @@ const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {createHash, randomBytes} = require("crypto");
 const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
-const {confirmedCallable} = require("./auth");
+const {confirmedCallable, confirmedPublicPassCallable} = require("./auth");
 const {getMyAccessRoleHandler} = require("./confirmed/access_role");
 const {createImportApi} = require("./confirmed/import_api");
 const {createWinnerMailApi} = require("./confirmed/winner_mail_api");
 const {createWinnerSendApi} = require("./confirmed/winner_send_api");
+const {createPassApi} = require("./confirmed/pass_api");
 const {generateQrPng} = require("./qr_png");
 const {createMailApiTransport} = require("./mail_transport");
 
@@ -810,3 +811,12 @@ exports.previewConfirmedWinnerMail = confirmedCallable("admin", winnerMailApi.pr
 exports.createConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.createJob, {timeoutSeconds: 300});
 exports.processConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.processJob, {secrets: [mailApiKey], timeoutSeconds: 300});
 exports.retryFailedConfirmedWinnerMails = confirmedCallable("admin", winnerSendApi.retryFailed, {timeoutSeconds: 120});
+
+// Web参加証とprogram別受付(confirmed)。
+// - getConfirmedParticipantPass: 参加者本人がログインなしで自分の参加証を閲覧(読み取り専用)。participantId+publicIdの組だけで閲覧でき、
+//   受付・変更はできない。Phase 10でApp Check強制とrate limitを有効にする(auth.jsのPUBLIC_PASS_CALLABLE_OPTIONS / createPassApiのcheckRateLimit)
+// - getConfirmedReceptionView / checkInConfirmedProgram: 受付はstaff/adminのみ(Firebase Auth + accessRoles)。programAttendancesが受付の正本
+const passApi = createPassApi({getDb: getFirestore, serverTimestamp, getAppBaseUrl: () => appBaseUrl.value()});
+exports.getConfirmedParticipantPass = confirmedPublicPassCallable(passApi.getPass);
+exports.getConfirmedReceptionView = confirmedCallable("staffOrAdmin", passApi.getReceptionView);
+exports.checkInConfirmedProgram = confirmedCallable("staffOrAdmin", passApi.checkIn);

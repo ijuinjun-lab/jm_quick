@@ -104,7 +104,11 @@ class _ParticipantPageState extends State<ParticipantPage> {
 
   Widget _content(DemoEvent event, Participant p, CheckIn? c) {
     // 新方式(flow=confirmed)では正式登録・参加予定回答・participant単位のQR受付を使わない。
-    if (!event.isLegacyFlow) return const NonLegacyFlowNotice();
+    // 新方式の参加者の参加証は /p/{id} の入口(PassRoutePage)が表示する。ここへ来たのは参加証を確認できなかった場合なので、
+    // 内部の状態(新方式・publicIdなど)を参加者へ示さず、共通の表示にする。
+    if (!event.isLegacyFlow) {
+      return const NonLegacyFlowNotice(message: '参加証を確認できませんでした。');
+    }
     final receptionUri =
         '/reception?eventId=${Uri.encodeQueryComponent(p.eventId)}&participantId=${p.id}&publicId=${Uri.encodeQueryComponent(p.publicId)}';
     final qrPayload = Uri.base.resolve(receptionUri).toString();

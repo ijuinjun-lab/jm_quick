@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'confirmed/console_page.dart';
+import 'confirmed/pass_page.dart';
+import 'confirmed/pass_service.dart';
+import 'confirmed/reception_route.dart';
 import 'firebase_options.dart';
 import 'pages/demo_admin_page.dart';
 import 'pages/event_list_page.dart';
@@ -53,10 +56,16 @@ class JmQuickApp extends StatelessWidget {
           '/admin' || '/demo-admin' => const EventListPage(),
           // 新方式(flow=confirmed)の管理・受付。ログイン+サーバー側の権限確認を通った場合だけ機能が表示される。
           '/console' => ConfirmedConsolePage(),
-          '/reception' => ReceptionPage(
+          // 受付用QR。従来方式のイベントは従来の受付画面、新方式(confirmed)はログイン必須のprogram別受付画面。
+          '/reception' => ReceptionRoutePage(
             eventId: uri.queryParameters['eventId'],
             participantId: uri.queryParameters['participantId'],
             publicId: uri.queryParameters['publicId'],
+            legacyBuilder: (_) => ReceptionPage(
+              eventId: uri.queryParameters['eventId'],
+              participantId: uri.queryParameters['participantId'],
+              publicId: uri.queryParameters['publicId'],
+            ),
           ),
           _
               when uri.pathSegments.length == 3 &&
@@ -71,9 +80,15 @@ class JmQuickApp extends StatelessWidget {
           _
               when uri.pathSegments.length == 2 &&
                   uri.pathSegments.first == 'p' =>
-            ParticipantPage(
+            // 新方式(confirmed)の参加証(読み取り専用)。確認できなければ従来のマイページ。
+            PassRoutePage(
               participantId: uri.pathSegments[1],
               publicId: uri.queryParameters['publicId'],
+              service: CallablePassService(),
+              legacyBuilder: (_) => ParticipantPage(
+                participantId: uri.pathSegments[1],
+                publicId: uri.queryParameters['publicId'],
+              ),
             ),
           _ => const _HomePage(),
         };

@@ -81,14 +81,10 @@ const GUARDS = {
   [ACCESS_LEVELS.admin]: requireAdmin,
 };
 
-// 新方式の管理系callableを定義する唯一の入口。
-//   access: 'admin' | 'staffOrAdmin' | 'authenticated'(必須。未指定・不正なら定義時に例外)
-//   handler({identity, data, request}): identityは認可を通過した「サーバー側で確定したuid/role」。
-//     dataは信用できないクライアント入力(検証はハンドラの責務)。認可はdataの内容に一切依存しない。
-function confirmedCallable(access, handler, options = {}) {
-  const guard = Object.prototype.hasOwnProperty.call(GUARDS, access) ? GUARDS[access] : null;
-  if (!guard) throw new Error(`confirmedCallable: invalid access level: ${String(access)}`);
-  if (typeof handler !== "function") throw new Error("confirmedCallable: handler required");
+// 新方式のcallableを定義する入口は、この defineCallable(=onCall)ただ1か所。
+// 公開の入口は2種類だけ: confirmedCallable(認可つき) と confirmedPublicPassCallable(参加証の閲覧専用)。
+// どちらも「認可(guard)がハンドラより前に実行される」構造を共有する。
+function defineCallable(guard, handler, options) {
   const {db, logger, ...callableOptions} = options;
   return onCall({region: "asia-northeast1", timeoutSeconds: 60, ...callableOptions}, async (request) => {
     const identity = await guard(request, {db, logger});
@@ -102,6 +98,34 @@ function confirmedCallable(access, handler, options = {}) {
   });
 }
 
+// 新方式の管理系callableを定義する入口。
+//   access: 'admin' | 'staffOrAdmin' | 'authenticated'(必須。未指定・不正なら定義時に例外)
+//   handler({identity, data, request}): identityは認可を通過した「サーバー側で確定したuid/role」。
+//     dataは信用できないクライアント入力(検証はハンドラの責務)。認可はdataの内容に一切依存しない。
+function confirmedCallable(access, handler, options = {}) {
+  const guard = Object.prototype.hasOwnProperty.call(GUARDS, access) ? GUARDS[access] : null;
+  if (!guard) throw new Error(`confirmedCallable: invalid access level: ${String(access)}`);
+  if (typeof handler !== "function") throw new Error("confirmedCallable: handler required");
+  return defineCallable(guard, handler, options);
+}
+
+// 参加者本人が「ログインなしで、自分のWeb参加証を閲覧する」ためだけの公開callable。
+// ここでの「公開」は、管理系の認可(staff/admin)を要求しないという意味に限る。閲覧の可否はハンドラが
+// participantId+publicId の組で判定する(publicIdは閲覧用の秘密トークンで、受付・変更の権限ではない)。
+// このcallableは読み取り専用でなければならない(書込みをするハンドラを渡してはならない)。
+// Phase 10のTODO: 実データ投入前に App Check の強制(enforceAppCheck)とrate limitを有効にする。
+//   - App Check: PUBLIC_PASS_CALLABLE_OPTIONS.enforceAppCheck を true にする(この公開callableだけに適用される)
+//   - rate limit: createPassApi の checkRateLimit フックに実装を渡す
+const PUBLIC_PASS_CALLABLE_OPTIONS = Object.freeze({
+  timeoutSeconds: 30,
+  maxInstances: 10, // 大量アクセスによる課金・負荷の上限(App Check導入までの暫定の歯止め)
+  enforceAppCheck: false,
+});
+function confirmedPublicPassCallable(handler, options = {}) {
+  if (typeof handler !== "function") throw new Error("confirmedPublicPassCallable: handler required");
+  return defineCallable(async () => null, handler, {...PUBLIC_PASS_CALLABLE_OPTIONS, ...options});
+}
+
 module.exports = {
   ROLE_ADMIN,
   ROLE_STAFF,
@@ -112,4 +136,6 @@ module.exports = {
   requireStaffOrAdmin,
   requireAdmin,
   confirmedCallable,
+  confirmedPublicPassCallable,
+  PUBLIC_PASS_CALLABLE_OPTIONS,
 };

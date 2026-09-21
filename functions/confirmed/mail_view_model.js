@@ -56,6 +56,46 @@ function programTimeText(attendance, program) {
 
 const optionalText = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
 
+// event.programs(Firestoreの値)を、表示用の正規化された形にする。メール(snapshot)とWeb参加証・受付画面が同じ関数を使う。
+function normalizePrograms(rawPrograms) {
+  return (Array.isArray(rawPrograms) ? rawPrograms : [])
+    .filter((p) => p && typeof p.programId === "string")
+    .map((p) => ({
+      programId: p.programId,
+      name: optionalText(p.name) || p.programId,
+      order: Number.isInteger(p.order) ? p.order : 0,
+      startAt: toIso(p.startAt),
+      endAt: toIso(p.endAt),
+    }));
+}
+
+// 参加者のprogramAttendancesから、表示するprogram一覧を作る。メール・Web参加証・受付画面で共通。
+//   - 参加するprogram(attendanceがあるもの)だけ。1 attendance = 1 項目(重複排除しない)
+//   - 表示順はevent.programsのorder(同順ならprogramId)。Firestoreからの取得順には依存しない
+//   - program名・時間・plannedCountの解釈(時間はslotLabel → attendanceの時間 → programの時間 → 表示しない)を1か所に固定する
+// 戻り値: {items:[{programId,name,order,timeText,plannedCount,attendance}], problems:[コード]}
+function buildProgramItems({programs, attendances, eventId, participantId}) {
+  const problems = [];
+  const programById = new Map(programs.map((p) => [p.programId, p]));
+  const items = [];
+  for (const attendance of attendances || []) {
+    const program = programById.get(attendance.programId);
+    if (!program) { problems.push("attendance-program-unknown"); continue; }
+    if (attendance.eventId !== eventId || attendance.participantId !== participantId) {
+      problems.push("attendance-owner-mismatch");
+      continue;
+    }
+    if (!isValidPlannedCount(attendance.plannedCount)) { problems.push("attendance-planned-count-invalid"); continue; }
+    items.push({
+      programId: program.programId, name: program.name, order: program.order,
+      timeText: programTimeText(attendance, program), plannedCount: attendance.plannedCount, attendance,
+    });
+  }
+  items.sort((a, b) => (a.order - b.order) || (a.programId < b.programId ? -1 : a.programId > b.programId ? 1 : 0));
+  if (items.length === 0) problems.push("no-attendance");
+  return {items, problems};
+}
+
 // eventの現在の内容とテンプレートから、送信内容の固定(snapshot)を作る。個人情報は含まない。
 // ジョブ作成時にジョブへ保存し、以後そのジョブの全メールはこのsnapshotで生成する(途中で文章・会場が変わらない)。
 // プレビューも同じ関数でsnapshotを作るため、プレビューと実送信は同じ材料から生成される。
@@ -68,15 +108,7 @@ function buildMailSnapshot(eventId, event) {
   if (!optionalText(event && event.venue)) problems.push("event-venue-missing");
   if (problems.length > 0) return {ok: false, problems};
   const venueInfo = event.venueInfo || {};
-  const programs = (Array.isArray(event.programs) ? event.programs : [])
-    .filter((p) => p && typeof p.programId === "string")
-    .map((p) => ({
-      programId: p.programId,
-      name: optionalText(p.name) || p.programId,
-      order: Number.isInteger(p.order) ? p.order : 0,
-      startAt: toIso(p.startAt),
-      endAt: toIso(p.endAt),
-    }));
+  const programs = normalizePrograms(event.programs);
   return {
     ok: true,
     snapshot: {
@@ -111,24 +143,9 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
   const name = optionalText(participant && participant.name);
   if (!name) problems.push("participant-name-missing");
 
-  const programById = new Map(snapshot.programs.map((p) => [p.programId, p]));
-  const items = [];
-  for (const attendance of attendances || []) {
-    const program = programById.get(attendance.programId);
-    if (!program) { problems.push("attendance-program-unknown"); continue; }
-    if (attendance.eventId !== event.eventId || attendance.participantId !== (participant && participant.participantId)) {
-      problems.push("attendance-owner-mismatch");
-      continue;
-    }
-    if (!isValidPlannedCount(attendance.plannedCount)) { problems.push("attendance-planned-count-invalid"); continue; }
-    items.push({
-      programId: program.programId, name: program.name, order: program.order,
-      timeText: programTimeText(attendance, program), plannedCount: attendance.plannedCount,
-    });
-  }
-  // 表示順はevent.programsのorder(同順ならprogramId)。Firestoreからの取得順には依存しない。
-  items.sort((a, b) => (a.order - b.order) || (a.programId < b.programId ? -1 : a.programId > b.programId ? 1 : 0));
-  if (items.length === 0) problems.push("no-attendance");
+  const built = buildProgramItems({programs: snapshot.programs, attendances, eventId: event.eventId, participantId: participant && participant.participantId});
+  problems.push(...built.problems);
+  const items = built.items;
 
   let qrPayload = null;
   let passUrl = null;
@@ -160,4 +177,4 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
   };
 }
 
-module.exports = {toDate, formatEventDateTime, programTimeText, buildMailSnapshot, missingOptionalFields, buildMailViewModel};
+module.exports = {toDate, formatEventDateTime, programTimeText, normalizePrograms, buildProgramItems, buildMailSnapshot, missingOptionalFields, buildMailViewModel};

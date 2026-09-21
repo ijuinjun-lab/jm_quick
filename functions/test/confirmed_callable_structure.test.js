@@ -14,6 +14,8 @@ const index = fs.readFileSync(path.join(FUNCTIONS_DIR, "index.js"), "utf8");
 const LEGACY_EXPORTS = ["sendParticipantMail", "registerWalkIn", "sendScheduledConfirmationMail", "startBulkInvitationMail",
   "startBulkReconfirmationMail", "processBulkMailJobs", "deleteParticipant", "deleteEvent"];
 const ACCESS_LEVELS = ["admin", "staffOrAdmin", "authenticated"];
+// ログインなしで公開してよいのは、参加者本人の「参加証の閲覧(読み取り専用)」だけ。増やさない。
+const PUBLIC_PASS_EXPORTS = ["getConfirmedParticipantPass"];
 
 const exportsInIndex = [...index.matchAll(/^exports\.(\w+)\s*=\s*(.*)$/gm)].map((m) => ({name: m[1], rhs: m[2]}));
 
@@ -21,6 +23,10 @@ test("index.jsのexportは、従来方式の固定一覧か confirmedCallable(�
   assert.ok(exportsInIndex.length >= LEGACY_EXPORTS.length + 1);
   for (const {name, rhs} of exportsInIndex) {
     if (LEGACY_EXPORTS.includes(name)) continue;
+    if (PUBLIC_PASS_EXPORTS.includes(name)) {
+      assert.match(rhs, /^confirmedPublicPassCallable\(passApi\.getPass\)/, name);
+      continue;
+    }
     const match = /^confirmedCallable\("(\w+)"/.exec(rhs);
     assert.ok(match, `${name} は認可なしで公開されています。新方式の管理系callableは confirmedCallable() で定義してください`);
     assert.ok(ACCESS_LEVELS.includes(match[1]), `${name} のアクセスレベルが不正: ${match[1]}`);
@@ -28,7 +34,7 @@ test("index.jsのexportは、従来方式の固定一覧か confirmedCallable(�
 });
 
 test("従来方式のexportが増えていない(新しいcallableを認可なしで足す抜け道を作らない)", () => {
-  const legacyFound = exportsInIndex.filter((e) => !/^confirmedCallable\(/.test(e.rhs)).map((e) => e.name).sort();
+  const legacyFound = exportsInIndex.filter((e) => !/^confirmedCallable\(/.test(e.rhs) && !PUBLIC_PASS_EXPORTS.includes(e.name)).map((e) => e.name).sort();
   assert.deepEqual(legacyFound, [...LEGACY_EXPORTS].sort());
 });
 
@@ -48,6 +54,24 @@ test("当選メール(テンプレート・プレビュー・送信ジョブ)の
     assert.ok(found, `${name}が見つかりません`);
     assert.match(found.rhs, /^confirmedCallable\("admin", /, name);
   }
+});
+
+test("公開の参加証callableは1つだけで、ログイン不要なのは参加証の閲覧のみ。受付の表示・実行はstaffOrAdmin", () => {
+  const publicOnes = exportsInIndex.filter((e) => /^confirmedPublicPassCallable\(/.test(e.rhs)).map((e) => e.name);
+  assert.deepEqual(publicOnes, PUBLIC_PASS_EXPORTS);
+  for (const [name, handler] of [["getConfirmedReceptionView", "getReceptionView"], ["checkInConfirmedProgram", "checkIn"]]) {
+    const found = exportsInIndex.find((e) => e.name === name);
+    assert.ok(found, `${name}が見つかりません`);
+    assert.match(found.rhs, new RegExp(`^confirmedCallable\\("staffOrAdmin", passApi\\.${handler}\\)`), name);
+  }
+});
+
+test("公開の参加証callableのハンドラは読み取り専用(getPassの中にFirestoreへの書込みが無い)", () => {
+  const source = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, "confirmed", "pass_api.js"), "utf8"));
+  const start = source.indexOf("async function getPass(");
+  const end = source.indexOf("async function getReceptionView(");
+  assert.ok(start > 0 && end > start);
+  assert.doesNotMatch(source.slice(start, end), /\.(set|update|create|delete|add)\(|runTransaction|\.batch\(|serverTimestamp\(/);
 });
 
 test("getMyAccessRoleはstaffOrAdmin(ログイン済みで、accessRolesが有効なstaff/adminのみ)", () => {
@@ -84,7 +108,7 @@ test("functions/直下で onCall/onRequest を使ってよいのは auth.js(conf
 
 test("confirmedCallableの中で、認可(guard)がハンドラより前に実行される", () => {
   const source = fs.readFileSync(path.join(FUNCTIONS_DIR, "auth.js"), "utf8");
-  const body = source.slice(source.indexOf("function confirmedCallable"));
+  const body = source.slice(source.indexOf("function defineCallable"));
   assert.ok(body.indexOf("await guard(") > 0 && body.indexOf("await guard(") < body.indexOf("handler({identity"));
 });
 
