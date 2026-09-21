@@ -6,6 +6,8 @@ import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'winner_mail_page.dart';
 import 'winner_mail_service.dart';
+import 'winner_send_page.dart';
+import 'winner_send_service.dart';
 
 /// 管理者に見せる機能(いずれも後続Phaseで実装。この画面は入口とロール別の境界だけ)。
 const List<String> adminFeatureLabels = [
@@ -30,13 +32,16 @@ class ConfirmedConsolePage extends StatelessWidget {
     AuthClient? authClient,
     AccessService? accessService,
     WinnerMailService? winnerMailService,
+    WinnerSendService? winnerSendService,
   }) : authClient = authClient ?? FirebaseAuthClient(),
        _accessService = accessService,
-       _winnerMailService = winnerMailService;
+       _winnerMailService = winnerMailService,
+       _winnerSendService = winnerSendService;
 
   final AuthClient authClient;
   final AccessService? _accessService;
   final WinnerMailService? _winnerMailService;
+  final WinnerSendService? _winnerSendService;
 
   @override
   Widget build(BuildContext context) => AuthGate(
@@ -50,6 +55,18 @@ class ConfirmedConsolePage extends StatelessWidget {
       features: adminFeatureLabels,
       signOut: signOut,
       actions: {
+        '当選メール送信': () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => WinnerSendPage(
+              service:
+                  _winnerSendService ??
+                  CallableWinnerSendService(authClient: authClient),
+              mailService:
+                  _winnerMailService ??
+                  CallableWinnerMailService(authClient: authClient),
+            ),
+          ),
+        ),
         '当選メール設定': () => Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => WinnerMailPage(
@@ -105,7 +122,11 @@ class _RoleHome extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 title: Text(feature),
                 subtitle: Text(
-                  actions.containsKey(feature) ? '件名・本文の設定とプレビュー' : '準備中',
+                  actions.containsKey(feature)
+                      ? (feature == '当選メール送信'
+                            ? '取込回ごとの送信・進行状況・失敗分の再送'
+                            : '件名・本文の設定とプレビュー')
+                      : '準備中',
                 ),
                 trailing: actions.containsKey(feature)
                     ? const Icon(Icons.chevron_right)

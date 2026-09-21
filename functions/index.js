@@ -811,6 +811,9 @@ exports.previewConfirmedWinnerMail = confirmedCallable("admin", winnerMailApi.pr
 exports.createConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.createJob, {timeoutSeconds: 300});
 exports.processConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.processJob, {secrets: [mailApiKey], timeoutSeconds: 300});
 exports.retryFailedConfirmedWinnerMails = confirmedCallable("admin", winnerSendApi.retryFailed, {timeoutSeconds: 120});
+// 送信管理画面用の読み取り専用API(admin専用)。Flutterはsendjobs/items/mailDeliveriesをFirestoreから直接読まず、必ずこれ経由で状態を取得する。
+exports.listConfirmedWinnerMailBatches = confirmedCallable("admin", winnerSendApi.listBatches, {timeoutSeconds: 120});
+exports.getConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.getJob, {timeoutSeconds: 60});
 
 // Web参加証とprogram別受付(confirmed)。
 // - getConfirmedParticipantPass: 参加者本人がログインなしで自分の参加証を閲覧(読み取り専用)。participantId+publicIdの組だけで閲覧でき、
