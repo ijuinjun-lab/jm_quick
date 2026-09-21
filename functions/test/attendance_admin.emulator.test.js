@@ -15,6 +15,7 @@ const {createImportApi} = require("../confirmed/import_api");
 const {createPassApi} = require("../confirmed/pass_api");
 const {receptionQrPayload} = require("../confirmed/pass_urls");
 const {confirmedCallable, confirmedPublicPassCallable} = require("../auth");
+const {publicRequest} = require("../test_support/app_check");
 
 const silent = {warn: () => {}, info: () => {}};
 const APP_BASE_URL = "https://app.invalid";
@@ -40,7 +41,7 @@ describe("受付の訂正・取消・再受付(admin専用 / Emulator + 実Admin
     const api = createPassApi({getDb: () => db, serverTimestamp, getAppBaseUrl: () => APP_BASE_URL, logger: silent});
     const publicCallable = confirmedPublicPassCallable(api.getPass, {logger: silent});
     const wrap = (level, handler) => { const callable = confirmedCallable(level, handler, {db, logger: silent}); return (request) => callable.run(request); };
-    pass = (data) => publicCallable.run({data});
+    pass = (data) => publicCallable.run(publicRequest({data}));
     view = wrap("staffOrAdmin", api.getReceptionView);
     checkIn = wrap("staffOrAdmin", api.checkIn);
     correct = wrap("admin", api.correct);

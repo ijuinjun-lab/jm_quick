@@ -7,6 +7,8 @@ const {createHash, randomBytes} = require("crypto");
 const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
 const {confirmedCallable, confirmedPublicPassCallable, publicCapabilityCallable} = require("./auth");
 const {createLegacyApi} = require("./legacy/legacy_api");
+const {createRateLimiter, clientIpOf} = require("./rate_limit");
+const {RATE_LIMIT_POLICIES, RATE_LIMIT_RETENTION_MS, WALK_IN_EVENT_LIMIT} = require("./public_limits");
 const {getMyAccessRoleHandler} = require("./confirmed/access_role");
 const {createImportApi} = require("./confirmed/import_api");
 const {createWinnerMailApi} = require("./confirmed/winner_mail_api");
@@ -19,6 +21,9 @@ const {createMailApiTransport} = require("./mail_transport");
 initializeApp();
 
 const mailApiKey = defineSecret("MAIL_API_KEY");
+// 公開callableのrate limit用のHMAC鍵(接続元IP・対象の識別子をHMAC化するため。生値は保存しない)。MAIL_API_KEYとは別のSecret。
+// 本番deploy前に、Secret Managerで作成(ランダムな32バイト以上)してから deploy すること(未作成だとdeployが失敗する=fail-closed)。
+const rateLimitKey = defineSecret("RATE_LIMIT_HMAC_KEY");
 const mailApiUrl = defineString("MAIL_API_URL");
 const appBaseUrl = defineString("APP_BASE_URL", {default: "https://jm-quick.web.app"});
 
@@ -211,6 +216,24 @@ exports.sendParticipantMail = confirmedCallable("admin",
   {secrets: [mailApiKey], timeoutSeconds: 30},
 );
 
+// ---- 公開callableのrate limit(Phase 10D) ----------------------------------------------------------------
+// 上限値は public_limits.js に集約。App Checkはauth.jsの公開入口(publicCallable)が、ハンドラより前に要求する。
+// 呼び出し順: App Check → rate limit(接続元IP → 対象) → ハンドラ(入力検証・capability照合)。
+const rateLimiter = createRateLimiter({getDb: getFirestore, getKey: () => rateLimitKey.value(), retentionMs: RATE_LIMIT_RETENTION_MS});
+const VIEW_LIMITS = {ip: RATE_LIMIT_POLICIES.viewIp, target: RATE_LIMIT_POLICIES.viewTarget};
+const UPDATE_LIMITS = {ip: RATE_LIMIT_POLICIES.updateIp, target: RATE_LIMIT_POLICIES.updateTarget};
+function limitedByParticipant(limits, handler) {
+  return async (context) => {
+    await rateLimiter.check(limits.ip, clientIpOf(context.request));
+    const data = context.data;
+    const participantId = data && typeof data === "object" && typeof data.participantId === "string" && data.participantId !== "" ?
+      data.participantId.slice(0, 128) : null;
+    if (participantId) await rateLimiter.check(limits.target, participantId);
+    return handler(context);
+  };
+}
+const PUBLIC_SECRETS = {secrets: [rateLimitKey]};
+
 // 従来方式(legacy)の管理・受付・参加者本人向けAPI(Phase 10C)。認可の定義は functions/legacy/legacy_api.js の冒頭を参照。
 const serverTimestampForLegacy = () => FieldValue.serverTimestamp();
 const legacyApi = createLegacyApi({getDb: getFirestore, serverTimestamp: serverTimestampForLegacy});
@@ -220,8 +243,11 @@ const legacyApi = createLegacyApi({getDb: getFirestore, serverTimestamp: serverT
 // 同じイベント+メールの二重登録はwalkInRegistrations(hash id)の作成が原子的に拒否する(連打・再送でも1件)。
 // Phase 10D: enforceAppCheck・rate limit・(必要なら)アプリ側の重複メール送信抑止を、この入口に追加する。
 exports.registerWalkIn = publicCapabilityCallable(
-  async ({data}) => {
+  async ({data, request}) => {
+    // 入力の検証より前に接続元で数える(不正な入力の連打も同じ枠に入る)。宛先(メール)単位は正規化したあとで数える。
+    await rateLimiter.check(RATE_LIMIT_POLICIES.walkInIp, clientIpOf(request));
     const {eventId, name, email: normalizedEmail, registeredCount} = legacyApi.parseWalkIn(data);
+    await rateLimiter.check(RATE_LIMIT_POLICIES.walkInTarget, normalizedEmail);
     const db = getFirestore();
     const eventRef = db.collection("events").doc(eventId);
     const participantRef = db.collection("participants").doc();
@@ -245,8 +271,20 @@ exports.registerWalkIn = publicCapabilityCallable(
         throw new HttpsError("already-exists",
           "すでにこのイベントへ登録されています。受付スタッフへお声がけください。");
       }
+      // イベント単位の上限(walk-inとして作られた件数だけを数える。事前登録の参加者は数えない)。
+      // 件数はeventsの walkInCount で管理し(未設定の既存イベントは、walk-inの参加者を数えて初期化)、同じtransactionで+1するため、
+      // 同時登録でも上限を超えない(競合はFirestoreが再試行して直列化する)。上限に達したら、何も作らず・メールも送らない。
+      let walkInUsed = eventSnapshot.data().walkInCount;
+      if (!Number.isInteger(walkInUsed) || walkInUsed < 0) {
+        walkInUsed = (await transaction.get(db.collection("participants")
+          .where("eventId", "==", eventId).where("registrationType", "==", "walkIn"))).size;
+      }
+      if (walkInUsed >= WALK_IN_EVENT_LIMIT) {
+        throw new HttpsError("resource-exhausted", "このイベントの当日参加登録の受付上限に達しました。受付スタッフへお声がけください。");
+      }
       event = eventSnapshot.data();
       const now = FieldValue.serverTimestamp();
+      transaction.update(eventRef, {walkInCount: walkInUsed + 1});
       transaction.create(uniqueRef, {
         eventId, participantId: participantRef.id, email: normalizedEmail,
         createdAt: now,
@@ -315,15 +353,16 @@ exports.registerWalkIn = publicCapabilityCallable(
       return {success: true, participantId: participantRef.id, publicId,
         mailSent: true, messageId: result.messageId || ""};
     } catch (error) {
+      // Phase 10D: エラーオブジェクト全体は出さない(宛先などの個人情報を含み得るため)。理由コードだけを残す
       console.error("Walk-in mail failed", {eventId,
-        participantId: participantRef.id, error});
+        participantId: participantRef.id, reason: "mail-send-failed"});
       await participantRef.update({walkInMailStatus: "failed",
         updatedAt: FieldValue.serverTimestamp()});
       return {success: true, participantId: participantRef.id, publicId,
         mailSent: false, mailError: "確認メールを送信できませんでした。"};
     }
   },
-  {secrets: [mailApiKey], timeoutSeconds: 30},
+  {secrets: [mailApiKey, rateLimitKey], timeoutSeconds: 30},
 );
 
 exports.sendScheduledConfirmationMail = onSchedule(
@@ -856,7 +895,7 @@ exports.getConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.get
 //   受付・変更はできない。Phase 10でApp Check強制とrate limitを有効にする(auth.jsのPUBLIC_PASS_CALLABLE_OPTIONS / createPassApiのcheckRateLimit)
 // - getConfirmedReceptionView / checkInConfirmedProgram: 受付はstaff/adminのみ(Firebase Auth + accessRoles)。programAttendancesが受付の正本
 const passApi = createPassApi({getDb: getFirestore, serverTimestamp, getAppBaseUrl: () => appBaseUrl.value()});
-exports.getConfirmedParticipantPass = confirmedPublicPassCallable(passApi.getPass);
+exports.getConfirmedParticipantPass = confirmedPublicPassCallable(limitedByParticipant(VIEW_LIMITS, passApi.getPass), PUBLIC_SECRETS);
 exports.getConfirmedReceptionView = confirmedCallable("staffOrAdmin", passApi.getReceptionView);
 exports.checkInConfirmedProgram = confirmedCallable("staffOrAdmin", passApi.checkIn);
 // 受付後の訂正・取消はadminだけ(staffは初回受付のみ)。受付状態の正本はprogramAttendancesのまま。実変更ごとにhistoryを1件追記する。
@@ -872,9 +911,11 @@ exports.getLegacyEventAdminView = confirmedCallable("admin", legacyApi.getEventA
 exports.createLegacyEvent = confirmedCallable("admin", legacyApi.createEvent, {timeoutSeconds: 30});
 exports.updateLegacyEventSettings = confirmedCallable("admin", legacyApi.updateEventSettings, {timeoutSeconds: 30});
 exports.createLegacyParticipant = confirmedCallable("admin", legacyApi.createParticipant, {timeoutSeconds: 30});
+// 受付QRの入口の振り分け(staff/adminだけ)。返すのは kind("legacy"/"confirmed")のみ。未認証ではイベントを問い合わせられない。
+exports.getEventKind = confirmedCallable("staffOrAdmin", legacyApi.getEventKind, {timeoutSeconds: 30});
 exports.getLegacyReceptionView = confirmedCallable("staffOrAdmin", legacyApi.getReceptionView, {timeoutSeconds: 30});
 exports.checkInLegacyParticipant = confirmedCallable("staffOrAdmin", legacyApi.checkInParticipant, {timeoutSeconds: 30});
 exports.updateLegacyAttendedCount = confirmedCallable("staffOrAdmin", legacyApi.updateAttendedCount, {timeoutSeconds: 30});
-exports.getLegacyParticipantPage = publicCapabilityCallable(legacyApi.getParticipantPage);
-exports.confirmLegacyParticipation = publicCapabilityCallable(legacyApi.confirmParticipation);
-exports.answerLegacyReconfirmation = publicCapabilityCallable(legacyApi.answerReconfirmation);
+exports.getLegacyParticipantPage = publicCapabilityCallable(limitedByParticipant(VIEW_LIMITS, legacyApi.getParticipantPage), PUBLIC_SECRETS);
+exports.confirmLegacyParticipation = publicCapabilityCallable(limitedByParticipant(UPDATE_LIMITS, legacyApi.confirmParticipation), PUBLIC_SECRETS);
+exports.answerLegacyReconfirmation = publicCapabilityCallable(limitedByParticipant(UPDATE_LIMITS, legacyApi.answerReconfirmation), PUBLIC_SECRETS);

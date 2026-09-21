@@ -1,20 +1,16 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Phase 10C: 従来方式(legacy)のクライアントSDK直接read/writeを閉じた。
-    // これまで旧管理画面・旧マイページ・旧受付が、events・participants・checkIns・mailJobs を直接読み書き・購読していたが、
-    // すべて認証つきのサーバーAPI(admin/staffOrAdmin)または参加者capability(participantId+publicId)のcallableへ移した。
-    // Admin SDKはRulesの影響を受けない(Functionsの従来Scheduler・callableは変わらず動く)。
+    // Phase 10C〜10D: JM QuickのFirestoreは、クライアントSDKから直接read/writeできない。
+    //   Flutter → callable / capability API → Admin SDK → Firestore
+    // 未認証・認証済み(accessRolesなし)・staff・adminのどのクライアントも、どのcollectionも直接読み書きできない。
+    // Admin SDK(Functions・Scheduler)はRulesの影響を受けない。ここに allow を追加してはならない(公開許可・request.authだけの許可も不可)。
+    // 未知のcollectionは、matchが無いため拒否される(default deny。ワイルドカードのallowは置かない)。
     //
-    // 【残しているread(Phase 10Dで閉じる予定)】
-    //   events の read だけは公開のまま(受付QR /reception が、従来方式か新方式かを判定するためにイベントを1件読む)。
-    //   eventsには参加者の個人情報を持たないが、イベント名・会場・日時・(confirmedの)テンプレート等を誰でも読める。
-    //   Phase 10Dで、方式判定を認証つきAPIへ移してから閉じること。
-    // 【writeはすべて閉じた】eventsのcreate/update/delete、participants・checkInsの全操作、mailJobsの全操作。
-    //   イベントの作成・更新・参加者登録・受付・削除・一括メールは、すべてサーバーAPI経由(サーバーが認可・legacy判定・入力検証・transactionを行う)。
+    // Phase 10D: eventsのreadも閉じた(以前は受付QR /reception の方式判定のために公開していた)。方式判定は、staff/admin認証つきの
+    // callable(getEventKind。kindだけを返す)へ移した。これでクライアントから直接読める業務データは0件。
     match /events/{eventId} {
-      allow read: if true;
-      allow create, update, delete: if false;
+      allow read, write: if false;
     }
 
     // Phase 10C: participants(氏名・かな・メール・publicId等)は、未認証・認証済みを問わずクライアントSDKから
@@ -90,6 +86,11 @@ service cloud.firestore {
     }
 
     match /walkInRegistrations/{registrationId} {
+      allow read, write: if false;
+    }
+
+    // Phase 10D: 公開callableのrate limit用カウンタ(識別子はHMAC化済み)。Admin SDK(Functions)だけが読み書きする。
+    match /rateLimits/{documentId} {
       allow read, write: if false;
     }
   }

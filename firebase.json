@@ -16,6 +16,66 @@
         "key": "Cache-Control",
         "value": "no-cache, no-store, max-age=0, must-revalidate"
       }]
+    }, {
+      "source": "/p/**",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/reception",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/reception/**",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/e/**",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/admin",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/admin/**",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/demo-admin",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/demo-admin/**",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/console",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
+    }, {
+      "source": "/console/**",
+      "headers": [{
+        "key": "X-Robots-Tag",
+        "value": "noindex, nofollow"
+      }]
     }],
     "rewrites": [{"source": "**", "destination": "/index.html"}]
   },

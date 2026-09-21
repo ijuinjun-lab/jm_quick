@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../services/app_check.dart';
+
 /// 参加証を取得できなかった(通信エラー等)。参加者へ表示できる、内部情報を含まないメッセージ。
 class PassException implements Exception {
   const PassException(this.message);
@@ -91,14 +93,19 @@ abstract class PassService {
 }
 
 class CallablePassService implements PassService {
-  CallablePassService({http.Client? httpClient, String? baseUrl})
-    : _httpClient = httpClient ?? http.Client(),
-      baseUrl = baseUrl ?? defaultBaseUrl;
+  CallablePassService({
+    http.Client? httpClient,
+    String? baseUrl,
+    AppCheckTokenProvider? appCheck,
+  }) : _httpClient = httpClient ?? http.Client(),
+       _appCheck = appCheck ?? FirebaseAppCheckTokenProvider(),
+       baseUrl = baseUrl ?? defaultBaseUrl;
 
   static const defaultBaseUrl =
       'https://asia-northeast1-jm-quick.cloudfunctions.net';
 
   final http.Client _httpClient;
+  final AppCheckTokenProvider _appCheck;
   final String baseUrl;
 
   @override
@@ -106,12 +113,25 @@ class CallablePassService implements PassService {
     required String participantId,
     required String publicId,
   }) async {
+    // 公開API(ログイン不要)。App Checkトークンを取得できなければ、サーバーへ送らずに失敗する(サーバーも拒否する)。
+    String? appCheckToken;
+    try {
+      appCheckToken = await _appCheck.token();
+    } catch (_) {
+      appCheckToken = null; // 取得失敗はトークン無しと同じ(理由・トークンは外へ出さない)
+    }
+    if (appCheckToken == null) {
+      throw const PassException('リクエストを確認できませんでした。ページを読み込み直して、もう一度お試しください。');
+    }
     http.Response response;
     try {
-      // ログイン不要。送るのは参加証のIDとトークンだけ(IDトークン・uid・roleは送らない)。
+      // ログイン不要。送るのは参加証のIDとApp Checkトークンだけ(IDトークン・uid・roleは送らない)。
       response = await _httpClient.post(
         Uri.parse('$baseUrl/getConfirmedParticipantPass'),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          appCheckHeaderName: appCheckToken,
+        },
         body: jsonEncode({
           'data': {'participantId': participantId, 'publicId': publicId},
         }),

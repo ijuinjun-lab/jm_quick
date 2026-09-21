@@ -10,6 +10,7 @@ import 'package:jm_quick/services/demo_repository.dart';
 import 'package:jm_quick/services/legacy_api.dart';
 import 'package:http/testing.dart';
 
+import 'app_check_fake.dart';
 import 'confirmed_auth_test.dart' show FakeAuthClient;
 
 Map<String, dynamic> _fixture() =>
@@ -62,6 +63,7 @@ DemoRepository _repository(String? flow, {void Function()? onLoad}) =>
       selectedEventId: 'e1',
       api: LegacyApiClient(
         authClient: FakeAuthClient(signedIn: true),
+        appCheck: FakeAppCheck(),
         httpClient: MockClient((request) async {
           _attemptedRequests.add(request.url);
           throw StateError('no network in tests');

@@ -14,6 +14,7 @@ const {renderWinnerMail} = require("../confirmed/mail_render");
 const {receptionQrPayload, webPassUrl} = require("../confirmed/pass_urls");
 const {loadAttendances} = require("../confirmed/winner_mail_message");
 const {confirmedCallable, confirmedPublicPassCallable} = require("../auth");
+const {publicRequest} = require("../test_support/app_check");
 const {generateQrPng} = require("../qr_png");
 
 const silent = {warn: () => {}, info: () => {}};
@@ -45,7 +46,7 @@ describe("Web参加証・program別受付(Emulator + 実Admin SDK)", {skip: skip
     const publicCallable = confirmedPublicPassCallable(api.getPass, {logger: silent});
     const staffView = confirmedCallable("staffOrAdmin", api.getReceptionView, {db, logger: silent});
     const staffCheckIn = confirmedCallable("staffOrAdmin", api.checkIn, {db, logger: silent});
-    pass = (data) => publicCallable.run({data});
+    pass = (data) => publicCallable.run(publicRequest({data}));
     view = (request) => staffView.run(request);
     checkIn = (request) => staffCheckIn.run(request);
   }

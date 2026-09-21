@@ -113,10 +113,13 @@ describe("Firestore Rules(Phase 10B/10C): 参加者・受付のread/write遮断(
 
       test("confirmed参加者: eventId == confirmedのquery(events一覧で得たeventIdを使う攻撃経路)を拒否する。1件も返らない", async () => {
         // 攻撃経路: eventsを一覧 → flow=confirmedのeventIdを得る → そのeventIdでparticipantsをquery
-        const events = JSON.parse((await get("events", token)).text).documents || [];
-        const confirmedIds = events.filter((d) => d.fields.flow && d.fields.flow.stringValue === "confirmed").map((d) => d.fields.eventId.stringValue);
-        assert.deepEqual(confirmedIds, ["e-conf"], "eventsはまだ公開read(Phase 10D)。confirmedのeventIdは取得できる");
-        for (const eventId of confirmedIds) {
+        // Phase 10D: 以前(10B/10C)はeventsが公開readで、confirmedのeventIdを取得できた。今はeventsの一覧・getが拒否され、最初の段階で止まる。
+        const eventsList = await get("events", token);
+        assert.equal(eventsList.status, 403, "Phase 10D: eventsの一覧は拒否");
+        assert.equal((await get("events/e-conf", token)).status, 403, "Phase 10D: eventsのgetも拒否");
+        assert.ok(!eventsList.text.includes("e-conf") && !eventsList.text.includes("confirmed"));
+        // eventIdを推測できたとしても(既知のIDを直接指定しても)、participantsは拒否される
+        for (const eventId of ["e-conf"]) {
           const result = await query("participants", [["eventId", "EQUAL", eventId]], token);
           assert.ok(denied(result), `eventId=${eventId}: 拒否されるはず (${result.status})`);
           assert.ok(!result.text.includes("leak-check-confirmed@example.invalid") && !result.text.includes(PUBLIC_ID("c")));
@@ -174,10 +177,14 @@ describe("Firestore Rules(Phase 10B/10C): 参加者・受付のread/write遮断(
     });
   }
 
-  describe("読み取り境界の意味(eventsのreadだけが、Phase 10Dまで公開のまま)", () => {
-    test("残しているもの: eventsのread(get・list)だけ。participants・checkIns・mailJobs(従来方式も)は、未認証で読めない", async () => {
-      assert.equal((await get("events/e-conf")).status, 200, "eventsのreadは維持(/receptionのflow判定に必要。Phase 10Dで閉じる)");
-      assert.equal((await get("events/e-legacy")).status, 200);
+  describe("読み取り境界の意味(Phase 10D: 公開のreadは0件)", () => {
+    test("Phase 10D: events・participants・checkIns・mailJobs(従来方式も)は、どのクライアントでも読めない(eventsは10C時点では公開readだった)", async () => {
+      for (const [label, token] of CLIENTS) {
+        assert.equal((await get("events/e-conf", token)).status, 403, `${label}: events get(confirmed)`);
+        assert.equal((await get("events/e-legacy", token)).status, 403, `${label}: events get(legacy)`);
+        assert.ok(denied(await query("events", [], token)), `${label}: events list`);
+        assert.ok(denied(await query("events", [["flow", "EQUAL", "confirmed"]], token)), `${label}: events query(flow)`);
+      }
       assert.equal((await get("participants/pl-e-legacy")).status, 403, "Phase 10C: 従来方式の参加者も拒否(以前は公開read)");
       assert.equal((await get("checkIns/pl-e-legacy")).status, 403, "Phase 10C: 従来方式の受付も拒否(以前は公開read)");
       await seed("mailJobs/e-legacy_invitation", {eventId: "e-legacy", type: "invitation", status: "queued"});
@@ -246,7 +253,7 @@ describe("Firestore Rules(Phase 10B/10C): 参加者・受付のread/write遮断(
     });
   });
 
-  test("Rulesの静的検査(Phase 10C): participants・checkIns・mailJobsは read, write とも if false のみ。eventsはreadだけ公開、writeは拒否。旧helperは残っていない", () => {
+  test("Rulesの静的検査(Phase 10D): events・participants・checkIns・mailJobsは read, write とも if false のみ。公開allow・条件つきallowは0件。旧helperは残っていない", () => {
     const rules = fs.readFileSync(RULES_PATH, "utf8");
     const allowsOf = (name) => {
       const match = rules.match(new RegExp(`match /${name}/\\{[^}]+\\}\\s*\\{([\\s\\S]*?)\\n    \\}`));
@@ -255,13 +262,8 @@ describe("Firestore Rules(Phase 10B/10C): 参加者・受付のread/write遮断(
       const own = match[1].split(/\n\s*match /)[0];
       return own.match(/allow[^;]*;/g);
     };
-    assert.deepEqual(allowsOf("participants"), ["allow read, write: if false;"]);
-    assert.deepEqual(allowsOf("checkIns"), ["allow read, write: if false;"]);
-    assert.deepEqual(allowsOf("mailJobs"), ["allow read, write: if false;"]);
-    assert.deepEqual(allowsOf("events"), ["allow read: if true;", "allow create, update, delete: if false;"]);
-    // 条件つきallowが残っていない(=flow・イベント存在・eventIdの型に依存した許可が無い)
+    for (const name of ["events", "participants", "checkIns", "mailJobs"]) assert.deepEqual(allowsOf(name), ["allow read, write: if false;"], name);
     for (const helper of ["eventIsReadableLegacy", "eventIsLegacy", "isLegacyEventData", "eventExists"]) assert.doesNotMatch(rules, new RegExp(helper), `${helper}は不要になった`);
-    assert.doesNotMatch(rules, /allow[^;]*:\s*if\s+true[^;]*;[\s\S]*allow[^;]*:\s*if\s+true/, "公開のallowはeventsのreadだけ");
-    assert.equal((rules.match(/if true;/g) || []).length, 1, "if true は events の read の1か所だけ");
+    assert.equal((rules.match(/if true/g) || []).length, 0, "if true(公開許可)は0件");
   });
 });

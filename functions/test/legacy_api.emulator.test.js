@@ -6,6 +6,7 @@ const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {createLegacyApi} = require("../legacy/legacy_api");
 const {confirmedCallable, publicCapabilityCallable} = require("../auth");
+const {publicRequest} = require("../test_support/app_check");
 
 const silent = {warn: () => {}, info: () => {}, error: () => {}};
 const code = (promise) => promise.then(() => "ok", (e) => e.code);
@@ -33,7 +34,7 @@ describe("従来方式API(Emulator + 実Admin SDK)", {skip: skipReason()}, () =>
       page: publicCapabilityCallable(api.getParticipantPage), confirm: publicCapabilityCallable(api.confirmParticipation),
       answer: publicCapabilityCallable(api.answerReconfirmation),
     };
-    publicCall = (name, data) => pub[name].run({data});
+    publicCall = (name, data) => pub[name].run(publicRequest({data}));
   });
   after(() => env?.stop());
   beforeEach(async () => {

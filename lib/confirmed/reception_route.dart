@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/event_kind_service.dart';
+import '../services/legacy_api.dart';
 import 'access_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
@@ -15,10 +16,11 @@ typedef LegacyEventCheck = Future<bool> Function(String eventId);
 typedef EventKindCheck = Future<EventKind> Function(String eventId);
 
 /// `/reception?eventId&participantId&publicId`(受付用QRのURL)の入口。QRの形式は従来と同じ。
-///   従来方式(flow未設定/legacy)   → ログイン(staff/admin)が必要な、従来の受付画面([legacyBuilder])  ※Phase 10Cで認証必須になった
-///   新方式(confirmed)              → ログイン(staff/admin)が必要な、program別の受付画面
-///   未知のflow・存在しないイベント・イベントを読めない → どの受付画面も出さず、案内(再試行)だけ。fail-closed
-/// 参加者本人がこのURLを開いても、ログインしていなければログイン画面が出るだけで、受付操作はできない
+///   順序: ログイン → staff/adminの確認 → 方式の判定(サーバーAPI getEventKind。Firestoreは直接読まない) → 受付画面
+///   従来方式(flow未設定/legacy)   → 従来の受付画面([legacyBuilder])
+///   新方式(confirmed)              → program別の受付画面
+///   未知のflow・存在しないイベント・方式を確認できない → どの受付画面も出さず、「イベントを確認できませんでした」だけ(再試行可)。fail-closed
+/// 参加者本人がこのURLを開いても、ログインしていなければログイン画面が出るだけで、方式の問い合わせも受付操作もできない
 /// (受付はFirebase Auth + accessRolesのstaff/adminをサーバーが毎回検証する)。
 class ReceptionRoutePage extends StatefulWidget {
   const ReceptionRoutePage({
@@ -53,7 +55,6 @@ class ReceptionRoutePage extends StatefulWidget {
 }
 
 class _ReceptionRoutePageState extends State<ReceptionRoutePage> {
-  late Future<EventKind?> kind = _resolve();
   late final AuthClient authClient = widget._authClient ?? FirebaseAuthClient();
 
   bool get _hasAllParams =>
@@ -61,21 +62,70 @@ class _ReceptionRoutePageState extends State<ReceptionRoutePage> {
       (widget.participantId ?? '').isNotEmpty &&
       (widget.publicId ?? '').isNotEmpty;
 
-  // 方式を判定できなかった(読み取りの失敗)ときはnullを返し、受付画面を出さない(以前は「読めなければ従来の画面」だった)
+  @override
+  Widget build(BuildContext context) {
+    // 必要なパラメータが欠けたURLは、従来どおり案内だけ(ログイン・通信なし)
+    if (!_hasAllParams) return widget.legacyBuilder(context);
+    // 順序: ログイン → staff/adminの確認 → 方式(legacy/confirmed)の判定 → 受付画面。
+    // 未ログインのまま方式を問い合わせない(受付できるのは認証済みのstaff/adminだけ)。
+    return AuthGate(
+      authClient: authClient,
+      accessService:
+          widget._accessService ??
+          CallableAccessService(authClient: authClient),
+      adminBuilder: (context, signOut) => _KindResolver(
+        route: widget,
+        authClient: authClient,
+        signOut: signOut,
+        isAdmin: true,
+      ),
+      staffBuilder: (context, signOut) => _KindResolver(
+        route: widget,
+        authClient: authClient,
+        signOut: signOut,
+        isAdmin: false,
+      ),
+    );
+  }
+}
+
+/// 認証済み(staff/admin)のあとに、イベントの方式をサーバー(getEventKind)で確認し、受付画面へ振り分ける。
+/// 方式を確認できないとき(未知のflow・存在しない・通信失敗)は、legacyやconfirmedと仮定せず、どの受付画面も出さない。
+class _KindResolver extends StatefulWidget {
+  const _KindResolver({
+    required this.route,
+    required this.authClient,
+    required this.signOut,
+    required this.isAdmin,
+  });
+  final ReceptionRoutePage route;
+  final AuthClient authClient;
+  final Future<void> Function() signOut;
+  final bool isAdmin;
+
+  @override
+  State<_KindResolver> createState() => _KindResolverState();
+}
+
+class _KindResolverState extends State<_KindResolver> {
+  late Future<EventKind?> kind = _resolve();
+
+  // 判定できなかった(通信・認証の失敗)ときはnull。unsupportedはサーバーが「確認できない」と答えた場合。
   Future<EventKind?> _resolve() async {
-    // 従来の受付画面が「有効なQRから開いてください」と案内する(通信しない)
-    if (!_hasAllParams) return EventKind.legacy;
+    final route = widget.route;
     try {
-      final legacyCheck = widget._isLegacyEvent;
+      final legacyCheck = route._isLegacyEvent;
       if (legacyCheck != null) {
-        return await legacyCheck(widget.eventId!)
+        return await legacyCheck(route.eventId!)
             ? EventKind.legacy
             : EventKind.confirmed;
       }
       final kindCheck =
-          widget._eventKind ??
-          (String id) => FirestoreEventKindService().kindOf(id);
-      return await kindCheck(widget.eventId!);
+          route._eventKind ??
+          ApiEventKindService(
+            api: LegacyApiClient(authClient: widget.authClient),
+          ).kindOf;
+      return await kindCheck(route.eventId!);
     } catch (_) {
       return null;
     }
@@ -91,50 +141,37 @@ class _ReceptionRoutePageState extends State<ReceptionRoutePage> {
       final resolved = snapshot.data;
       if (resolved == null) {
         return _Unavailable(
-          message: 'イベントの情報を確認できませんでした。通信状態を確認して、もう一度お試しください。',
-          onRetry: () => setState(() => kind = _resolve()),
+          message: 'イベントを確認できませんでした。通信状態を確認して、もう一度お試しください。',
+          onRetry: () => setState(() {
+            kind = _resolve();
+          }),
         );
       }
-      if (resolved == EventKind.missing || resolved == EventKind.unsupported) {
+      if (resolved != EventKind.legacy && resolved != EventKind.confirmed) {
         return const _Unavailable(
-          message: 'この受付用QRコードでは受付できません。受付スタッフへお声がけください。',
+          message: 'イベントを確認できませんでした。この受付用QRコードでは受付できません。受付スタッフへお声がけください。',
         );
       }
-      // 必要なパラメータが欠けたURLは、従来どおり案内だけ(ログイン・通信なし)
-      if (!_hasAllParams) return widget.legacyBuilder(context);
-      final isLegacy = resolved == EventKind.legacy;
+      final route = widget.route;
+      if (resolved == EventKind.legacy) {
+        // 従来方式の受付画面も、staff/adminとして確認できたあとにだけ作られる
+        return route.legacyBuilder(context);
+      }
       final service =
-          widget._receptionService ??
-          CallableReceptionService(authClient: authClient);
+          route._receptionService ??
+          CallableReceptionService(authClient: widget.authClient);
       // 受付後の訂正・取消は、adminとして確認できた場合だけ画面に出す(staffには渡さない。サーバーもadmin専用)。
-      Widget page(
-        BuildContext context,
-        Future<void> Function() signOut, {
-        required bool isAdmin,
-      }) => isLegacy
-          // 従来方式の受付画面も、staff/adminとして確認できたあとにだけ作られる(Phase 10C)
-          ? widget.legacyBuilder(context)
-          : ConfirmedReceptionPage(
-              service: service,
-              eventId: widget.eventId!,
-              participantId: widget.participantId!,
-              publicId: widget.publicId!,
-              signOut: signOut,
-              adminService: isAdmin
-                  ? (service is ReceptionAdminService
-                        ? service as ReceptionAdminService
-                        : null)
-                  : null,
-            );
-      return AuthGate(
-        authClient: authClient,
-        accessService:
-            widget._accessService ??
-            CallableAccessService(authClient: authClient),
-        adminBuilder: (context, signOut) =>
-            page(context, signOut, isAdmin: true),
-        staffBuilder: (context, signOut) =>
-            page(context, signOut, isAdmin: false),
+      return ConfirmedReceptionPage(
+        service: service,
+        eventId: route.eventId!,
+        participantId: route.participantId!,
+        publicId: route.publicId!,
+        signOut: widget.signOut,
+        adminService: widget.isAdmin
+            ? (service is ReceptionAdminService
+                  ? service as ReceptionAdminService
+                  : null)
+            : null,
       );
     },
   );

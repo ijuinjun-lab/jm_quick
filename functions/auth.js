@@ -109,30 +109,55 @@ function confirmedCallable(access, handler, options = {}) {
   return defineCallable(guard, handler, options);
 }
 
-// 参加者本人が「ログインなしで、自分のWeb参加証を閲覧する」ためだけの公開callable。
-// ここでの「公開」は、管理系の認可(staff/admin)を要求しないという意味に限る。閲覧の可否はハンドラが
-// participantId+publicId の組で判定する(publicIdは閲覧用の秘密トークンで、受付・変更の権限ではない)。
-// このcallableは読み取り専用でなければならない(書込みをするハンドラを渡してはならない)。
-// Phase 10のTODO: 実データ投入前に App Check の強制(enforceAppCheck)とrate limitを有効にする。
-//   - App Check: PUBLIC_PASS_CALLABLE_OPTIONS.enforceAppCheck を true にする(この公開callableだけに適用される)
-//   - rate limit: createPassApi の checkRateLimit フックに実装を渡す
-const PUBLIC_PASS_CALLABLE_OPTIONS = Object.freeze({
+// ---- 公開callable(ログイン不要の5本)の入口 --------------------------------------------------------------
+// ログインなしで呼べるcallableは、次の5本だけ(構造テストで固定): getConfirmedParticipantPass / registerWalkIn /
+// getLegacyParticipantPage / confirmLegacyParticipation / answerLegacyReconfirmation。
+// 「公開」は、管理系の認可(staff/admin)を要求しないという意味に限る。参加者本人の権限は participantId+publicId(capability)で、
+// publicIdは秘密トークン。Phase 10Dで、その外側に次の2つの防御を加えた(publicIdの代わりではなく、追加の層):
+//   1. App Check: 正規のJM Quick Webアプリからのリクエストであることの確認。
+//      - プラットフォーム側: enforceAppCheck=true(X-Firebase-AppCheck が無い・不正なら、ハンドラの前に拒否される)
+//      - コード側: requireAppCheck が request.app(検証済みのApp Check情報)を必須にする(テストで検証でき、設定漏れの二重の備え)
+//      本番のApp Check設定(reCAPTCHA Enterprise等の登録)が無い状態でdeployしても、全リクエストが拒否される(fail-closed)。
+//   2. rate limit: ハンドラの前にindex.jsが rate_limit.js(サーバー側・Firestore transaction)で強制する。
+// 管理・受付・削除・メール一括送信には使ってはならない。
+const PUBLIC_CALLABLE_OPTIONS = Object.freeze({
   timeoutSeconds: 30,
-  maxInstances: 10, // 大量アクセスによる課金・負荷の上限(App Check導入までの暫定の歯止め)
-  enforceAppCheck: false,
+  maxInstances: 10, // 大量アクセスによる課金・負荷の上限(rate limitの外側の歯止め)
+  enforceAppCheck: true,
 });
-function confirmedPublicPassCallable(handler, options = {}) {
-  if (typeof handler !== "function") throw new Error("confirmedPublicPassCallable: handler required");
-  return defineCallable(async () => null, handler, {...PUBLIC_PASS_CALLABLE_OPTIONS, ...options});
+// 互換のための別名(Phase 10C以前の名前)
+const PUBLIC_PASS_CALLABLE_OPTIONS = PUBLIC_CALLABLE_OPTIONS;
+
+const APP_CHECK_DENIED_MESSAGE = "リクエストを確認できませんでした。";
+
+// request.appは、ランタイムがX-Firebase-AppCheckトークンを検証できたときだけ設定される(未検証・不正なら未設定)。
+// ログにはトークンを出さず、理由コードだけを残す。応答は理由を区別しない。
+function requireAppCheck(request, {logger} = {}) {
+  const app = request && request.app;
+  let reason = null;
+  if (!app) reason = "app-check-missing";
+  else if (typeof app.appId !== "string" || app.appId === "") reason = "app-check-invalid";
+  if (reason) {
+    (logger || console).warn("app check denied", {reason});
+    throw new HttpsError("unauthenticated", APP_CHECK_DENIED_MESSAGE);
+  }
+  return null;
 }
 
-// Phase 10C: 従来方式(legacy)の「ログインなしで呼べる公開入口」。confirmedPublicPassCallableと同じ構造(guardなし+公開用オプション)。
-// 用途は2つだけ: (1) 参加者本人が participantId+publicId(capability)で自分のマイページを閲覧・回答する (2) 当日参加登録(registerWalkIn)。
-// 認可の代わりに、ハンドラがcapability(publicId)・イベントの状態・入力検証を必ず行う。管理・受付・削除・メール一括送信には使ってはならない。
-// Phase 10D: enforceAppCheck と rate limit はこの入口の PUBLIC_PASS_CALLABLE_OPTIONS / ハンドラ側のフックで有効にする。
+function publicCallable(name, handler, options) {
+  if (typeof handler !== "function") throw new Error(`${name}: handler required`);
+  return defineCallable(async (request, guardOptions) => requireAppCheck(request, guardOptions), handler, {...PUBLIC_CALLABLE_OPTIONS, ...options});
+}
+
+// 参加者本人が「ログインなしで、自分のWeb参加証を閲覧する」ためだけの公開callable(読み取り専用)。
+function confirmedPublicPassCallable(handler, options = {}) {
+  return publicCallable("confirmedPublicPassCallable", handler, options);
+}
+
+// 従来方式(legacy)の公開入口。用途は2つだけ: (1) 参加者本人が participantId+publicId(capability)で自分のマイページを閲覧・回答する
+// (2) 当日参加登録(registerWalkIn)。認可の代わりに、ハンドラがcapability(publicId)・イベントの状態・入力検証を必ず行う。
 function publicCapabilityCallable(handler, options = {}) {
-  if (typeof handler !== "function") throw new Error("publicCapabilityCallable: handler required");
-  return defineCallable(async () => null, handler, {...PUBLIC_PASS_CALLABLE_OPTIONS, ...options});
+  return publicCallable("publicCapabilityCallable", handler, options);
 }
 
 module.exports = {
@@ -147,5 +172,7 @@ module.exports = {
   confirmedCallable,
   confirmedPublicPassCallable,
   publicCapabilityCallable,
+  requireAppCheck,
+  PUBLIC_CALLABLE_OPTIONS,
   PUBLIC_PASS_CALLABLE_OPTIONS,
 };

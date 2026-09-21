@@ -5,6 +5,9 @@ const assert = require("node:assert/strict");
 const {afterEach, describe, test} = require("node:test");
 const {FakeFirestore, ts} = require("../test_support/fake_firestore");
 const {loadIndex, stubFetch} = require("../test_support/load_index");
+const {publicRequest} = require("../test_support/app_check");
+// Phase 10D: 公開callableはrate limitの記録(rateLimits/)を書く。「何も書き込まない」の検査は、業務データへの書込みを対象にする。
+const businessWrites = (db) => db.writes.filter((w) => !w.path.startsWith("rateLimits/"));
 
 const HOUR = 3600 * 1000;
 const now = Date.now();
@@ -111,7 +114,7 @@ describe("旧一括メール(startBulk*/processBulkMailJobs)", () => {
           "participants/p1": participant("p1", "e1"),
         });
         await rejectsPrecondition(index[start].run({auth: ADMIN, data: {eventId: "e1"}}));
-        assert.equal(db.writes.length, 0);
+        assert.equal(businessWrites(db).length, 0);
       });
     }
 
@@ -172,7 +175,7 @@ describe("個別案内メール・旧再確認メール(sendParticipantMail)", (
         });
         await rejectsPrecondition(call(index, "e1", type));
         assert.equal(mail.length, 0);
-        assert.equal(db.writes.length, 0);
+        assert.equal(businessWrites(db).length, 0);
       });
     }
   }
@@ -183,7 +186,7 @@ describe("当日参加登録(registerWalkIn)", () => {
 
   test("legacyイベントは従来どおり登録してメールを送る", async () => {
     const {db, index, mail} = setup({"events/e1": baseEvent("e1")});
-    const result = await index.registerWalkIn.run(input("e1"));
+    const result = await index.registerWalkIn.run(publicRequest(input("e1")));
     assert.equal(result.success, true);
     assert.equal(result.mailSent, true);
     assert.equal(mail.length, 1);
@@ -194,9 +197,9 @@ describe("当日参加登録(registerWalkIn)", () => {
   for (const [label, flow] of NON_LEGACY) {
     test(`${label}イベントは登録を拒否し、参加者・受付・一意キーを作らず、メールも送らない`, async () => {
       const {db, index, mail} = setup({"events/e1": baseEvent("e1", flow)});
-      await rejectsPrecondition(index.registerWalkIn.run(input("e1")));
+      await rejectsPrecondition(index.registerWalkIn.run(publicRequest(input("e1"))));
       assert.equal(mail.length, 0);
-      assert.equal(db.writes.length, 0);
+      assert.equal(businessWrites(db).length, 0);
     });
   }
 });

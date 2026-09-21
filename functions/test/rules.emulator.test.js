@@ -161,8 +161,10 @@ describe("Firestore Rules(ローカルEmulator)", {skip: skipReason}, () => {
     }
     test("legacyイベントの新規作成(flowなし)は拒否(以前は許可)", async () =>
       assert.equal(await create("events", "e-new-legacy", event("e-new-legacy")), 403));
-    test("participants/checkIns のreadは拒否(以前は許可)。eventsのreadだけはPhase 10Dまで公開のまま", async () => {
-      assert.equal(await read("events/e-legacy"), 200, "eventsのreadは残している(受付QRの方式判定用。Phase 10Dで閉じる)");
+    // Phase 10D: 以前(10C時点)は「eventsのreadだけ公開のまま」だった。方式判定をstaff/admin認証つきのAPI(getEventKind)へ移したため、
+    // eventsのreadも拒否へ変更した(以前の許可から拒否へ意図的に変更)。
+    test("Phase 10D: events・participants・checkIns のreadはすべて拒否(eventsは10C時点では許可だった)", async () => {
+      assert.equal(await read("events/e-legacy"), 403, "Phase 10D: eventsのreadも閉じた");
       assert.equal(await read("participants/p-e-legacy"), 403);
       assert.equal(await read("checkIns/p-e-legacy"), 403);
     });

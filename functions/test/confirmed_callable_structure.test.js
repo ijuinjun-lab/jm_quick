@@ -18,7 +18,8 @@ const LEGACY_ADMIN_EXPORTS = ["sendParticipantMail", "startBulkInvitationMail", 
 const LEGACY_SCHEDULED_EXPORTS = ["sendScheduledConfirmationMail", "processBulkMailJobs"];
 // 従来方式の管理・受付API(Phase 10C)
 const LEGACY_API_ADMIN = ["listLegacyEvents", "getLegacyEventAdminView", "createLegacyEvent", "updateLegacyEventSettings", "createLegacyParticipant"];
-const LEGACY_API_STAFF = ["getLegacyReceptionView", "checkInLegacyParticipant", "updateLegacyAttendedCount"];
+// getEventKind(Phase 10D)は、受付QRの入口の振り分け専用(kindだけを返す)。staffOrAdmin。公開callableを増やさない。
+const LEGACY_API_STAFF = ["getEventKind", "getLegacyReceptionView", "checkInLegacyParticipant", "updateLegacyAttendedCount"];
 // ログインなしで呼べる従来方式の公開入口(publicCapabilityCallable)。増やさない。参加者本人のcapability(participantId+publicId)か当日参加登録だけ。
 const PUBLIC_CAPABILITY_EXPORTS = ["registerWalkIn", "getLegacyParticipantPage", "confirmLegacyParticipation", "answerLegacyReconfirmation"];
 const ACCESS_LEVELS = ["admin", "staffOrAdmin", "authenticated"];
@@ -30,14 +31,14 @@ const INTERNAL_SCHEDULED_EXPORTS = ["sweepConfirmedMailDelivery", ...LEGACY_SCHE
 const exportsInIndex = [...index.matchAll(/^exports\.(\w+)\s*=\s*(.*)$/gm)].map((m) => ({name: m[1], rhs: m[2]}));
 
 test("index.jsのexportは、Scheduler・公開入口(固定一覧)・confirmedCallable(アクセスレベル, ...) のいずれかだけ", () => {
-  assert.ok(exportsInIndex.length >= 32);
+  assert.ok(exportsInIndex.length >= 44);
   for (const {name, rhs} of exportsInIndex) {
     if (INTERNAL_SCHEDULED_EXPORTS.includes(name)) {
       assert.match(rhs, /^onSchedule\(/, name);
       continue;
     }
     if (PUBLIC_PASS_EXPORTS.includes(name)) {
-      assert.match(rhs, /^confirmedPublicPassCallable\(passApi\.getPass\)/, name);
+      assert.match(rhs, /^confirmedPublicPassCallable\(limitedByParticipant\(VIEW_LIMITS, passApi\.getPass\), PUBLIC_SECRETS\)/, name);
       continue;
     }
     if (PUBLIC_CAPABILITY_EXPORTS.includes(name)) {
@@ -163,5 +164,57 @@ test("functions/legacy/ にはcallable・Firebaseを持ち込まない(公開は
   const forbidden = /\bonCall\b|\bonRequest\b|\bonSchedule\b|firebase-functions|firebase-admin|getFirestore/;
   for (const file of listJs(path.join(FUNCTIONS_DIR, "legacy"))) {
     assert.doesNotMatch(strip(fs.readFileSync(file, "utf8")), forbidden, path.relative(FUNCTIONS_DIR, file));
+  }
+});
+
+// Phase 10D: ログインなしで呼べるcallableは、この5本だけ(増やす・減らす・入口の種類を変えると失敗する)。
+const FIXED_PUBLIC_FIVE = ["getConfirmedParticipantPass", "registerWalkIn", "getLegacyParticipantPage", "confirmLegacyParticipation", "answerLegacyReconfirmation"];
+
+test("Phase 10D: ログイン不要のcallableは意図した5本だけ", () => {
+  const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs)).map((e) => e.name);
+  assert.deepEqual(publicOnes.sort(), [...FIXED_PUBLIC_FIVE].sort());
+  assert.deepEqual(exportsInIndex.filter((e) => !/^confirmedCallable\(/.test(e.rhs) && !/^onSchedule\(/.test(e.rhs)).map((e) => e.name).sort(), [...FIXED_PUBLIC_FIVE].sort());
+});
+
+test("Phase 10D: 公開5本は、参加者単位のrate limit(または当日参加登録専用のrate limit)とrate limit用Secretを必ず通る", () => {
+  for (const name of FIXED_PUBLIC_FIVE.filter((n) => n !== "registerWalkIn")) {
+    const found = exportsInIndex.find((e) => e.name === name);
+    assert.match(found.rhs, /limitedByParticipant\((VIEW|UPDATE)_LIMITS, /, `${name}: 参加者単位のrate limit`);
+    assert.match(found.rhs, /PUBLIC_SECRETS\)/, `${name}: rate limit用のSecret`);
+  }
+  // 閲覧は閲覧用、状態更新は更新用の(より厳しい)上限
+  assert.match(exportsInIndex.find((e) => e.name === "getConfirmedParticipantPass").rhs, /VIEW_LIMITS/);
+  assert.match(exportsInIndex.find((e) => e.name === "getLegacyParticipantPage").rhs, /VIEW_LIMITS/);
+  assert.match(exportsInIndex.find((e) => e.name === "confirmLegacyParticipation").rhs, /UPDATE_LIMITS/);
+  assert.match(exportsInIndex.find((e) => e.name === "answerLegacyReconfirmation").rhs, /UPDATE_LIMITS/);
+  const start = index.indexOf("exports.registerWalkIn");
+  const end = index.indexOf("exports.sendScheduledConfirmationMail");
+  const walkIn = index.slice(start, end);
+  assert.match(walkIn, /rateLimiter\.check\(RATE_LIMIT_POLICIES\.walkInIp/);
+  assert.match(walkIn, /rateLimiter\.check\(RATE_LIMIT_POLICIES\.walkInTarget/);
+  assert.match(walkIn, /WALK_IN_EVENT_LIMIT/);
+  assert.match(walkIn, /secrets: \[mailApiKey, rateLimitKey\]/);
+  // rate limitは、入力の検証・メール送信より前(IP → 入力の検証 → 宛先 → transaction)
+  assert.ok(walkIn.indexOf("walkInIp") < walkIn.indexOf("parseWalkIn") && walkIn.indexOf("parseWalkIn") < walkIn.indexOf("walkInTarget"));
+  assert.ok(walkIn.indexOf("walkInTarget") < walkIn.indexOf("runTransaction") && walkIn.indexOf("runTransaction") < walkIn.indexOf("/v1/mail/send"));
+});
+
+test("Phase 10D: 公開入口はApp Checkを強制する(プラットフォームのenforceAppCheck=true と、ハンドラ前のrequireAppCheck)", () => {
+  const authSource = fs.readFileSync(path.join(FUNCTIONS_DIR, "auth.js"), "utf8");
+  assert.match(authSource, /PUBLIC_CALLABLE_OPTIONS = Object\.freeze\(\{[^}]*enforceAppCheck: true/);
+  assert.match(authSource, /function publicCallable\([^)]*\) \{[\s\S]*?requireAppCheck\(request, guardOptions\)/);
+  // 公開入口は、この2つのラッパーだけがpublicCallableを使う
+  assert.equal((authSource.match(/publicCallable\(/g) || []).length, 3, "定義1 + 2つのラッパー");
+  assert.doesNotMatch(authSource, /enforceAppCheck: false/);
+});
+
+test("Phase 10D: rate limitの上限値はpublic_limits.jsに集約され、他のファイルに散在しない", () => {
+  const limitsSource = fs.readFileSync(path.join(FUNCTIONS_DIR, "public_limits.js"), "utf8");
+  assert.match(limitsSource, /WALK_IN_EVENT_LIMIT = \d+/);
+  for (const file of ["index.js", "rate_limit.js", "auth.js", path.join("legacy", "legacy_api.js")]) {
+    const source = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, file), "utf8"));
+    assert.doesNotMatch(source, /windowMs\s*[:=]\s*\d/, `${file}: 時間窓の数値`);
+    assert.doesNotMatch(source, /limit\s*[:=]\s*\d+\s*[,}]/, `${file}: 上限の数値`);
+    assert.doesNotMatch(source, /walkInCount\s*>=\s*\d/, `${file}: walk-in上限の数値`);
   }
 });

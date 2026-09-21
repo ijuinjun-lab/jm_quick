@@ -13,13 +13,14 @@ function fakeModule(filename, exports) {
   require.cache[filename] = {id: filename, filename, loaded: true, exports, children: [], paths: []};
 }
 
-function loadIndex(db) {
+function loadIndex(db, {FieldValue: injectedFieldValue} = {}) {
   process.env.MAIL_API_URL = FAKE_MAIL_ORIGIN;
   process.env.MAIL_API_KEY = "test-only-key";
+  process.env.RATE_LIMIT_HMAC_KEY = "test-only-rate-limit-hmac-key-0123456789";
   process.env.APP_BASE_URL = "https://app.invalid";
   const resolve = (id) => require.resolve(id, {paths: [FUNCTIONS_DIR]});
   fakeModule(resolve("firebase-admin/app"), {initializeApp: () => {}});
-  fakeModule(resolve("firebase-admin/firestore"), {getFirestore: () => db, FieldValue});
+  fakeModule(resolve("firebase-admin/firestore"), {getFirestore: () => db, FieldValue: injectedFieldValue || FieldValue});
   const indexPath = path.join(FUNCTIONS_DIR, "index.js");
   delete require.cache[indexPath];
   return require(indexPath);

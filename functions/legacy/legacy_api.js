@@ -153,6 +153,24 @@ function createLegacyApi({getDb, serverTimestamp, logger, now = () => Date.now()
     };
   }
 
+  // ---- イベントの方式判定(staff/admin。受付QR /reception の入口の振り分け専用) -------------------------------------------
+  // 返すのは kind("legacy" / "confirmed")だけ。イベントの内容(名前・会場・送信者・テンプレート・programs等)は一切返さない。
+  // 存在しない・未知のflow・型が不正なflow は、区別できない同一のエラー(failed-precondition)にする(fail-closed。legacyやconfirmedと仮定しない)。
+  // 認可は呼び出し側(index.jsのconfirmedCallable("staffOrAdmin"))。未認証では到達しない。
+  async function getEventKind({identity, data}) {
+    const request = parseKeys(data, ["eventId"], ["eventId"]);
+    const eventId = eventIdOf(request);
+    const event = dataOf(await getDb().collection("events").doc(eventId).get());
+    let kind = null;
+    if (event && isLegacyFlow(event)) kind = "legacy";
+    else if (event && event.flow === "confirmed") kind = "confirmed";
+    if (!kind) {
+      log.warn("event kind unavailable", {reason: event ? "flow-unsupported" : "event-missing", uid: identity && identity.uid});
+      throw new ApiError("failed-precondition", "イベントを確認できませんでした。");
+    }
+    return {kind};
+  }
+
   // ---- 管理(admin) -----------------------------------------------------------------------------------
   // イベント一覧。legacyのイベントには集計を付ける。confirmed等には付けない(新方式は新しい管理画面を使う)。
   async function listEvents({data}) {
@@ -486,7 +504,7 @@ function createLegacyApi({getDb, serverTimestamp, logger, now = () => Date.now()
 
   return {
     listEvents, getEventAdminView, createEvent, updateEventSettings, createParticipant,
-    getReceptionView, checkInParticipant, updateAttendedCount,
+    getEventKind, getReceptionView, checkInParticipant, updateAttendedCount,
     getParticipantPage, confirmParticipation, answerReconfirmation,
     parseWalkIn, walkInOpen, isLegacyEvent, LIMITS,
   };

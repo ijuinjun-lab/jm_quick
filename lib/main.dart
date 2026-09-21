@@ -13,11 +13,15 @@ import 'pages/legacy_admin_gate.dart';
 import 'pages/participant_page.dart';
 import 'pages/reception_page.dart';
 import 'pages/walk_in_page.dart';
+import 'services/app_check.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   usePathUrlStrategy();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  // 公開API(参加証・マイページ・当日参加登録)へ付けるApp Check。サイトキーはビルド時の--dart-define(コードに埋め込まない)。
+  // 未設定なら有効化せず、公開APIはクライアント側で止まる(サーバーも拒否する)。管理・受付は従来どおりログイン+権限で保護される。
+  await activateAppCheck();
   runApp(const JmQuickApp());
 }
 

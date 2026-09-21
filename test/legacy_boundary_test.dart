@@ -18,10 +18,13 @@ import 'package:jm_quick/pages/legacy_admin_gate.dart';
 import 'package:jm_quick/pages/participant_page.dart';
 import 'package:jm_quick/pages/reception_page.dart';
 import 'package:jm_quick/pages/walk_in_page.dart';
+import 'package:jm_quick/services/app_check.dart';
 import 'package:jm_quick/services/demo_repository.dart';
+import 'package:jm_quick/services/event_kind_service.dart';
 import 'package:jm_quick/services/legacy_api.dart';
 import 'package:jm_quick/services/polling_source.dart';
 
+import 'app_check_fake.dart';
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 
 class _Call {
@@ -94,6 +97,7 @@ Map<String, dynamic> _participantDto(String id) => {
 };
 
 LegacyApiClient _api(_Server server, {FakeAuthClient? auth}) => LegacyApiClient(
+  appCheck: FakeAppCheck(),
   authClient: auth ?? FakeAuthClient(signedIn: true, token: 'admin-token'),
   httpClient: server.client,
 );
@@ -145,7 +149,47 @@ void main() {
         server,
       ).call('registerWalkIn', {'eventId': 'e1'}, authenticated: false);
       expect(server.calls.single.headers.containsKey('Authorization'), isFalse);
+      // Phase 10D: 公開APIにはApp Checkトークンを付ける
+      expect(
+        server.calls.single.headers[appCheckHeaderName],
+        'test-app-check-token',
+      );
     });
+
+    test(
+      'Phase 10D: 公開APIはApp Checkトークンを取得できないとき、サーバーへ送らずに失敗する(未設定・取得失敗)。管理・受付の呼び出しはApp Checkを使わない',
+      () async {
+        for (final appCheck in [FakeAppCheck(null), FakeAppCheck.throwing()]) {
+          final server = _Server({
+            'registerWalkIn': (_) => {'success': true},
+            'listLegacyEvents': (_) => {'events': []},
+          });
+          final api = LegacyApiClient(
+            authClient: FakeAuthClient(signedIn: true),
+            httpClient: server.client,
+            appCheck: appCheck,
+          );
+          await expectLater(
+            api.call('registerWalkIn', {'eventId': 'e1'}, authenticated: false),
+            throwsA(
+              isA<LegacyApiException>().having(
+                (e) => e.status,
+                'status',
+                'APP_CHECK_UNAVAILABLE',
+              ),
+            ),
+          );
+          expect(server.calls, isEmpty, reason: '送信しない');
+          // 管理・受付は、認証(IDトークン)とサーバー側のaccessRolesが境界。App Checkのトークンは取得しない
+          await api.call('listLegacyEvents', const {});
+          expect(
+            server.calls.single.headers.containsKey(appCheckHeaderName),
+            isFalse,
+          );
+          expect(appCheck.calls, 1, reason: '公開APIの1回だけ');
+        }
+      },
+    );
 
     test('サーバーのエラーは、表示できる文と状態コードに変換される。通信失敗は内部情報を含まない', () async {
       final api = LegacyApiClient(
@@ -683,6 +727,7 @@ void main() {
       final repo = DemoRepository(
         selectedEventId: 'e1',
         api: LegacyApiClient(
+          appCheck: FakeAppCheck(),
           authClient: FakeAuthClient(signedIn: true),
           httpClient: MockClient((request) async {
             requests.add(request.url.pathSegments.last);
@@ -721,6 +766,61 @@ void main() {
     });
   });
 
+  group('event kind API(受付QRの方式判定。Firestoreを使わない)', () {
+    test(
+      'kind(legacy/confirmed)だけを受け取る。ログイン済みのIDトークンで呼び、未知・不正・存在しないは「確認できない」',
+      () async {
+        final server = _Server({
+          'getEventKind': (data) => switch (data['eventId']) {
+            'l1' => {'kind': 'legacy'},
+            'c1' => {'kind': 'confirmed'},
+            'odd' => {'kind': 'something-else'},
+            _ => _error(412, 'FAILED_PRECONDITION', 'イベントを確認できませんでした。'),
+          },
+        });
+        final service = ApiEventKindService(api: _api(server));
+        expect(await service.kindOf('l1'), EventKind.legacy);
+        expect(await service.kindOf('c1'), EventKind.confirmed);
+        expect(await service.kindOf('odd'), EventKind.unsupported);
+        expect(await service.kindOf('gone'), EventKind.unsupported);
+        for (final call in server.calls) {
+          expect(call.headers['Authorization'], 'Bearer admin-token');
+          expect(call.data.keys.toList(), ['eventId']);
+          expect(call.headers.containsKey(appCheckHeaderName), isFalse);
+        }
+      },
+    );
+
+    test('未ログイン・通信失敗は例外(legacyやconfirmedと仮定しない)', () async {
+      final server = _Server({
+        'getEventKind': (_) => {'kind': 'legacy'},
+      });
+      final signedOut = ApiEventKindService(
+        api: LegacyApiClient(
+          authClient: FakeAuthClient(signedIn: false, token: null),
+          httpClient: server.client,
+          appCheck: FakeAppCheck(),
+        ),
+      );
+      await expectLater(
+        signedOut.kindOf('l1'),
+        throwsA(isA<LegacyApiException>()),
+      );
+      expect(server.calls, isEmpty, reason: '未認証ではイベントを問い合わせない');
+      final broken = ApiEventKindService(
+        api: LegacyApiClient(
+          authClient: FakeAuthClient(signedIn: true),
+          httpClient: MockClient((_) async => throw const SocketException('x')),
+          appCheck: FakeAppCheck(),
+        ),
+      );
+      await expectLater(
+        broken.kindOf('l1'),
+        throwsA(isA<LegacyApiException>()),
+      );
+    });
+  });
+
   group('境界の静的検査(従来方式の画面・サービス)', () {
     final legacyFiles = [
       'lib/services/demo_repository.dart',
@@ -738,57 +838,65 @@ void main() {
         .where((line) => !line.trimLeft().startsWith('//'))
         .join('\n');
 
-    test('従来方式の画面・サービスはFirestoreを直接読み書き・購読しない(Firestoreは受付QRの方式判定の1か所だけ)', () {
-      for (final path in legacyFiles) {
-        final text = code(path);
-        for (final forbidden in [
-          'cloud_firestore',
-          'FirebaseFirestore',
-          '.snapshots(',
-          '.collection(',
-          'runTransaction',
-          'FieldValue',
-        ]) {
-          expect(
-            text.contains(forbidden),
-            isFalse,
-            reason: '$path: $forbidden',
-          );
+    // Phase 10D: 以前(10C時点)は、受付QRの方式判定のevents/{id}の直接readが1か所だけ残っていた。サーバーAPI(getEventKind)へ移し、実行時の
+    // Firestore直接アクセスは0件になった(以前の許可から変更)。
+    test(
+      'Phase 10D: Flutterの実行コードにFirestoreの直接read/write・購読が0件(型のためのimportはモデルだけ)',
+      () {
+        for (final path in legacyFiles) {
+          final text = code(path);
+          for (final forbidden in [
+            'cloud_firestore',
+            'FirebaseFirestore',
+            '.snapshots(',
+            '.collection(',
+            'runTransaction',
+            'FieldValue',
+          ]) {
+            expect(
+              text.contains(forbidden),
+              isFalse,
+              reason: '$path: $forbidden',
+            );
+          }
         }
-      }
-      final kind = code('lib/services/event_kind_service.dart');
-      expect(
-        RegExp(
-          r"\.collection\('events'\)\.doc\(eventId\)\.get\(\)",
-        ).hasMatch(kind),
-        isTrue,
-      );
-      expect(
-        RegExp(r'\.(set|update|add|delete)\(').hasMatch(kind),
-        isFalse,
-        reason: '読み取りだけ',
-      );
-    });
-
-    test('lib配下でFirestoreをimportするのは、モデル(型のみ)と受付QRの方式判定だけ', () {
-      final users =
-          Directory('lib')
-              .listSync(recursive: true)
-              .whereType<File>()
-              .where(
-                (f) =>
-                    f.path.endsWith('.dart') &&
-                    code(f.path).contains('cloud_firestore'),
-              )
-              .map((f) => f.path)
-              .toList()
-            ..sort();
-      expect(users, [
-        'lib/models/demo_models.dart',
-        'lib/models/program_models.dart',
-        'lib/services/event_kind_service.dart',
-      ]);
-    });
+        final all = Directory('lib')
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((f) => f.path.endsWith('.dart'))
+            .toList();
+        for (final file in all) {
+          final text = code(file.path);
+          for (final forbidden in [
+            'FirebaseFirestore',
+            '.snapshots(',
+            '.collection(',
+            'runTransaction',
+            'FieldValue',
+            'FirebaseFirestore.instance',
+          ]) {
+            expect(
+              text.contains(forbidden),
+              isFalse,
+              reason: '${file.path}: $forbidden',
+            );
+          }
+        }
+        final users =
+            all
+                .where((f) => code(f.path).contains('cloud_firestore'))
+                .map((f) => f.path)
+                .toList()
+              ..sort();
+        expect(users, [
+          'lib/models/demo_models.dart',
+          'lib/models/program_models.dart',
+        ], reason: 'Timestamp・DocumentSnapshotの型のためだけ');
+        final kind = code('lib/services/event_kind_service.dart');
+        expect(kind.contains('cloud_firestore'), isFalse);
+        expect(kind.contains("'getEventKind'"), isTrue);
+      },
+    );
 
     test('クライアントは認可の根拠(uid・role・email)をAPIへ送らない', () {
       final api = code('lib/services/legacy_api.dart');

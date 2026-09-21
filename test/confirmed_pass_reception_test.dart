@@ -11,9 +11,11 @@ import 'package:jm_quick/confirmed/pass_service.dart';
 import 'package:jm_quick/confirmed/reception_page.dart';
 import 'package:jm_quick/confirmed/reception_route.dart';
 import 'package:jm_quick/confirmed/reception_service.dart';
+import 'package:jm_quick/services/app_check.dart';
 import 'package:jm_quick/services/event_kind_service.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import 'app_check_fake.dart';
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 
 const qrPayload =
@@ -286,56 +288,84 @@ void main() {
   });
 
   group('CallablePassService(公開・ログイン不要)', () {
-    CallablePassService service(MockClient client) => CallablePassService(
-      httpClient: client,
-      baseUrl: 'https://example.invalid',
-    );
+    CallablePassService service(MockClient client, {FakeAppCheck? appCheck}) =>
+        CallablePassService(
+          httpClient: client,
+          baseUrl: 'https://example.invalid',
+          appCheck: appCheck ?? FakeAppCheck(),
+        );
     http.Response json(Object body, int status) => http.Response(
       jsonEncode(body),
       status,
       headers: {'content-type': 'application/json; charset=utf-8'},
     );
 
-    test('IDトークン等を送らず、participantIdとpublicIdだけをPOSTする', () async {
-      late http.Request seen;
-      final s = service(
-        MockClient((request) async {
-          seen = request;
-          return json({
-            'result': {
-              'eventName': '架空イベント',
-              'participantName': '架空 太郎',
-              'programs': [
-                {
-                  'programId': 'alpha',
-                  'name': '譲渡会(ねこ)',
-                  'plannedCount': 2,
-                  'checkedIn': false,
-                  'timeText': '10:00-10:40',
-                },
-              ],
-              'qrPayload': qrPayload,
-              'webPassUrl': 'https://app.invalid/p/x?publicId=y',
-            },
-          }, 200);
-        }),
-      );
-      final pass = await s.getPass(
-        participantId: 'batchA-000002',
-        publicId: 'pub_x',
-      );
-      expect(pass!.programs.single.timeText, '10:00-10:40');
-      expect(pass.qrPayload, qrPayload);
-      expect(
-        seen.url.toString(),
-        'https://example.invalid/getConfirmedParticipantPass',
-      );
-      expect(seen.headers.containsKey('Authorization'), isFalse);
-      expect((jsonDecode(seen.body) as Map)['data'], {
-        'participantId': 'batchA-000002',
-        'publicId': 'pub_x',
-      });
-    });
+    // Phase 10D: 公開APIにはApp Checkトークン(X-Firebase-AppCheck)を付ける(IDトークンは従来どおり送らない)
+    test(
+      'IDトークン等を送らず、participantIdとpublicIdだけをPOSTし、App Checkトークンを付ける',
+      () async {
+        late http.Request seen;
+        final s = service(
+          MockClient((request) async {
+            seen = request;
+            return json({
+              'result': {
+                'eventName': '架空イベント',
+                'participantName': '架空 太郎',
+                'programs': [
+                  {
+                    'programId': 'alpha',
+                    'name': '譲渡会(ねこ)',
+                    'plannedCount': 2,
+                    'checkedIn': false,
+                    'timeText': '10:00-10:40',
+                  },
+                ],
+                'qrPayload': qrPayload,
+                'webPassUrl': 'https://app.invalid/p/x?publicId=y',
+              },
+            }, 200);
+          }),
+        );
+        final pass = await s.getPass(
+          participantId: 'batchA-000002',
+          publicId: 'pub_x',
+        );
+        expect(pass!.programs.single.timeText, '10:00-10:40');
+        expect(pass.qrPayload, qrPayload);
+        expect(
+          seen.url.toString(),
+          'https://example.invalid/getConfirmedParticipantPass',
+        );
+        expect(seen.headers.containsKey('Authorization'), isFalse);
+        expect(seen.headers[appCheckHeaderName], 'test-app-check-token');
+        expect((jsonDecode(seen.body) as Map)['data'], {
+          'participantId': 'batchA-000002',
+          'publicId': 'pub_x',
+        });
+      },
+    );
+
+    test(
+      'Phase 10D: App Checkトークンを取得できない(未設定・失敗)ときは、サーバーへ送らずに失敗する。トークンはログ・例外に出ない',
+      () async {
+        for (final appCheck in [FakeAppCheck(null), FakeAppCheck.throwing()]) {
+          var requests = 0;
+          final s = service(
+            MockClient((_) async {
+              requests++;
+              return json({'result': {}}, 200);
+            }),
+            appCheck: appCheck,
+          );
+          await expectLater(
+            s.getPass(participantId: 'a', publicId: 'b'),
+            throwsA(isA<PassException>()),
+          );
+          expect(requests, 0);
+        }
+      },
+    );
 
     test('NOT_FOUNDは「確認できない」(null)、その他は通信エラー扱い', () async {
       expect(
@@ -640,6 +670,117 @@ void main() {
 
     // Phase 10C: 以前は「従来方式の受付画面はログインも権限確認も要求しない」だった。認証境界の導入で、
     // 従来方式の受付画面もstaff/adminのログインが必要になった(この経路は以前の許可から拒否へ変わった)。
+    // Phase 10D: 方式の判定(getEventKind)は、ログイン+staff/adminの確認のあとにだけ行う。未ログイン・権限なしではイベントを問い合わせない。
+    testWidgets(
+      'Phase 10D: 方式の判定は、未ログイン・権限なしでは呼ばれない。staff/adminと確認できたあとに1回だけ呼ばれる',
+      (tester) async {
+        Widget page(
+          FakeAuthClient auth,
+          FakeAccessService access,
+          List<String> asked,
+          EventKind kind,
+        ) => app(
+          ReceptionRoutePage(
+            eventId: 'event1',
+            participantId: 'batchA-000002',
+            publicId: 'pub_x',
+            legacyBuilder: (_) =>
+                const Scaffold(body: Text('LEGACY-RECEPTION')),
+            authClient: auth,
+            accessService: access,
+            receptionService: FakeReceptionService(programs: []),
+            eventKind: (id) async {
+              asked.add(id);
+              return kind;
+            },
+          ),
+        );
+        final signedOut = <String>[];
+        await tester.pumpWidget(
+          page(
+            FakeAuthClient(signedIn: false),
+            FakeAccessService([]),
+            signedOut,
+            EventKind.legacy,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(signedOut, isEmpty, reason: '未ログインではイベントを問い合わせない');
+        expect(find.text('LEGACY-RECEPTION'), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+        final denied = <String>[];
+        await tester.pumpWidget(
+          page(
+            FakeAuthClient(signedIn: true),
+            FakeAccessService([const AccessCheck.denied()]),
+            denied,
+            EventKind.legacy,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(denied, isEmpty, reason: '権限なしではイベントを問い合わせない');
+        await tester.pumpWidget(const SizedBox());
+        for (final role in [AccessRole.staff, AccessRole.admin]) {
+          final granted = <String>[];
+          await tester.pumpWidget(
+            page(
+              FakeAuthClient(signedIn: true),
+              FakeAccessService([AccessCheck.granted(role)]),
+              granted,
+              EventKind.legacy,
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(granted, ['event1'], reason: '$role: 確認後に1回だけ');
+          expect(find.text('LEGACY-RECEPTION'), findsOneWidget);
+          await tester.pumpWidget(const SizedBox());
+        }
+      },
+    );
+
+    testWidgets(
+      'Phase 10D: 方式を確認できない(未知・存在しない・通信失敗)ときは、どの受付画面も出さず「イベントを確認できませんでした」。再試行できる',
+      (tester) async {
+        var attempts = 0;
+        await tester.pumpWidget(
+          app(
+            ReceptionRoutePage(
+              eventId: 'event1',
+              participantId: 'batchA-000002',
+              publicId: 'pub_x',
+              legacyBuilder: (_) =>
+                  const Scaffold(body: Text('LEGACY-RECEPTION')),
+              authClient: FakeAuthClient(signedIn: true),
+              accessService: FakeAccessService([
+                AccessCheck.granted(AccessRole.staff),
+              ]),
+              receptionService: FakeReceptionService(
+                programs: [...threePrograms],
+              ),
+              eventKind: (_) async {
+                attempts++;
+                if (attempts == 1) throw StateError('network');
+                return EventKind.unsupported;
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.textContaining('イベントを確認できませんでした'), findsOneWidget);
+        expect(find.text('再試行'), findsOneWidget);
+        expect(find.text('LEGACY-RECEPTION'), findsNothing);
+        expect(find.text('受付する'), findsNothing);
+        await tester.tap(find.text('再試行'));
+        await tester.pumpAndSettle();
+        await tester.pump(); // 判定の完了(microtask)を反映する
+        await tester.pumpAndSettle();
+        expect(attempts, 2);
+        expect(find.textContaining('イベントを確認できませんでした'), findsOneWidget);
+        expect(find.text('再試行'), findsNothing, reason: '未知のイベントは再試行しても変わらない');
+        expect(find.text('LEGACY-RECEPTION'), findsNothing);
+      },
+    );
+
     testWidgets('Phase 10C: 従来方式のイベントの受付画面も、未ログインではログイン画面だけ。受付画面は出ない', (
       tester,
     ) async {
