@@ -120,25 +120,24 @@ class RowCheck {
 }
 
 /// program1つ分の列の対応。programIdは作成済みイベントの program(サーバーが返す)から選ぶ。
+///
+/// ■ 今回の通常運用(当選・参加確定者リストの取込)は「人数の列の値が1以上ならそのprogramへ参加、
+///   空欄または0なら参加しない」という人数だけの判定に単純化している。参加/不参加を別の列(区分等)で
+///   示すCSV向けの participationColumn / attendingValues / notAttendingValues / emptyMeans は、
+///   サーバー(functions/confirmed/import_mapping.js・import_rows.js)側では元々すべて省略可能な設定
+///   だったため(省略時は"参加列が無いときは人数だけで判定する"という既存の分岐が使われる)、
+///   このクライアントでは公開しない(値を送らない)。サーバー契約・検証ロジックは変更していない。
 class ProgramMapping {
   ProgramMapping({required this.programId, required this.name});
   final String programId;
   final String name;
   bool enabled = true;
   String? countColumn;
-  String? participationColumn;
-  List<String> attendingValues = [];
-  List<String> notAttendingValues = [];
-  bool emptyMeansNotAttending = false;
   String? slotColumn;
   String slotFormat = 'label';
 
   Map<String, dynamic> toJson() => {
     'programId': programId,
-    if (participationColumn != null) 'participationColumn': participationColumn,
-    if (attendingValues.isNotEmpty) 'attendingValues': attendingValues,
-    if (notAttendingValues.isNotEmpty) 'notAttendingValues': notAttendingValues,
-    if (emptyMeansNotAttending) 'emptyMeans': 'notAttending',
     if (slotColumn != null) 'slotColumn': slotColumn,
     if (slotColumn != null) 'slotFormat': slotFormat,
     'countColumn': countColumn,
@@ -198,7 +197,6 @@ class ImportMapping {
       if (c.column != null && c.allowedValues.isNotEmpty) add(c.column);
     }
     for (final p in enabledPrograms) {
-      add(p.participationColumn);
       add(p.slotColumn);
       add(p.countColumn);
     }
@@ -224,13 +222,6 @@ class ImportMapping {
     for (final p in enabledPrograms) {
       final label = '「${p.name}」';
       if (p.countColumn == null) issues.add('$labelの人数の列を選択してください。');
-      if ((p.attendingValues.isNotEmpty || p.notAttendingValues.isNotEmpty) &&
-          p.participationColumn == null) {
-        issues.add('$labelの参加・不参加の値を指定するには、参加の列を選択してください。');
-      }
-      if (p.attendingValues.any(p.notAttendingValues.contains)) {
-        issues.add('$labelの「参加とみなす値」と「参加しないとみなす値」に、同じ値があります。');
-      }
     }
     for (final c in rowChecks) {
       if (c.column != null && c.allowedValues.isEmpty) {

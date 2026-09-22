@@ -321,11 +321,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
               for (final g in enabled)
-                _confirmRow(
-                  g.name,
-                  '人数: ${g.countColumn}'
-                  '${g.participationColumn == null ? '' : ' / 参加: ${g.participationColumn}'}',
-                ),
+                _confirmRow(g.name, '人数: ${g.countColumn}'),
               const SizedBox(height: 10),
               const Text(
                 '取り込んでも、メールは送信されません。',
@@ -634,58 +630,14 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                 : (v) => _mappingChanged(() => g.enabled = v),
           ),
           if (g.enabled) ...[
+            // 通常運用(当選・参加確定者リストの取込)は、人数の列の値だけでそのprogramへの参加を判定する
+            // (1以上=参加・plannedCountになる、空欄または0=参加しない)。参加/不参加を示す別の列は使わない。
             _columnDropdown(
               key: Key('program-count-$i'),
-              label: '人数の列(必須・予定人数になります)',
+              label: '人数の列(必須。1以上でそのprogramへ参加・予定人数になります)',
               value: g.countColumn,
               onChanged: (v) => _mappingChanged(() => g.countColumn = v),
             ),
-            _columnDropdown(
-              key: Key('program-participation-$i'),
-              label: '参加の列(任意)',
-              value: g.participationColumn,
-              optional: true,
-              onChanged: (v) =>
-                  _mappingChanged(() => g.participationColumn = v),
-            ),
-            if (g.participationColumn != null) ...[
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Text(
-                  'この列にある値: ${_valuesOf(g.participationColumn!)}',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xff5c6670),
-                  ),
-                ),
-              ),
-              _valuesField(
-                g,
-                'attending',
-                '参加とみなす値',
-                g.attendingValues,
-                (v) => g.attendingValues = v,
-                key: Key('program-attending-$i'),
-              ),
-              _valuesField(
-                g,
-                'notattending',
-                '参加しないとみなす値',
-                g.notAttendingValues,
-                (v) => g.notAttendingValues = v,
-                key: Key('program-notattending-$i'),
-              ),
-              CheckboxListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('参加の列が空の行は「参加しない」とみなす(未チェックなら確認が必要な行になります)'),
-                value: g.emptyMeansNotAttending,
-                onChanged: busy
-                    ? null
-                    : (v) => _mappingChanged(
-                        () => g.emptyMeansNotAttending = v ?? false,
-                      ),
-              ),
-            ],
             _columnDropdown(
               key: Key('program-slot-$i'),
               label: '時間枠の列(任意)',

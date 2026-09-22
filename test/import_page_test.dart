@@ -705,18 +705,15 @@ void main() {
         find.byKey(const Key('rowcheck-values-0')),
         '新規申込',
       );
-      await _select(tester, 'program-participation-0', '午前参加時間');
-      await tester.enterText(
-        find.byKey(const Key('program-notattending-0')),
-        '参加を希望しない',
-      );
+      await _select(tester, 'program-slot-0', '午前参加時間');
       await _preview_(tester);
       await _commitDialog(tester);
       expect(find.text('この内容で取り込みます'), findsOneWidget);
       await tester.tap(find.text('キャンセル'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      // 行の確認・参加の値が、リクエストのmappingに反映される(サーバーの契約どおり)
+      // 行の確認・人数の列が、リクエストのmappingに反映される(サーバーの契約どおり)。
+      // 参加/不参加は別の列を見ない(人数の列だけで判定する)ため、participationColumn等は送らない。
       final mapping = service.previews.single.json['mapping'] as Map;
       expect(mapping['rowChecks'], [
         {
@@ -725,8 +722,11 @@ void main() {
         },
       ]);
       final a = (mapping['programs'] as List).first as Map;
-      expect(a['participationColumn'], '午前参加時間');
-      expect(a['notAttendingValues'], ['参加を希望しない']);
+      expect(a['countColumn'], '午前参加人数');
+      expect(a['slotColumn'], '午前参加時間');
+      expect(a.containsKey('participationColumn'), isFalse);
+      expect(a.containsKey('attendingValues'), isFalse);
+      expect(a.containsKey('notAttendingValues'), isFalse);
     });
   });
 
@@ -924,6 +924,40 @@ void main() {
       // eventIdはNavigator経由(widget.eventId)でだけ受け取る。
       expect(text.contains('widget.eventId'), isTrue);
     });
+    test(
+      '通常運用(Phase 11B-3)は人数の列だけで参加を判定する。参加の列・参加/不参加とみなす値・空欄チェックボックスは画面に無い',
+      () {
+        final text = code('lib/confirmed/import_page.dart');
+        for (final forbidden in [
+          "Key('program-participation-",
+          "Key('program-attending-",
+          "Key('program-notattending-",
+          '参加の列',
+          '参加とみなす値',
+          '参加しないとみなす値',
+          '参加しない」とみなす',
+        ]) {
+          expect(text.contains(forbidden), isFalse, reason: forbidden);
+        }
+        // 人数・時間枠の列だけは引き続き選べる。
+        expect(text.contains("Key('program-count-"), isTrue);
+        expect(text.contains("Key('program-slot-"), isTrue);
+        for (final path in [
+          'lib/confirmed/import_models.dart',
+          'lib/confirmed/import_page.dart',
+        ]) {
+          final modelText = code(path);
+          for (final forbidden in [
+            'participationColumn',
+            'attendingValues',
+            'notAttendingValues',
+            'emptyMeansNotAttending',
+          ]) {
+            expect(modelText.contains(forbidden), isFalse, reason: '$path: $forbidden');
+          }
+        }
+      },
+    );
     test('サーバーの上限(行数5000・値2000文字・列60)と同じ値を使う', () {
       expect(
         (importMaxRows, importMaxValueLength, importMaxHeaders),

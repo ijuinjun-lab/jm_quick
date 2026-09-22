@@ -21,33 +21,18 @@
     "programs": [
       {
         "programId": "program-a",
-        "participationColumn": "午前参加時間",
-        "notAttendingValues": [
-          "参加を希望しない"
-        ],
         "slotColumn": "午前参加時間",
         "slotFormat": "timeRange",
         "countColumn": "午前参加人数"
       },
       {
         "programId": "program-b",
-        "participationColumn": "午後参加時間",
-        "notAttendingValues": [
-          "参加を希望しない"
-        ],
         "slotColumn": "午後参加時間",
         "slotFormat": "timeRange",
         "countColumn": "午後参加人数"
       },
       {
         "programId": "custom-zeta-9",
-        "participationColumn": "トークショー",
-        "attendingValues": [
-          "参加を希望する"
-        ],
-        "notAttendingValues": [
-          "参加を希望しない"
-        ],
         "countColumn": "トークショー人数"
       }
     ]
@@ -55,10 +40,10 @@
   "eventId": "evfixture0123456789",
   "fileName": "架空取込.csv",
   "fileHash": "24c0d87eedb3ff817316af4930f4f15cde210465847209bed05b57becc6d6ad4",
-  "batchId": "b9506fa239299ed5666e287b94925cd",
+  "batchId": "b365f505a87e353d3c7a12768124afc",
   "expectedRequest": {
     "eventId": "evfixture0123456789",
-    "clientRequestId": "b9506fa239299ed5666e287b94925cd",
+    "clientRequestId": "b365f505a87e353d3c7a12768124afc",
     "sourceFileName": "架空取込.csv",
     "fileHash": "24c0d87eedb3ff817316af4930f4f15cde210465847209bed05b57becc6d6ad4",
     "mapping": {
@@ -81,33 +66,18 @@
       "programs": [
         {
           "programId": "program-a",
-          "participationColumn": "午前参加時間",
-          "notAttendingValues": [
-            "参加を希望しない"
-          ],
           "slotColumn": "午前参加時間",
           "slotFormat": "timeRange",
           "countColumn": "午前参加人数"
         },
         {
           "programId": "program-b",
-          "participationColumn": "午後参加時間",
-          "notAttendingValues": [
-            "参加を希望しない"
-          ],
           "slotColumn": "午後参加時間",
           "slotFormat": "timeRange",
           "countColumn": "午後参加人数"
         },
         {
           "programId": "custom-zeta-9",
-          "participationColumn": "トークショー",
-          "attendingValues": [
-            "参加を希望する"
-          ],
-          "notAttendingValues": [
-            "参加を希望しない"
-          ],
           "countColumn": "トークショー人数"
         }
       ]
@@ -123,7 +93,6 @@
       "午前参加人数",
       "午後参加時間",
       "午後参加人数",
-      "トークショー",
       "トークショー人数"
     ],
     "rows": [
@@ -140,7 +109,6 @@
           "2",
           "参加を希望しない",
           "",
-          "参加を希望する",
           "1"
         ]
       },
@@ -157,7 +125,6 @@
           "2",
           "参加を希望しない",
           "",
-          "参加を希望する",
           "1"
         ]
       },
@@ -174,7 +141,6 @@
           "abc",
           "参加を希望しない",
           "",
-          "参加を希望する",
           "1"
         ]
       },
@@ -191,7 +157,6 @@
           "",
           "13:00-14:00",
           "3",
-          "参加を希望しない",
           ""
         ]
       }

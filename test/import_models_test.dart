@@ -33,22 +33,14 @@ ImportMapping _mapping() {
   m.registeredAtColumn = '登録日時';
   m.rowChecks.add(RowCheck(column: '区分', allowedValues: ['新規申込']));
   final a = m.programs[0]
-    ..participationColumn = '午前参加時間'
-    ..notAttendingValues = ['参加を希望しない']
     ..slotColumn = '午前参加時間'
     ..slotFormat = 'timeRange'
     ..countColumn = '午前参加人数';
   final b = m.programs[1]
-    ..participationColumn = '午後参加時間'
-    ..notAttendingValues = ['参加を希望しない']
     ..slotColumn = '午後参加時間'
     ..slotFormat = 'timeRange'
     ..countColumn = '午後参加人数';
-  final z = m.programs[2]
-    ..participationColumn = 'トークショー'
-    ..attendingValues = ['参加を希望する']
-    ..notAttendingValues = ['参加を希望しない']
-    ..countColumn = 'トークショー人数';
+  final z = m.programs[2]..countColumn = 'トークショー人数';
   expect([a, b, z].length, 3);
   return m;
 }
@@ -314,7 +306,7 @@ void main() {
     });
 
     test(
-      'mappingの確認: 氏名・メール・program・人数の列が必須。同じ列の重複・値だけの指定・重複する値は不可。列名の推測はしない(初期値は未選択)',
+      'mappingの確認: 氏名・メール・programの人数の列が必須。参加者の項目に同じ列の重複は不可。列名の推測はしない(初期値は未選択)',
       () {
         final empty = ImportMapping(
           programs: [ProgramMapping(programId: 'p1', name: 'P')],
@@ -328,14 +320,10 @@ void main() {
                 programs: [ProgramMapping(programId: 'p1', name: 'P')],
               )
               ..nameColumn = '氏名'
-              ..emailColumn = '氏名'
-              ..programs[0].countColumn = '人数'
-              ..programs[0].attendingValues = ['はい']
-              ..programs[0].notAttendingValues = ['はい'];
+              ..emailColumn = '氏名';
         final text = m.validate().join('\n');
         expect(text, contains('重複'));
-        expect(text, contains('参加の列を選択'));
-        expect(text, contains('同じ値'));
+        expect(text, contains('人数の列を選択'));
         final none =
             ImportMapping(
                 programs: [ProgramMapping(programId: 'p1', name: 'P')],
