@@ -26,6 +26,7 @@ class ConfirmedReceptionPage extends StatefulWidget {
     required this.publicId,
     this.signOut,
     this.adminService,
+    this.onScanNext,
   });
   final ReceptionService service;
 
@@ -36,6 +37,10 @@ class ConfirmedReceptionPage extends StatefulWidget {
   final String participantId;
   final String publicId;
   final Future<void> Function()? signOut;
+
+  /// QRカメラスキャナー(Phase 11C)から開かれた場合だけ渡される。「次のQRを読み取る」ボタンを表示し、
+  /// 押すとscanner側へ戻る(トップ画面まで戻らない)。null(/reception への直接アクセス)なら何も表示しない。
+  final VoidCallback? onScanNext;
 
   @override
   State<ConfirmedReceptionPage> createState() => _ConfirmedReceptionPageState();
@@ -315,7 +320,25 @@ class _ConfirmedReceptionPageState extends State<ConfirmedReceptionPage> {
   }
 
   @override
-  Widget build(BuildContext context) => PageFrame(title: '受付', child: _body());
+  Widget build(BuildContext context) => PageFrame(
+    title: '受付',
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _body(),
+        // 初期読み込み中(まだ何も表示できていない)は出さない。それ以外(成功・エラーのいずれも)は常に次へ進める。
+        if (widget.onScanNext != null && !(loading && view == null)) ...[
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            key: const Key('scan-next'),
+            onPressed: widget.onScanNext,
+            icon: const Icon(Icons.qr_code_scanner),
+            label: const Text('次のQRを読み取る'),
+          ),
+        ],
+      ],
+    ),
+  );
 
   Widget _body() {
     if (loading && view == null) {

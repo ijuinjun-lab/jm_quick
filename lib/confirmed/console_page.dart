@@ -76,6 +76,8 @@ class ConfirmedConsolePage extends StatelessWidget {
         ),
         // 新方式イベントの作成(admin専用。受付スタッフには表示しない)
         'イベント作成': () => Navigator.of(context).pushNamed('/console/events/new'),
+        // QRカメラで受付(admin/staffとも利用可。受付ロジックは既存のReceptionRoutePageのまま複製しない)
+        '受付': () => Navigator.of(context).pushNamed('/console/scan'),
         // 前日リマインド(admin専用。staffには表示しない)
         'リマインド': () => Navigator.of(context).push(
           MaterialPageRoute<void>(
@@ -117,6 +119,10 @@ class ConfirmedConsolePage extends StatelessWidget {
       roleLabel: '受付スタッフ',
       features: staffFeatureLabels,
       signOut: signOut,
+      actions: {
+        // QRカメラで受付(staff利用可)。受付ロジックは既存のReceptionRoutePageのまま複製しない
+        '当日の受付': () => Navigator.of(context).pushNamed('/console/scan'),
+      },
     ),
   );
 }
@@ -171,6 +177,8 @@ class _RoleHome extends StatelessWidget {
                             ? '新方式のイベントの新規作成(メールは送信されません)'
                             : feature == 'リマインド'
                             ? '前日リマインドの設定・プレビュー・送信状況'
+                            : feature == '受付' || feature == '当日の受付'
+                            ? 'QRカメラで参加者を読み取り、programごとに受付する'
                             : '件名・本文の設定とプレビュー')
                       : '準備中',
                 ),

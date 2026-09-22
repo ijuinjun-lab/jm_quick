@@ -7,6 +7,7 @@ import 'confirmed/event_create_page.dart';
 import 'confirmed/import_page.dart';
 import 'confirmed/pass_page.dart';
 import 'confirmed/pass_service.dart';
+import 'confirmed/qr_scanner_page.dart';
 import 'confirmed/reception_route.dart';
 import 'firebase_options.dart';
 import 'pages/demo_admin_page.dart';
@@ -74,6 +75,9 @@ class JmQuickApp extends StatelessWidget {
           '/console/import' => ConfirmedImportRoute(
             eventId: uri.queryParameters['eventId'],
           ),
+          // 受付用QRをスマートフォンのカメラで読み取る入口(staff/admin専用)。
+          // 読み取った文字列は /reception と同じReceptionRoutePageへそのまま渡す(受付ロジックは複製しない)。
+          '/console/scan' => ConfirmedScanReceptionRoute(),
           // 受付用QR。従来方式は従来の受付画面、新方式(confirmed)はprogram別受付画面。どちらもstaff/adminのログインが必要(Phase 10C)。
           // 未知のflow・存在しないイベント・読み取り失敗では、どちらの受付画面も出さない。
           '/reception' => ReceptionRoutePage(
