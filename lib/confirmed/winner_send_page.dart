@@ -27,6 +27,11 @@ String batchStatusLabel(String status) => switch (status) {
 /// 当選メール送信管理(admin専用): 取込回の選択 → 対象人数・テンプレートversionの確認 → プレビュー →
 /// 最終確認 → ジョブ作成・処理 → 進行状況 → 失敗分だけ再送。
 /// 対象人数・状態はすべてサーバー(callable)の値を表示する(クライアントは対象者を計算しない)。
+///
+/// ■ Phase 11D: [initialEventId](イベント管理画面から内部的に渡される)を正本として使う。利用者が
+///   イベントIDを見る・入力する・書き換える欄は無い。[initialEventId]が無い状態(直接この画面に来た場合)は、
+///   イベントを推測したり最初のイベントを自動選択したりせず、「イベント管理画面から開いてください」という
+///   案内だけを表示する。
 class WinnerSendPage extends StatefulWidget {
   const WinnerSendPage({
     super.key,
@@ -39,6 +44,8 @@ class WinnerSendPage extends StatefulWidget {
 
   /// プレビューは Phase 6 の previewConfirmedWinnerMail(実送信と同じレンダラー)を再利用する。
   final WinnerMailService mailService;
+
+  /// イベント管理画面(`/console?eventId=…`)から渡される、対象イベントのID(正本)。
   final String? initialEventId;
   final Duration pollInterval;
 
@@ -47,7 +54,6 @@ class WinnerSendPage extends StatefulWidget {
 }
 
 class _WinnerSendPageState extends State<WinnerSendPage> {
-  late final eventId = TextEditingController(text: widget.initialEventId ?? '');
   final participantIds = <String, TextEditingController>{};
   SendBatchList? batchList;
   bool loading = false;
@@ -58,15 +64,17 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
   final previews = <String, WinnerMailPreview>{};
   final previewErrors = <String, String>{};
 
+  String get _eventId => (widget.initialEventId ?? '').trim();
+  bool get _hasEventId => _eventId.isNotEmpty;
+
   @override
   void initState() {
     super.initState();
-    if ((widget.initialEventId ?? '').isNotEmpty) _load();
+    if (_hasEventId) _load();
   }
 
   @override
   void dispose() {
-    eventId.dispose();
     for (final c in participantIds.values) {
       c.dispose();
     }
@@ -74,17 +82,13 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
   }
 
   Future<void> _load({bool keepError = false}) async {
-    final id = eventId.text.trim();
-    if (id.isEmpty) {
-      setState(() => error = 'イベントIDを入力してください。');
-      return;
-    }
+    if (!_hasEventId) return; // 呼び出し元がガードしている
     setState(() {
       loading = true;
       if (!keepError) error = null;
     });
     try {
-      final result = await widget.service.listBatches(id);
+      final result = await widget.service.listBatches(_eventId);
       if (!mounted) return;
       setState(() {
         batchList = result;
@@ -231,7 +235,9 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
   @override
   Widget build(BuildContext context) => PageFrame(
     title: '当選メール送信',
-    child: Column(
+    child: !_hasEventId
+        ? missingEventCard(context)
+        : Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Card(
@@ -245,16 +251,12 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 10),
-                TextField(
-                  controller: eventId,
-                  decoration: const InputDecoration(labelText: 'イベントID'),
-                ),
-                const SizedBox(height: 10),
                 Align(
                   alignment: Alignment.centerLeft,
                   child: FilledButton(
+                    key: const Key('winner-send-reload'),
                     onPressed: loading ? null : _load,
-                    child: const Text('取込回を読み込む'),
+                    child: const Text('最新の状態に更新'),
                   ),
                 ),
               ],

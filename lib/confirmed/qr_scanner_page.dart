@@ -22,13 +22,20 @@ import 'web_qr_camera.dart';
 
 /// `/console/scan`: staff/adminが受付用QRをスマートフォンのカメラで読み取る入口。
 /// 未認証・受付権限のない利用者は使用できない(既存の[AuthGate]と同じ境界)。
+///
+/// [eventId]は任意(イベント選択後の管理画面「受付」から `?eventId=…` で渡される。内部的な引き継ぎのみで、
+/// 利用者が入力・コピーする欄は無い)。指定があれば、最初のQRを読み取る前からそのイベントへscannerを固定する
+/// (詳細は[ConfirmedScanReceptionFlow]参照)。指定が無ければ従来どおり、最初に読み取ったQRのイベントへ固定する
+/// (`/console/scan`への直リンク・ブックマーク等)。
 class ConfirmedScanReceptionRoute extends StatelessWidget {
   ConfirmedScanReceptionRoute({
     super.key,
+    this.eventId,
     AuthClient? authClient,
     this.accessService,
   }) : authClient = authClient ?? FirebaseAuthClient();
 
+  final String? eventId;
   final AuthClient authClient;
   final AccessService? accessService;
 
@@ -38,20 +45,25 @@ class ConfirmedScanReceptionRoute extends StatelessWidget {
     accessService:
         accessService ?? CallableAccessService(authClient: authClient),
     // staff/adminのどちらも使用可能(初回受付はstaffOrAdmin。訂正・取消はConfirmedReceptionPage側でadminのみ描画される)。
-    adminBuilder: (context, signOut) => const ConfirmedScanReceptionFlow(),
-    staffBuilder: (context, signOut) => const ConfirmedScanReceptionFlow(),
+    adminBuilder: (context, signOut) =>
+        ConfirmedScanReceptionFlow(initialEventId: eventId),
+    staffBuilder: (context, signOut) =>
+        ConfirmedScanReceptionFlow(initialEventId: eventId),
   );
 }
 
 /// scanner ↔ 受付画面 の往復を管理する。1回の有効なQRごとに既存の[ReceptionRoutePage]を1つ表示し、
 /// 「次のQRを読み取る」でscanner側へ戻る(トップ画面まで戻らない)。
 ///
-/// 同一セッション中は、最初に読み取ったeventIdへ「固定」する。異なるイベントのQRは
+/// 同一セッション中は、eventIdへ「固定」する。[initialEventId]が指定されていれば、最初のQRを読み取る前
+/// からそのイベントへ固定する(イベント選択後の管理画面「受付」から渡される。利用者の入力・コピーは無い)。
+/// 指定が無ければ、従来どおり最初に読み取ったQRのeventIdへ固定する。異なるイベントのQRは
 /// [qrDifferentEventMessage] を表示して拒否し、誤って別イベントへ進まないようにする。
 class ConfirmedScanReceptionFlow extends StatefulWidget {
   const ConfirmedScanReceptionFlow({
     super.key,
     this.expectedHost,
+    this.initialEventId,
     QrSurfaceBuilder? surfaceBuilder,
     ReceptionScreenBuilder? receptionBuilder,
   }) : _surfaceBuilder = surfaceBuilder,
@@ -59,6 +71,9 @@ class ConfirmedScanReceptionFlow extends StatefulWidget {
 
   /// QRのホスト検証に使う値。省略時は実行時の[Uri.base]のホストを使う(テストでは明示的に渡す)。
   final String? expectedHost;
+
+  /// 指定があれば、最初のQRを読み取る前からこのeventIdへscannerを固定する(任意)。
+  final String? initialEventId;
   final QrSurfaceBuilder? _surfaceBuilder;
   final ReceptionScreenBuilder? _receptionBuilder;
 
@@ -82,7 +97,10 @@ enum _Phase { scanning, reception }
 class _ConfirmedScanReceptionFlowState
     extends State<ConfirmedScanReceptionFlow> {
   _Phase _phase = _Phase.scanning;
-  String? _lockedEventId;
+  // イベント選択後の管理画面から開いた場合は、最初からそのeventIdへ固定する(未指定なら最初のQRで決まる)。
+  late String? _lockedEventId = (widget.initialEventId ?? '').trim().isEmpty
+      ? null
+      : widget.initialEventId!.trim();
   ScannedReceptionQr? _scanned;
   String? _message;
   bool _accepted = false; // 有効なQRを受理して遷移するまで、以降の検出をすべて無視する(重複scan防止)。

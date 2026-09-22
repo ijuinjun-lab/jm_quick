@@ -101,12 +101,14 @@ void main() {
       expect(find.text('メールアドレス'), findsOneWidget);
       expect(find.text('パスワード'), findsOneWidget);
       expect(access.calls, 0);
-      for (final label in [...adminFeatureLabels, ...staffFeatureLabels]) {
+      for (final label in [...consoleTopFeatureLabels, ...staffFeatureLabels]) {
         expect(find.text(label), findsNothing);
       }
     });
 
-    testWidgets('adminはログイン後にサーバーが確認した結果で、管理機能が表示される', (tester) async {
+    testWidgets('adminはログイン後にサーバーが確認した結果で、管理トップの機能(イベント固有機能は含まない)が表示される', (
+      tester,
+    ) async {
       final auth = FakeAuthClient(signedIn: true);
       await tester.pumpWidget(
         _console(
@@ -116,7 +118,7 @@ void main() {
       );
       await _settle(tester);
       expect(find.text('ログイン中：管理者'), findsOneWidget);
-      expect(_featureTitles(tester), adminFeatureLabels);
+      expect(_featureTitles(tester), consoleTopFeatureLabels);
     });
 
     testWidgets('staffには受付系だけが表示され、管理機能は一切表示されない', (tester) async {
@@ -150,7 +152,7 @@ void main() {
       );
       await _settle(tester);
       expect(find.text('権限がありません'), findsOneWidget);
-      for (final label in [...adminFeatureLabels, ...staffFeatureLabels]) {
+      for (final label in [...consoleTopFeatureLabels, ...staffFeatureLabels]) {
         expect(find.text(label), findsNothing);
       }
       await tester.tap(find.text('ログアウト'));
@@ -207,12 +209,14 @@ void main() {
       await _settle(tester);
       expect(auth.signInCalls.single, (' staff@example.invalid ', 'pass-word'));
       expect(access.calls, 1);
-      expect(find.text('CSV取込'), findsOneWidget);
+      // 管理トップ(イベント未選択)はイベント一覧・イベント作成・スタッフ管理だけ(CSV取込等は出ない)。
+      expect(find.text('イベント一覧'), findsOneWidget);
+      expect(find.text('CSV取込'), findsNothing);
       await tester.ensureVisible(find.text('ログアウト'));
       await tester.tap(find.text('ログアウト'));
       await _settle(tester);
       expect(find.byType(ConfirmedLoginPage), findsOneWidget);
-      expect(find.text('CSV取込'), findsNothing);
+      expect(find.text('イベント一覧'), findsNothing);
     });
 
     testWidgets('ログイン失敗は内部情報を含まないメッセージで表示され、権限確認へは進まない', (tester) async {
@@ -442,6 +446,28 @@ void main() {
       },
     );
 
+    test(
+      'Phase 11D: confirmedの通常管理UIに、利用者がeventIdを入力するTextField(欄)が残っていない',
+      () {
+        expect(files, isNotEmpty);
+        for (final file in files) {
+          final text = file
+              .readAsLinesSync()
+              .where((line) => !line.trimLeft().startsWith('//'))
+              .join('\n');
+          // かつて reminder_page.dart・winner_mail_page.dart・winner_send_page.dart・
+          // import_page.dart にあった「イベントID」ラベルのTextFieldは、すべてイベント管理画面から
+          // 内部的に渡されるeventId(initialEventId等)だけを正本とするよう置き換えた。
+          expect(
+            text.contains("labelText: 'イベントID'"),
+            isFalse,
+            reason: file.path,
+          );
+          expect(text.contains("Key('event-id')"), isFalse, reason: file.path);
+        }
+      },
+    );
+
     test('認可の判断はサーバーの確認結果だけで行い、emailやクライアントの値を根拠にしない', () {
       final gate = File('lib/confirmed/auth_gate.dart').readAsStringSync();
       expect(gate, contains('fetchMyAccess'));
@@ -458,7 +484,8 @@ void main() {
     test('Phase 10C: 従来方式の管理画面はLegacyAdminGateで包まれ、参加者本人・当日参加登録の公開ページは包まれない', () {
       final main = File('lib/main.dart').readAsStringSync();
       // Phase 11A: 作成直後のイベントIDを引き継ぐため、/console は initialEventId を受け取る(認可の構造は変わらない)
-      expect(main, contains("'/console' => ConfirmedConsolePage("));
+      // Phase 11F: トップ(/)も、Not Found(catch-all)にならないよう /console と同じ画面になった。
+      expect(main, contains("'/' || '/console' => ConfirmedConsolePage("));
       expect(
         'ConfirmedConsolePage'.allMatches(main).length,
         1,

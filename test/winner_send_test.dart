@@ -14,6 +14,7 @@ import 'package:jm_quick/confirmed/winner_send_page.dart';
 import 'package:jm_quick/confirmed/winner_send_service.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
+import 'import_page_test.dart' show FakeImportService;
 
 /// サーバーの状態を模したメモリ上の偽サービス(Firestore・ネットワーク・メール送信は一切ない)。
 class FakeSendService implements WinnerSendService {
@@ -1200,6 +1201,8 @@ void main() {
   });
 
   group('コンソール(admin専用)', () {
+    // イベント選択後の管理画面(/console?eventId=…)に「当選メール送信」が表示される想定なので、
+    // eventIdとイベント名表示に使う読み取り専用のサービス(FakeImportService)を渡す。
     Widget console(AccessRole role) => MaterialApp(
       home: ConfirmedConsolePage(
         authClient: FakeAuthClient(signedIn: true),
@@ -1208,6 +1211,8 @@ void main() {
           batches: [committed('batchA', 1, 3)],
         ),
         winnerMailService: FakeMailService(),
+        eventSummaryService: FakeImportService(),
+        initialEventId: 'evfixture0123456789',
       ),
     );
 
@@ -1216,9 +1221,18 @@ void main() {
       await settle(tester);
       expect(find.text('当選メール送信'), findsOneWidget);
       expect(find.text('当選メール設定'), findsOneWidget, reason: '既存の設定画面は維持');
+      await tester.ensureVisible(find.text('当選メール送信'));
       await tester.tap(find.text('当選メール送信'));
       await settle(tester);
-      expect(find.text('取込回を読み込む'), findsOneWidget);
+      // eventIdは自動的に引き継がれ、入力欄なしで取込回が読み込まれる(Phase 11D)。
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.labelText == 'イベントID',
+        ),
+        findsNothing,
+      );
+      expect(find.text('最新の状態に更新'), findsOneWidget);
+      expect(find.text('架空イベント'), findsWidgets);
     });
 
     testWidgets('staffには、送信管理も設定も一切表示されない', (tester) async {
@@ -1228,6 +1242,38 @@ void main() {
       expect(find.text('当選メール設定'), findsNothing);
       expect(find.textContaining('送信'), findsNothing);
     });
+  });
+
+  group('Phase 11D: eventIdはイベント管理画面から内部的に渡されるものだけを正本とする', () {
+    testWidgets(
+      'initialEventIdなしで直接開くと、eventId入力欄は出さず「イベント管理画面から開いてください」と案内する',
+      (tester) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            onGenerateRoute: (settings) => MaterialPageRoute<void>(
+              builder: (_) => WinnerSendPage(
+                service: FakeSendService(),
+                mailService: FakeMailService(),
+              ),
+              settings: settings,
+            ),
+          ),
+        );
+        await settle(tester);
+        expect(
+          find.byWidgetPredicate(
+            (w) => w is TextField && w.decoration?.labelText == 'イベントID',
+          ),
+          findsNothing,
+        );
+        expect(find.byKey(const Key('missing-event-notice')), findsOneWidget);
+        expect(find.text('イベント管理画面から開いてください。'), findsOneWidget);
+        expect(find.byKey(const Key('back-to-event-console')), findsOneWidget);
+        await tester.tap(find.byKey(const Key('back-to-event-console')));
+        await settle(tester);
+        expect(tester.takeException(), isNull);
+      },
+    );
   });
 
   group('CallableWinnerSendService', () {

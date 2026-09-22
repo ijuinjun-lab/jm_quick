@@ -57,6 +57,32 @@ class NonLegacyFlowNotice extends StatelessWidget {
   );
 }
 
+/// Phase 11D: イベント固有の画面(当選メール設定・当選メール送信・前日リマインド等)が、
+/// イベント管理画面(`/console?eventId=…`)から渡されるeventIdを持たずに開かれた場合の案内。
+/// eventIdを推測したり、最初のイベントを自動選択したりしない(利用者にIDを入力させる欄も出さない)。
+Widget missingEventCard(BuildContext context) => Card(
+  child: Padding(
+    padding: const EdgeInsets.all(20),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'イベント管理画面から開いてください。',
+          key: Key('missing-event-notice'),
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton(
+          key: const Key('back-to-event-console'),
+          onPressed: () =>
+              Navigator.of(context).pushNamedAndRemoveUntil('/console', (_) => false),
+          child: const Text('イベント管理画面へ戻る'),
+        ),
+      ],
+    ),
+  ),
+);
+
 class ErrorPanel extends StatelessWidget {
   const ErrorPanel(this.error, {super.key});
   final Object error;

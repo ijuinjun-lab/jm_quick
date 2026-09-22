@@ -14,6 +14,7 @@ import 'package:jm_quick/confirmed/winner_mail_service.dart';
 import 'package:jm_quick/confirmed/winner_send_service.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
+import 'import_page_test.dart' show FakeImportService;
 
 /// サーバーの状態を模したメモリ上の偽サービス(Firestore・ネットワーク・メール送信は一切ない)。
 class FakeReminderService implements ReminderService {
@@ -273,11 +274,15 @@ String count(WidgetTester tester, String state) =>
 
 void main() {
   group('メニューと認可(admin専用)', () {
+    // イベント選択後の管理画面(/console?eventId=…)に「リマインド」が表示される想定なので、
+    // eventIdとイベント名表示に使う読み取り専用のサービス(FakeImportService)を渡す。
     Widget console(AccessRole role) => MaterialApp(
       home: ConfirmedConsolePage(
         authClient: FakeAuthClient(signedIn: true),
         accessService: FakeAccessService([AccessCheck.granted(role)]),
         reminderService: FakeReminderService(),
+        eventSummaryService: FakeImportService(),
+        initialEventId: 'evfixture0123456789',
       ),
     );
 
@@ -285,9 +290,12 @@ void main() {
       await tester.pumpWidget(console(AccessRole.admin));
       await settle(tester);
       expect(find.text('リマインド'), findsOneWidget);
+      await tester.ensureVisible(find.text('リマインド'));
       await tester.tap(find.text('リマインド'));
       await settle(tester);
-      expect(find.text('設定を読み込む'), findsOneWidget);
+      // eventIdは自動的に引き継がれ、入力欄なしで設定が読み込まれる(Phase 11D)。
+      expect(find.text('最新の状態に更新'), findsOneWidget);
+      expect(find.text('架空イベント'), findsWidgets);
     });
 
     testWidgets('staffには「リマインド」が表示されない(送信管理・設定も)', (tester) async {
@@ -296,6 +304,64 @@ void main() {
       expect(find.text('リマインド'), findsNothing);
       expect(find.textContaining('リマインド'), findsNothing);
     });
+  });
+
+  group('Phase 11D: eventIdはイベント管理画面から内部的に渡されるものだけを正本とする', () {
+    testWidgets('イベント管理画面から開くと、eventId入力欄が無い', (tester) async {
+      final service = FakeReminderService();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConfirmedConsolePage(
+            authClient: FakeAuthClient(signedIn: true),
+            accessService: FakeAccessService([
+              AccessCheck.granted(AccessRole.admin),
+            ]),
+            reminderService: service,
+            eventSummaryService: FakeImportService(),
+            initialEventId: 'evfixture0123456789',
+          ),
+        ),
+      );
+      await settle(tester);
+      await tester.ensureVisible(find.text('リマインド'));
+      await tester.tap(find.text('リマインド'));
+      await settle(tester);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.labelText == 'イベントID',
+        ),
+        findsNothing,
+      );
+      expect(service.settingsCalls, greaterThan(0), reason: 'eventIdは自動的に継承されて読み込まれる');
+    });
+
+    testWidgets(
+      'initialEventIdなしで直接開くと、eventId入力欄は出さず「イベント管理画面から開いてください」と案内する',
+      (tester) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            onGenerateRoute: (settings) => MaterialPageRoute<void>(
+              builder: (_) =>
+                  ReminderPage(service: FakeReminderService()),
+              settings: settings,
+            ),
+          ),
+        );
+        await settle(tester);
+        expect(
+          find.byWidgetPredicate(
+            (w) => w is TextField && w.decoration?.labelText == 'イベントID',
+          ),
+          findsNothing,
+        );
+        expect(find.byKey(const Key('missing-event-notice')), findsOneWidget);
+        expect(find.text('イベント管理画面から開いてください。'), findsOneWidget);
+        expect(find.byKey(const Key('back-to-event-console')), findsOneWidget);
+        await tester.tap(find.byKey(const Key('back-to-event-console')));
+        await settle(tester);
+        expect(tester.takeException(), isNull);
+      },
+    );
   });
 
   group('設定・対象・送信予定(サーバーの値を表示)', () {

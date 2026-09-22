@@ -32,6 +32,11 @@ DateTime? parseJstDateTime(String text) {
 /// 前日リマインド(admin専用): 設定・プレビュー・送信予定・対象人数・現在の状態。
 /// 対象人数・対象外人数・状態はすべてサーバー(callable)の値。対象はイベント全体の全active participant(取込回は問わない)。
 /// 自動送信は、有効にした場合だけ、送信予定日時に達したときサーバーが行う(ブラウザは不要)。設定の保存だけではメールは送られない。
+///
+/// ■ Phase 11D: [initialEventId](イベント管理画面から内部的に渡される)を正本として使う。利用者が
+///   イベントIDを見る・入力する・書き換える欄は無い。[initialEventId]が無い状態(直接この画面に来た場合)は、
+///   イベントを推測したり最初のイベントを自動選択したりせず、「イベント管理画面から開いてください」という
+///   案内だけを表示する。
 class ReminderPage extends StatefulWidget {
   const ReminderPage({
     super.key,
@@ -41,6 +46,8 @@ class ReminderPage extends StatefulWidget {
     this.now,
   });
   final ReminderService service;
+
+  /// イベント管理画面(`/console?eventId=…`)から渡される、対象イベントのID(正本)。
   final String? initialEventId;
   final Duration pollInterval;
 
@@ -52,7 +59,6 @@ class ReminderPage extends StatefulWidget {
 }
 
 class _ReminderPageState extends State<ReminderPage> {
-  late final eventId = TextEditingController(text: widget.initialEventId ?? '');
   final sendAtField = TextEditingController();
   final subject = TextEditingController();
   final intro = TextEditingController();
@@ -71,17 +77,19 @@ class _ReminderPageState extends State<ReminderPage> {
 
   DateTime get _now => widget.now?.call() ?? DateTime.now();
 
+  String get _eventId => (widget.initialEventId ?? '').trim();
+  bool get _hasEventId => _eventId.isNotEmpty;
+
   @override
   void initState() {
     super.initState();
-    if ((widget.initialEventId ?? '').isNotEmpty) _load();
+    if (_hasEventId) _load();
   }
 
   @override
   void dispose() {
     pollTimer?.cancel();
     for (final c in [
-      eventId,
       sendAtField,
       subject,
       intro,
@@ -97,14 +105,10 @@ class _ReminderPageState extends State<ReminderPage> {
   String _formatSendAt(DateTime? at) => at == null ? '' : jstDateTime(at);
 
   Future<void> _load({bool silent = false, bool keepError = false}) async {
-    final id = eventId.text.trim();
-    if (id.isEmpty) {
-      setState(() => error = 'イベントIDを入力してください。');
-      return;
-    }
+    if (!_hasEventId) return; // 呼び出し元(initState・再読み込みボタン)がガードしている
     if (!silent) setState(() => loading = true);
     try {
-      final result = await widget.service.getSettings(id);
+      final result = await widget.service.getSettings(_eventId);
       if (!mounted) return;
       setState(() {
         settings = result;
@@ -334,7 +338,9 @@ class _ReminderPageState extends State<ReminderPage> {
   @override
   Widget build(BuildContext context) => PageFrame(
     title: '前日リマインド',
-    child: Column(
+    child: !_hasEventId
+        ? missingEventCard(context)
+        : Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Card(
@@ -348,16 +354,12 @@ class _ReminderPageState extends State<ReminderPage> {
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 10),
-                TextField(
-                  controller: eventId,
-                  decoration: const InputDecoration(labelText: 'イベントID'),
-                ),
-                const SizedBox(height: 10),
                 Align(
                   alignment: Alignment.centerLeft,
                   child: FilledButton(
+                    key: const Key('reminder-reload'),
                     onPressed: loading ? null : () => _load(),
-                    child: const Text('設定を読み込む'),
+                    child: const Text('最新の状態に更新'),
                   ),
                 ),
               ],

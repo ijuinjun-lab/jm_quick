@@ -10,6 +10,7 @@ import 'package:jm_quick/confirmed/winner_mail_page.dart';
 import 'package:jm_quick/confirmed/winner_mail_service.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
+import 'import_page_test.dart' show FakeImportService;
 
 class FakeWinnerMailService implements WinnerMailService {
   FakeWinnerMailService({
@@ -92,8 +93,12 @@ Future<void> _load(WidgetTester tester) async {
   tester.view.physicalSize = const Size(1200, 4000);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  await tester.tap(find.text('設定を読み込む'));
+  // initialEventIdがあれば自動で読み込まれる(Phase 11D)。念のため「最新の状態に更新」で確実に読み込む。
   await tester.pumpAndSettle();
+  if (find.text('最新の状態に更新').evaluate().isNotEmpty) {
+    await tester.tap(find.text('最新の状態に更新'));
+    await tester.pumpAndSettle();
+  }
 }
 
 void main() {
@@ -224,21 +229,37 @@ void main() {
   });
 
   group('コンソールでの表示(admin専用)', () {
+    // イベント選択後の管理画面(/console?eventId=…)に「当選メール設定」が表示される想定なので、
+    // eventIdとイベント名表示に使う読み取り専用のサービス(FakeImportService)を渡す。
     Widget console(AccessRole role) => MaterialApp(
       home: ConfirmedConsolePage(
         authClient: FakeAuthClient(signedIn: true),
         accessService: FakeAccessService([AccessCheck.granted(role)]),
         winnerMailService: FakeWinnerMailService(settings: _settings()),
+        eventSummaryService: FakeImportService(),
+        initialEventId: 'evfixture0123456789',
       ),
     );
 
-    testWidgets('adminには「当選メール設定」が表示され、開ける', (tester) async {
+    testWidgets('adminには「当選メール設定」が表示され、開ける(選択済みeventIdが自動的に引き継がれ、読み込まれる)', (
+      tester,
+    ) async {
       await tester.pumpWidget(console(AccessRole.admin));
       await tester.pumpAndSettle();
       expect(find.text('当選メール設定'), findsOneWidget);
+      await tester.ensureVisible(find.text('当選メール設定'));
       await tester.tap(find.text('当選メール設定'));
       await tester.pumpAndSettle();
-      expect(find.text('設定を読み込む'), findsOneWidget);
+      // eventIdを入力させる欄は無く、選択済みイベントの設定が自動で読み込まれる。
+      expect(find.byType(TextField).evaluate().any((e) {
+        final widget = e.widget as TextField;
+        return widget.decoration?.labelText == 'イベントID';
+      }), isFalse);
+      expect(
+        find.textContaining('テスト譲渡会'),
+        findsWidgets,
+        reason: '自動で読み込まれた設定が表示される',
+      );
     });
 
     testWidgets('staffには「当選メール設定」が表示されない', (tester) async {
@@ -246,6 +267,36 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('当選メール設定'), findsNothing);
     });
+  });
+
+  group('Phase 11D: eventIdはイベント管理画面から内部的に渡されるものだけを正本とする', () {
+    testWidgets(
+      'initialEventIdなしで直接開くと、eventId入力欄は出さず「イベント管理画面から開いてください」と案内する',
+      (tester) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            onGenerateRoute: (settings) => MaterialPageRoute<void>(
+              builder: (_) =>
+                  WinnerMailPage(service: FakeWinnerMailService()),
+              settings: settings,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byWidgetPredicate(
+            (w) => w is TextField && w.decoration?.labelText == 'イベントID',
+          ),
+          findsNothing,
+        );
+        expect(find.byKey(const Key('missing-event-notice')), findsOneWidget);
+        expect(find.text('イベント管理画面から開いてください。'), findsOneWidget);
+        expect(find.byKey(const Key('back-to-event-console')), findsOneWidget);
+        await tester.tap(find.byKey(const Key('back-to-event-console')));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
   });
 
   group('CallableWinnerMailService', () {

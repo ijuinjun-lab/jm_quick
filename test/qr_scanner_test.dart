@@ -527,6 +527,46 @@ void main() {
       expect(find.textContaining('別のイベントの参加証です'), findsOneWidget);
     });
 
+    testWidgets(
+      'Phase 11D: イベント選択後の管理画面「受付」から開いた場合、最初のQRを読み取る前からそのeventIdへ固定される(異なるイベントのQRは最初から拒否)',
+      (tester) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ConfirmedScanReceptionFlow(
+              expectedHost: _host,
+              initialEventId: 'ev1',
+              surfaceBuilder: fakeSurface,
+              receptionBuilder: fakeReception,
+            ),
+          ),
+        );
+        await tester.pump();
+        // 同じイベント(ev1)のQRはそのまま受け付ける。
+        latest!.onRaw(_validEv1);
+        await tester.pump();
+        expect(calls.length, 1);
+        expect(calls.single.eventId, 'ev1');
+        await tester.tap(find.byKey(const Key('fake-scan-next')));
+        await tester.pump();
+        // 別イベント(ev2)のQRは、これが最初のscanでも拒否される(initialEventIdで既に固定済みのため)。
+        latest!.onRaw(_validEv2);
+        await tester.pump();
+        expect(calls.length, 1, reason: '固定済みのイベントと異なるQRは受け付けない');
+        expect(find.textContaining('別のイベントの参加証です'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'initialEventId未指定(直リンク等)では、従来どおり最初に読み取ったQRのイベントへ固定される',
+      (tester) async {
+        await pumpFlow(tester); // initialEventIdなし
+        latest!.onRaw(_validEv2); // 最初のQRがev2でも受け付ける(固定前)
+        await tester.pump();
+        expect(calls.length, 1);
+        expect(calls.single.eventId, 'ev2');
+      },
+    );
+
     testWidgets('受付完了後、「次のQRを読み取る」からscannerへ戻り、同じイベントの次の参加者を続けて受付できる', (
       tester,
     ) async {

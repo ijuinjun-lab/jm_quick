@@ -22,6 +22,8 @@ import 'package:jm_quick/services/legacy_api.dart';
 
 import 'app_check_fake.dart';
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
+import 'import_page_test.dart' show FakeImportService;
+import 'package:jm_quick/confirmed/import_models.dart' show ImportEventSummary;
 
 class FakeEventCreateService implements EventCreateService {
   FakeEventCreateService([this.handler]);
@@ -393,23 +395,58 @@ void main() {
       expect(find.text('イベント作成'), findsNothing);
     });
 
-    testWidgets('作成直後のイベントIDがコンソールに表示される(各機能の初期値になる)', (tester) async {
-      await tester.binding.setSurfaceSize(const Size(600, 1600));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.pumpWidget(
-        _app(
-          ConfirmedConsolePage(
-            initialEventId: 'evcreated123',
-            authClient: FakeAuthClient(signedIn: true),
-            accessService: FakeAccessService([
-              AccessCheck.granted(AccessRole.admin),
-            ]),
+    testWidgets(
+      '作成直後のイベントIDがコンソール(イベント管理画面)に引き継がれ、各機能の初期値になる(利用者はIDを見ない)',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(600, 1600));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final routes = <String?>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            onGenerateRoute: (settings) {
+              routes.add(settings.name);
+              if (settings.name == '/') {
+                return MaterialPageRoute<void>(
+                  builder: (_) => ConfirmedConsolePage(
+                    initialEventId: 'evcreated123',
+                    authClient: FakeAuthClient(signedIn: true),
+                    accessService: FakeAccessService([
+                      AccessCheck.granted(AccessRole.admin),
+                    ]),
+                    eventSummaryService: FakeImportService(
+                      event: const ImportEventSummary(
+                        eventId: 'evcreated123',
+                        eventName: '架空イベント(作成直後)',
+                        startAt: null,
+                        venue: '架空ホール',
+                        programs: [],
+                      ),
+                    ),
+                  ),
+                  settings: settings,
+                );
+              }
+              return MaterialPageRoute<void>(
+                builder: (_) => const Scaffold(body: Text('NEXT-SCREEN')),
+                settings: settings,
+              );
+            },
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.textContaining('evcreated123'), findsOneWidget);
-    });
+        );
+        await tester.pumpAndSettle();
+        // 画面にはイベント名が出る(生のIDを利用者に見せる欄は無い)。
+        expect(find.text('架空イベント(作成直後)'), findsOneWidget);
+        expect(find.textContaining('evcreated123'), findsNothing);
+        // CSV取込を開くと、evcreated123が内部的に(URLのクエリとして)引き継がれる。
+        await tester.ensureVisible(find.text('CSV取込'));
+        await tester.tap(find.text('CSV取込'));
+        await tester.pumpAndSettle();
+        expect(
+          routes.last,
+          '/console/import?eventId=evcreated123',
+        );
+      },
+    );
 
     testWidgets('従来方式の「新しいイベントを作成」とは別の入口(「新方式のイベントを作成」)が並ぶ', (tester) async {
       await tester.binding.setSurfaceSize(const Size(900, 1200));

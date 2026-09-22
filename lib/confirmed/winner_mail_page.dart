@@ -8,9 +8,16 @@ import 'winner_mail_service.dart';
 /// 管理者が編集するのは「件名・冒頭本文・締め本文・注意事項」と会場の住所・アクセス(すべてプレーンテキスト)。
 /// 宛名・受付QR・Web参加証URL・program名・参加時間・参加人数・開催日時・会場・問い合わせ先は、
 /// サーバーが正確なデータから自動生成するため、ここでは編集できない。
+///
+/// ■ Phase 11D: [initialEventId](イベント管理画面から内部的に渡される)を正本として使う。利用者が
+///   イベントIDを見る・入力する・書き換える欄は無い。[initialEventId]が無い状態(直接この画面に来た場合)は、
+///   イベントを推測したり最初のイベントを自動選択したりせず、「イベント管理画面から開いてください」という
+///   案内だけを表示する。
 class WinnerMailPage extends StatefulWidget {
   const WinnerMailPage({super.key, required this.service, this.initialEventId});
   final WinnerMailService service;
+
+  /// イベント管理画面(`/console?eventId=…`)から渡される、対象イベントのID(正本)。
   final String? initialEventId;
 
   @override
@@ -36,7 +43,6 @@ const _maxSubject = 150;
 const _maxBody = 2000;
 
 class _WinnerMailPageState extends State<WinnerMailPage> {
-  late final eventId = TextEditingController(text: widget.initialEventId ?? '');
   final subject = TextEditingController();
   final intro = TextEditingController();
   final closing = TextEditingController();
@@ -51,10 +57,18 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   WinnerMailSettings? settings;
   WinnerMailPreview? preview;
 
+  String get _eventId => (widget.initialEventId ?? '').trim();
+  bool get _hasEventId => _eventId.isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_hasEventId) load();
+  }
+
   @override
   void dispose() {
     for (final c in [
-      eventId,
       subject,
       intro,
       closing,
@@ -86,9 +100,8 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   }
 
   Future<void> load() => _run(() async {
-    final id = eventId.text.trim();
-    if (id.isEmpty) throw const WinnerMailException('イベントIDを入力してください。');
-    final result = await widget.service.getSettings(id);
+    if (!_hasEventId) return; // 呼び出し元がガードしている
+    final result = await widget.service.getSettings(_eventId);
     if (!mounted) return;
     setState(() {
       settings = result;
@@ -121,7 +134,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     final problem = _validate();
     if (problem != null) throw WinnerMailException(problem);
     final version = await widget.service.updateTemplate(
-      eventId: eventId.text.trim(),
+      eventId: _eventId,
       subject: subject.text,
       introBody: intro.text,
       closingBody: closing.text,
@@ -129,7 +142,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       address: address.text,
       access: access.text,
     );
-    final refreshed = await widget.service.getSettings(eventId.text.trim());
+    final refreshed = await widget.service.getSettings(_eventId);
     if (!mounted) return;
     setState(() {
       settings = refreshed;
@@ -142,7 +155,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     final id = participantId.text.trim();
     if (id.isEmpty) throw const WinnerMailException('プレビューする参加者IDを入力してください。');
     final result = await widget.service.preview(
-      eventId: eventId.text.trim(),
+      eventId: _eventId,
       participantId: id,
     );
     if (mounted) setState(() => preview = result);
@@ -170,7 +183,9 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   @override
   Widget build(BuildContext context) => PageFrame(
     title: '当選メール設定',
-    child: Column(
+    child: !_hasEventId
+        ? missingEventCard(context)
+        : Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Card(
@@ -184,16 +199,12 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 10),
-                TextField(
-                  controller: eventId,
-                  decoration: const InputDecoration(labelText: 'イベントID'),
-                ),
-                const SizedBox(height: 10),
                 Align(
                   alignment: Alignment.centerLeft,
                   child: FilledButton(
+                    key: const Key('winner-mail-reload'),
                     onPressed: busy ? null : load,
-                    child: const Text('設定を読み込む'),
+                    child: const Text('最新の状態に更新'),
                   ),
                 ),
               ],
