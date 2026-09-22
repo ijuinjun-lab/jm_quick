@@ -1,8 +1,11 @@
-// Phase 11C: confirmed受付用のQRカメラスキャナー。実カメラは使わず、カメラ部分([surfaceBuilder])を差し替えて検証する。
+// Phase 11C/11C-2: confirmed受付用のQRカメラスキャナー。実カメラは使わず、カメラ部分を差し替えて検証する。
 //  - QR文字列の検証(qr_scanner.dart)は純粋関数として単体で検証する。
 //  - scanner → 検証 → 既存のReceptionRoutePage/ConfirmedReceptionPageへ接続する部分([qr_scanner_page.dart])を、
 //    受付ロジックそのもの(既存テストが保証)を再テストせずに、接続部分だけ検証する。
-//  - カメラ権限エラー・カメラ利用不可の表示内容([QrCameraErrorView])は、mobile_scannerに依存せず単体で検証する。
+//  - カメラ権限エラー・カメラ利用不可の表示内容([QrCameraErrorView])は、カメラ実装に依存せず単体で検証する。
+//  - カメラアダプタの状態遷移(open/close・検出の伝播・エラー分類)は、[WebQrCameraView]に[WebCameraGateway]の
+//    fake実装を注入して検証する(実カメラ〈getUserMedia・<video>・BarcodeDetector〉は実ブラウザが無いと動かせないため、
+//    playsInline/muted/autoplay・背面カメラ要求・連続decode抑止は静的検査〈ソーステキストの確認〉で担保する)。
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -11,9 +14,35 @@ import 'package:jm_quick/confirmed/access_role.dart';
 import 'package:jm_quick/confirmed/qr_scanner.dart';
 import 'package:jm_quick/confirmed/qr_scanner_page.dart';
 import 'package:jm_quick/confirmed/reception_route.dart';
+import 'package:jm_quick/confirmed/web_qr_camera.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'confirmed_pass_reception_test.dart' show FakeReceptionService, rp;
+
+/// [WebCameraGateway]のfake実装。実カメラ(getUserMedia・<video>・BarcodeDetector)には一切接続しない。
+class FakeCameraGateway implements WebCameraGateway {
+  FakeCameraGateway({this.openError});
+
+  /// open()が投げる例外(nullなら成功する)。
+  final Object? openError;
+  int openCalls = 0;
+  int closeCalls = 0;
+  void Function(String rawValue)? onDetect;
+
+  @override
+  Future<void> open({required void Function(String rawValue) onDetect}) async {
+    openCalls++;
+    final error = openError;
+    if (error != null) throw error;
+    this.onDetect = onDetect;
+  }
+
+  @override
+  Future<void> close() async => closeCalls++;
+
+  @override
+  Widget buildPreview() => const SizedBox(key: Key('fake-camera-preview'));
+}
 
 const _host = 'app.example.invalid';
 String _qr({String? eventId, String? participantId, String? publicId}) {
@@ -40,6 +69,21 @@ final _validEv2 = _qr(
   participantId: 'p9',
   publicId: 'pub_zzz0123456789012345678',
 );
+
+/// コメント行(`//`で始まる行)を除いたソース(経緯説明などのコメント中の言葉を誤検出しないための静的検査補助)。
+String _codeOnly(String path) => File(
+  path,
+).readAsLinesSync().where((l) => !l.trimLeft().startsWith('//')).join('\n');
+
+/// scanner関連の全ソース(静的検査の対象)。
+const _scannerSourceFiles = [
+  'lib/confirmed/qr_scanner.dart',
+  'lib/confirmed/qr_scanner_page.dart',
+  'lib/confirmed/web_qr_camera.dart',
+  'lib/confirmed/web_qr_camera_gateway.dart',
+  'lib/confirmed/web_qr_camera_stub.dart',
+  'lib/confirmed/web_qr_camera_web.dart',
+];
 
 void main() {
   group('parseReceptionQrPayload(QR文字列の検証。ここはセキュリティの正本ではない)', () {
@@ -186,8 +230,179 @@ void main() {
     });
   });
 
+  group('WebQrCameraView(カメラアダプタの状態遷移。fakeのWebCameraGatewayへ差し替える)', () {
+    Widget host(Widget child) => MaterialApp(home: child);
+
+    testWidgets('stream開始: gateway.open()が呼ばれ、成功するとpreviewが表示される', (
+      tester,
+    ) async {
+      final gateway = FakeCameraGateway();
+      await tester.pumpWidget(
+        host(
+          WebQrCameraView(
+            onDetected: (_) {},
+            onProblem: (_) {},
+            gatewayFactory: () => gateway,
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(gateway.openCalls, 1);
+      expect(find.byKey(const Key('fake-camera-preview')), findsOneWidget);
+    });
+
+    testWidgets('正常QR decode: gatewayが検出した文字列が、そのままonDetectedへ渡る', (
+      tester,
+    ) async {
+      final gateway = FakeCameraGateway();
+      final detected = <String>[];
+      await tester.pumpWidget(
+        host(
+          WebQrCameraView(
+            onDetected: detected.add,
+            onProblem: (_) {},
+            gatewayFactory: () => gateway,
+          ),
+        ),
+      );
+      await tester.pump();
+      gateway.onDetect!(
+        'https://example.invalid/reception?eventId=e&participantId=p&publicId=q',
+      );
+      expect(detected, [
+        'https://example.invalid/reception?eventId=e&participantId=p&publicId=q',
+      ]);
+    });
+
+    testWidgets(
+      'dispose時停止: ウィジェットが破棄されるとgateway.close()が呼ばれる(MediaStreamTrackの解放)',
+      (tester) async {
+        final gateway = FakeCameraGateway();
+        await tester.pumpWidget(
+          host(
+            WebQrCameraView(
+              onDetected: (_) {},
+              onProblem: (_) {},
+              gatewayFactory: () => gateway,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(gateway.closeCalls, 0);
+        await tester.pumpWidget(
+          host(const SizedBox()),
+        ); // 差し替えてWebQrCameraViewを破棄する
+        expect(gateway.closeCalls, 1);
+      },
+    );
+
+    testWidgets(
+      '次のQRで再開: keyを変えて作り直すと、新しいgatewayでopenがもう一度呼ばれる(古いgatewayはclose済み)',
+      (tester) async {
+        final first = FakeCameraGateway();
+        final second = FakeCameraGateway();
+        var callCount = 0;
+        WebCameraGateway factory() => callCount++ == 0 ? first : second;
+        await tester.pumpWidget(
+          host(
+            WebQrCameraView(
+              key: const ValueKey(0),
+              onDetected: (_) {},
+              onProblem: (_) {},
+              gatewayFactory: factory,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(first.openCalls, 1);
+        await tester.pumpWidget(
+          host(
+            WebQrCameraView(
+              key: const ValueKey(1),
+              onDetected: (_) {},
+              onProblem: (_) {},
+              gatewayFactory: factory,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(first.closeCalls, 1, reason: '古いgatewayは作り直しの前に必ず閉じる');
+        expect(second.openCalls, 1);
+      },
+    );
+
+    testWidgets(
+      '権限拒否: gateway.open()がWebCameraException(permissionDenied)を投げると、onProblemへ伝わる',
+      (tester) async {
+        final gateway = FakeCameraGateway(
+          openError: const WebCameraException(QrCameraProblem.permissionDenied),
+        );
+        QrCameraProblem? reported;
+        await tester.pumpWidget(
+          host(
+            WebQrCameraView(
+              onDetected: (_) {},
+              onProblem: (p) => reported = p,
+              gatewayFactory: () => gateway,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(reported, QrCameraProblem.permissionDenied);
+        expect(find.byKey(const Key('fake-camera-preview')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'getUserMedia失敗: WebCameraException以外の例外もgenericとして伝わる(アプリは落ちない)',
+      (tester) async {
+        final gateway = FakeCameraGateway(
+          openError: Exception('getUserMedia rejected'),
+        );
+        QrCameraProblem? reported;
+        await tester.pumpWidget(
+          host(
+            WebQrCameraView(
+              onDetected: (_) {},
+              onProblem: (p) => reported = p,
+              gatewayFactory: () => gateway,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(reported, QrCameraProblem.generic);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'disposeされた後にgatewayが遅れてdetectを呼んでも、onDetected/onProblemへ伝えない(setState after dispose防止)',
+      (tester) async {
+        final gateway = FakeCameraGateway();
+        var detectedCalls = 0;
+        await tester.pumpWidget(
+          host(
+            WebQrCameraView(
+              onDetected: (_) => detectedCalls++,
+              onProblem: (_) {},
+              gatewayFactory: () => gateway,
+            ),
+          ),
+        );
+        await tester.pump();
+        final detect = gateway.onDetect!;
+        await tester.pumpWidget(host(const SizedBox()));
+        detect(
+          'https://example.invalid/reception?eventId=e&participantId=p&publicId=q',
+        );
+        expect(detectedCalls, 0);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  });
+
   group('ConfirmedScanReceptionFlow(scanner ↔ 受付画面の往復。カメラはfakeで差し替える)', () {
-    // 実カメラ(_MobileScannerSurface)は使わず、直接onRawを呼び出せるfakeに差し替える。
+    // 実カメラ(_WebCameraSurface)は使わず、直接onRawを呼び出せるfakeに差し替える。
     ({void Function(String) onRaw})? latest;
     Widget fakeSurface(
       BuildContext context, {
@@ -500,6 +715,22 @@ void main() {
       await tester.pump(const Duration(milliseconds: 10));
       expect(find.byType(ConfirmedQrScannerView), findsOneWidget);
     });
+
+    testWidgets('カメラ非対応環境(このテスト実行環境=VM)でも、既定のカメラ面はクラッシュせず「利用できません」表示に落ち着く', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        route(
+          FakeAuthClient(signedIn: true),
+          FakeAccessService([const AccessCheck.granted(AccessRole.admin)]),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.pump(); // gateway.open()の失敗(VM=unsupported)が伝わるのを待つ
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('scanner-camera-error')), findsOneWidget);
+    });
   });
 
   group('390px幅', () {
@@ -539,10 +770,7 @@ void main() {
       'scannerのコードはFirestoreを直接使わず、新しいparticipant・publicId・programAttendanceを作らない',
       () {
         // ファイル内容を静的に確認する(importで読み込むのではなく、テキストとして走査する)。
-        for (final path in [
-          'lib/confirmed/qr_scanner.dart',
-          'lib/confirmed/qr_scanner_page.dart',
-        ]) {
+        for (final path in _scannerSourceFiles) {
           final source = File(path).readAsStringSync();
           for (final forbidden in [
             'cloud_firestore',
@@ -565,10 +793,7 @@ void main() {
     );
 
     test('QR全文・参加者ID・publicIdをログ(print/debugPrint)へ出していない', () {
-      for (final path in [
-        'lib/confirmed/qr_scanner.dart',
-        'lib/confirmed/qr_scanner_page.dart',
-      ]) {
+      for (final path in _scannerSourceFiles) {
         final source = File(path).readAsStringSync();
         expect(source.contains('debugPrint('), isFalse, reason: path);
         expect(
@@ -578,6 +803,89 @@ void main() {
         );
       }
     });
+
+    test(
+      'mobile_scannerは依存にも本体コード(コメントの経緯説明を除く)にも残っていない(iPhone Safariの黒画面issueを踏む実装を使わない)',
+      () {
+        final pubspec = File('pubspec.yaml').readAsStringSync();
+        expect(pubspec.contains('mobile_scanner'), isFalse);
+        for (final path in _scannerSourceFiles) {
+          final source = _codeOnly(path);
+          expect(source.contains('mobile_scanner'), isFalse, reason: path);
+          expect(source.contains('MobileScanner'), isFalse, reason: path);
+        }
+      },
+    );
+
+    test(
+      'Web実カメラアダプタは、<video>へ playsInline / muted / autoplay を明示している(iPhone Safariの黒画面対策)',
+      () {
+        final source = File(
+          'lib/confirmed/web_qr_camera_web.dart',
+        ).readAsStringSync();
+        for (final required in [
+          '..playsInline = true',
+          '..muted = true',
+          '..autoplay = true',
+        ]) {
+          expect(source.contains(required), isTrue, reason: required);
+        }
+      },
+    );
+
+    test('Web実カメラアダプタは、背面カメラ(environment)を要求し、特定端末名をハードコードしていない', () {
+      final source = _codeOnly('lib/confirmed/web_qr_camera_web.dart');
+      expect(source.contains("'facingMode'"), isTrue);
+      expect(source.contains("'environment'"), isTrue);
+      for (final forbidden in [
+        'iPhone',
+        'iPad',
+        'Pixel',
+        'Galaxy',
+        'userAgent',
+      ]) {
+        expect(source.contains(forbidden), isFalse, reason: forbidden);
+      }
+    });
+
+    test('Web実カメラアダプタは、終了時に必ずMediaStreamTrackをstopする(カメラが使用中のまま残らない)', () {
+      final source = File(
+        'lib/confirmed/web_qr_camera_web.dart',
+      ).readAsStringSync();
+      expect(source.contains('track.stop()'), isTrue);
+      // close()の中でstopしていること(catchで握りつぶして呼ばれない実装になっていないか、近傍のテキストで確認)。
+      final closeBody = source.substring(
+        source.indexOf('Future<void> close()'),
+      );
+      expect(closeBody.contains('track.stop()'), isTrue);
+    });
+
+    test('Web実カメラアダプタは、前回のdecodeが終わるまで次のdetectを開始しない(連続decode抑止)', () {
+      final source = File(
+        'lib/confirmed/web_qr_camera_web.dart',
+      ).readAsStringSync();
+      expect(source.contains('if (_detecting'), isTrue);
+    });
+
+    test(
+      'QR decodeは標準BarcodeDetectorを使い、mobile_scanner相当の巨大なfallbackライブラリを追加していない',
+      () {
+        final source = _codeOnly('lib/confirmed/web_qr_camera_web.dart');
+        expect(source.contains("@JS('BarcodeDetector')"), isTrue);
+        for (final forbidden in [
+          'zxing',
+          'jsQR',
+          'cdn.jsdelivr.net',
+          'unpkg.com',
+        ]) {
+          expect(
+            source.toLowerCase().contains(forbidden.toLowerCase()),
+            isFalse,
+            reason: forbidden,
+          );
+        }
+      },
+    );
 
     test('参加者向けの参加証(pass_page.dart)にはカメラ機能を追加していない', () {
       final source = File('lib/confirmed/pass_page.dart').readAsStringSync();

@@ -3,13 +3,14 @@
 // ■ 責務はここまで: カメラ → QR文字列取得 → URL検証([qr_scanner.dart]) → 既存の[ReceptionRoutePage]へ渡す。
 //   受付・program別受付・二重受付防止・plannedCount等のロジックは一切複製しない(既存Functions・既存画面が正本)。
 // ■ QR仕様(payloadの形式)はここでは変更しない。参加者側の参加証・QR生成にもカメラ機能は追加しない(スタッフ専用)。
-// ■ カメラ本体(_MobileScannerSurface)は package:mobile_scanner に依存する薄いラッパーで、それ単体は自動テストできない
-//   (実カメラが無い環境のため)。検出後の遷移・拒否判定・エラー表示の内容は、カメラに依存しない形でテストできるように分離してある
-//   ([ConfirmedScanReceptionFlow] は [surfaceBuilder] でカメラ部分を差し替えられる)。
+// ■ カメラ本体は[WebQrCameraView](web_qr_camera.dart。JM Quickが<video>要素を自前で所有し、playsInline/muted/
+//   autoplayを明示してiPhone Safariの黒画面不具合〈package:mobile_scannerの既知issue〉を回避する)を使う。
+//   実カメラ部分は単体では自動テストできない(実ブラウザが無い環境のため)。検出後の遷移・拒否判定・エラー表示の
+//   内容は、カメラに依存しない形でテストできるように分離してある([ConfirmedScanReceptionFlow]は[surfaceBuilder]で、
+//   [_WebCameraSurface]は[WebQrCameraView]のgatewayFactoryで、それぞれカメラ部分を差し替えられる)。
 // ■ QR全文・eventId・participantId・publicIdは、ここでもログ・debugPrintへ出さない。
 
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../pages/reception_page.dart' as legacy;
 import 'access_service.dart';
@@ -17,12 +18,16 @@ import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'qr_scanner.dart';
 import 'reception_route.dart';
+import 'web_qr_camera.dart';
 
 /// `/console/scan`: staff/adminが受付用QRをスマートフォンのカメラで読み取る入口。
 /// 未認証・受付権限のない利用者は使用できない(既存の[AuthGate]と同じ境界)。
 class ConfirmedScanReceptionRoute extends StatelessWidget {
-  ConfirmedScanReceptionRoute({super.key, AuthClient? authClient, this.accessService})
-    : authClient = authClient ?? FirebaseAuthClient();
+  ConfirmedScanReceptionRoute({
+    super.key,
+    AuthClient? authClient,
+    this.accessService,
+  }) : authClient = authClient ?? FirebaseAuthClient();
 
   final AuthClient authClient;
   final AccessService? accessService;
@@ -30,7 +35,8 @@ class ConfirmedScanReceptionRoute extends StatelessWidget {
   @override
   Widget build(BuildContext context) => AuthGate(
     authClient: authClient,
-    accessService: accessService ?? CallableAccessService(authClient: authClient),
+    accessService:
+        accessService ?? CallableAccessService(authClient: authClient),
     // staff/adminのどちらも使用可能(初回受付はstaffOrAdmin。訂正・取消はConfirmedReceptionPage側でadminのみ描画される)。
     adminBuilder: (context, signOut) => const ConfirmedScanReceptionFlow(),
     staffBuilder: (context, signOut) => const ConfirmedScanReceptionFlow(),
@@ -57,7 +63,8 @@ class ConfirmedScanReceptionFlow extends StatefulWidget {
   final ReceptionScreenBuilder? _receptionBuilder;
 
   @override
-  State<ConfirmedScanReceptionFlow> createState() => _ConfirmedScanReceptionFlowState();
+  State<ConfirmedScanReceptionFlow> createState() =>
+      _ConfirmedScanReceptionFlowState();
 }
 
 /// [ConfirmedScanReceptionFlow]が、有効なQRを受理した後に受付画面を作るための差し替え口(テスト用)。
@@ -72,7 +79,8 @@ typedef ReceptionScreenBuilder =
 
 enum _Phase { scanning, reception }
 
-class _ConfirmedScanReceptionFlowState extends State<ConfirmedScanReceptionFlow> {
+class _ConfirmedScanReceptionFlowState
+    extends State<ConfirmedScanReceptionFlow> {
   _Phase _phase = _Phase.scanning;
   String? _lockedEventId;
   ScannedReceptionQr? _scanned;
@@ -163,9 +171,12 @@ class _ConfirmedScanReceptionFlowState extends State<ConfirmedScanReceptionFlow>
   );
 }
 
-/// カメラ部分(_MobileScannerSurface)を差し替えるための型。既定は実カメラ、テストでは差し替える。
+/// カメラ部分(_WebCameraSurface)を差し替えるための型。既定は実カメラ、テストでは差し替える。
 typedef QrSurfaceBuilder =
-    Widget Function(BuildContext context, {required void Function(String rawValue) onRaw});
+    Widget Function(
+      BuildContext context, {
+      required void Function(String rawValue) onRaw,
+    });
 
 /// カメラ映像 + 読み取り範囲の枠 + 案内文 + 閉じるボタンを表示する画面。
 /// 検出したQRの検証・遷移判断は行わない([ConfirmedScanReceptionFlow]の責務)。
@@ -185,7 +196,10 @@ class ConfirmedQrScannerView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final surface = (surfaceBuilder ?? _defaultSurfaceBuilder)(context, onRaw: onRaw);
+    final surface = (surfaceBuilder ?? _defaultSurfaceBuilder)(
+      context,
+      onRaw: onRaw,
+    );
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -212,8 +226,13 @@ class ConfirmedQrScannerView extends StatelessWidget {
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 24),
                 child: Container(
-                  key: message != null ? const Key('scanner-message') : const Key('scanner-hint'),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  key: message != null
+                      ? const Key('scanner-message')
+                      : const Key('scanner-hint'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.black54,
                     borderRadius: BorderRadius.circular(8),
@@ -223,7 +242,9 @@ class ConfirmedQrScannerView extends StatelessWidget {
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: Colors.white,
-                      fontWeight: message != null ? FontWeight.bold : FontWeight.normal,
+                      fontWeight: message != null
+                          ? FontWeight.bold
+                          : FontWeight.normal,
                     ),
                   ),
                 ),
@@ -238,7 +259,7 @@ class ConfirmedQrScannerView extends StatelessWidget {
   static Widget _defaultSurfaceBuilder(
     BuildContext context, {
     required void Function(String) onRaw,
-  }) => _MobileScannerSurface(onRaw: onRaw);
+  }) => _WebCameraSurface(onRaw: onRaw);
 }
 
 /// 読み取り範囲が分かるよう、中央に枠を表示するだけの装飾(検出ロジックには関与しない)。
@@ -259,9 +280,8 @@ class _ScanFrameOverlay extends StatelessWidget {
   );
 }
 
-/// カメラ権限拒否・カメラ利用不可時の案内。mobile_scannerに依存しない単体の表示部品(単体テストできる)。
-enum QrCameraProblem { permissionDenied, unsupported, generic }
-
+/// カメラ権限拒否・カメラ利用不可時の案内。特定のカメラ実装に依存しない単体の表示部品(単体テストできる)。
+/// [QrCameraProblem]自体は[qr_scanner.dart]で定義(web_qr_camera_*.dartからも参照するため)。
 class QrCameraErrorView extends StatelessWidget {
   const QrCameraErrorView({super.key, required this.problem, this.onRetry});
   final QrCameraProblem problem;
@@ -303,47 +323,46 @@ class QrCameraErrorView extends StatelessWidget {
   );
 }
 
-/// 実カメラ(package:mobile_scanner)を使う本番用のスキャナー面。単体では自動テストしない
-/// (テストは[ConfirmedScanReceptionFlow.surfaceBuilder]でこのクラスごと差し替える)。
-class _MobileScannerSurface extends StatefulWidget {
-  const _MobileScannerSurface({required this.onRaw});
+/// 実カメラ([WebQrCameraView]。JM Quickが<video>要素を自前で所有するWeb実装)を使う本番用のスキャナー面。
+/// 実カメラ部分は単体では自動テストしない(実ブラウザが無い環境のため。テストは[gatewayFactory]で差し替える)。
+/// エラー時は[QrCameraErrorView]を表示し、「再試行」は[WebQrCameraView]を作り直す(新しいkeyでgetUserMediaを再実行)。
+class _WebCameraSurface extends StatefulWidget {
+  const _WebCameraSurface({required this.onRaw});
   final void Function(String rawValue) onRaw;
+
   @override
-  State<_MobileScannerSurface> createState() => _MobileScannerSurfaceState();
+  State<_WebCameraSurface> createState() => _WebCameraSurfaceState();
 }
 
-class _MobileScannerSurfaceState extends State<_MobileScannerSurface> {
-  // 背面カメラを優先(端末に無ければmobile_scannerが利用可能なカメラへフォールバックする)。特定端末のハードコードはしない。
-  final MobileScannerController _controller = MobileScannerController(facing: CameraFacing.back);
+class _WebCameraSurfaceState extends State<_WebCameraSurface> {
+  int _generation = 0; // 「再試行」のたびに新しいWebQrCameraViewを作り、カメラの取得からやり直す。
+  QrCameraProblem? _problem;
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  void _handleProblem(QrCameraProblem problem) {
+    if (mounted) setState(() => _problem = problem);
+  }
+
+  void _retry() {
+    setState(() {
+      _problem = null;
+      _generation += 1;
+    });
   }
 
   @override
-  Widget build(BuildContext context) => MobileScanner(
-    controller: _controller,
-    onDetect: (capture) {
-      for (final barcode in capture.barcodes) {
-        final value = barcode.rawValue;
-        if (value != null && value.isNotEmpty) {
-          widget.onRaw(value);
-          break; // 1フレームに複数のQR/バーコードがあっても、最初の1件だけを扱う。
-        }
-      }
-    },
-    errorBuilder: (context, error) => QrCameraErrorView(
-      problem: switch (error.errorCode) {
-        MobileScannerErrorCode.permissionDenied => QrCameraProblem.permissionDenied,
-        MobileScannerErrorCode.unsupported => QrCameraProblem.unsupported,
-        _ => QrCameraProblem.generic,
-      },
+  Widget build(BuildContext context) {
+    final problem = _problem;
+    if (problem != null) {
       // カメラ非対応(unsupported)は再試行しても変わらないため、再試行ボタンは出さない。
-      onRetry: error.errorCode == MobileScannerErrorCode.unsupported
-          ? null
-          : () => _controller.start(),
-    ),
-  );
+      return QrCameraErrorView(
+        problem: problem,
+        onRetry: problem == QrCameraProblem.unsupported ? null : _retry,
+      );
+    }
+    return WebQrCameraView(
+      key: ValueKey(_generation),
+      onDetected: widget.onRaw,
+      onProblem: _handleProblem,
+    );
+  }
 }

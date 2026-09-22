@@ -45,7 +45,7 @@ dependencies:
   firebase_auth: ^6.7.0
   firebase_app_check: ^0.4.6
   crypto: ^3.0.7
-  mobile_scanner: ^7.4.2
+  web: ^1.1.1
 
 dev_dependencies:
   flutter_test:

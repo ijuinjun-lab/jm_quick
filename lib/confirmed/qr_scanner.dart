@@ -57,7 +57,8 @@ QrParseResult parseReceptionQrPayload(String raw, {String? expectedHost}) {
       uri != null &&
       (uri.scheme == 'https' || uri.scheme == 'http') &&
       uri.path == '/reception' &&
-      (expectedHost == null || uri.host.toLowerCase() == expectedHost.toLowerCase());
+      (expectedHost == null ||
+          uri.host.toLowerCase() == expectedHost.toLowerCase());
   if (!looksLikeReceptionUrl) {
     return const QrParseResult.rejected(QrRejectReason.notReceptionUrl);
   }
@@ -74,7 +75,11 @@ QrParseResult parseReceptionQrPayload(String raw, {String? expectedHost}) {
     return const QrParseResult.rejected(QrRejectReason.publicIdMissing);
   }
   return QrParseResult.valid(
-    ScannedReceptionQr(eventId: eventId, participantId: participantId, publicId: publicId),
+    ScannedReceptionQr(
+      eventId: eventId,
+      participantId: participantId,
+      publicId: publicId,
+    ),
   );
 }
 
@@ -84,10 +89,13 @@ String qrRejectMessage(QrRejectReason reason) => switch (reason) {
     'このQRはJM Quickの受付用ではありません。参加者の受付QR(参加証)を読み取ってください。',
   QrRejectReason.eventIdMissing ||
   QrRejectReason.participantIdMissing ||
-  QrRejectReason.publicIdMissing =>
-    'このQRは受付に必要な情報が不足しています。参加証のQRを読み取ってください。',
+  QrRejectReason.publicIdMissing => 'このQRは受付に必要な情報が不足しています。参加証のQRを読み取ってください。',
 };
 
 /// 現在受付中のイベントと異なるイベントのQRを読んだときの案内。
 const String qrDifferentEventMessage =
     '別のイベントの参加証です。現在受付中のイベントとは異なるため、この画面では受付できません。';
+
+/// カメラ権限拒否・カメラ利用不可時の分類。特定の実装(package:mobile_scanner等)に依存しない共通の型で、
+/// Web専用のカメラアダプタ(web_qr_camera_*.dart)とUI(qr_scanner_page.dartのQrCameraErrorView)の橋渡しに使う。
+enum QrCameraProblem { permissionDenied, unsupported, generic }
