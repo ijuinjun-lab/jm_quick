@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
+import 'confirmed/confirmed_event_list_page.dart';
 import 'confirmed/console_page.dart';
 import 'confirmed/event_create_page.dart';
 import 'confirmed/import_page.dart';
@@ -69,6 +70,8 @@ class JmQuickApp extends StatelessWidget {
           '/console' => ConfirmedConsolePage(
             initialEventId: uri.queryParameters['eventId'],
           ),
+          // 作成済みのconfirmedイベントを選ぶ入口(admin専用)。eventIdを失った後にここから管理画面へ戻れる。
+          '/console/events' => ConfirmedEventListRoute(),
           // 新方式のイベント作成(admin専用)
           '/console/events/new' => ConfirmedEventCreateRoute(),
           // 新方式の参加者CSV取込(admin専用)

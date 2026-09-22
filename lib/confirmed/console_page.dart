@@ -13,6 +13,7 @@ import 'winner_send_service.dart';
 
 /// 管理者に見せる機能(いずれも後続Phaseで実装。この画面は入口とロール別の境界だけ)。
 const List<String> adminFeatureLabels = [
+  'イベント一覧',
   'イベント作成',
   'イベント設定',
   'CSV取込',
@@ -68,6 +69,8 @@ class ConfirmedConsolePage extends StatelessWidget {
           ? null
           : '作成したイベントのID: $initialEventId(各機能で自動入力されます)',
       actions: {
+        // 作成済みイベントの一覧から選ぶ入口(admin専用)。eventIdを失った後もここから管理画面へ戻れる。
+        'イベント一覧': () => Navigator.of(context).pushNamed('/console/events'),
         // 参加者CSVの取込(admin専用。受付スタッフには表示しない)。作成直後のイベントIDを引き継ぐ
         'CSV取込': () => Navigator.of(context).pushNamed(
           (initialEventId ?? '').isEmpty
@@ -171,6 +174,8 @@ class _RoleHome extends StatelessWidget {
                   actions.containsKey(feature)
                       ? (feature == '当選メール送信'
                             ? '取込回ごとの送信・進行状況・失敗分の再送'
+                            : feature == 'イベント一覧'
+                            ? '作成済みのイベントから選んで管理する'
                             : feature == 'CSV取込'
                             ? '当選者CSVの取込(プレビュー確認後に確定・メールは送信されません)'
                             : feature == 'イベント作成'
