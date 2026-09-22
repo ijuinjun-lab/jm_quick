@@ -8,6 +8,7 @@ import 'access_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'import_models.dart';
+import 'import_profile.dart';
 import 'import_service.dart';
 
 /// 選択されたCSV(ファイル名と内容)。
@@ -84,8 +85,11 @@ class ConfirmedImportRoute extends StatelessWidget {
 }
 
 /// 参加者CSVの取込画面。
-///   イベント → CSVファイル選択 → 列の対応(mapping) → プレビュー → 内容確認 → 「取込を確定」→ 完了
-/// プレビューを行わないと確定できず、ファイルまたは列の対応を変えるとプレビューは無効になる(再プレビューが必要)。
+///   イベント → CSVファイル選択 → 自動解析 → プレビュー → 内容確認 → 「取込を確定」→ 完了
+/// Phase 11B-4から、通常運用ではCSVの列を利用者に選ばせない。[ConfirmedImportProfile](import_profile.dart)が
+/// 今年度の正式フォーマット(header名)からmappingを自動的に組み立てる。CSVのheaderがそのフォーマットと
+/// 一致しない場合は、プレビュー(サーバーへの問い合わせ)を試みる前に、対応していない形式として拒否する。
+/// プレビューを行わないと確定できず、ファイルを選び直すとプレビューは無効になる(再プレビューが必要)。
 /// 取込はサーバー(previewConfirmedImport / commitConfirmedImport)が正本で、人物の同一性による統合はしない(1行=1参加者)。
 /// 完了してもメールは送信されない(当選メールの送信は、別の画面で管理者が明示的に行う)。
 class ConfirmedImportPage extends StatefulWidget {
@@ -95,6 +99,7 @@ class ConfirmedImportPage extends StatefulWidget {
     required this.service,
     required this.picker,
     this.onDone,
+    this.profile = currentConfirmedImportProfile,
   });
   final String? eventId;
   final ImportService service;
@@ -102,6 +107,9 @@ class ConfirmedImportPage extends StatefulWidget {
 
   /// 完了後の「イベント管理へ戻る」。既定は新方式の管理画面(/console?eventId=…)。
   final void Function(BuildContext context, String eventId)? onDone;
+
+  /// 今年度の正式CSVフォーマット向けprofile(テストでは差し替える。既定は[currentConfirmedImportProfile])。
+  final ConfirmedImportProfile profile;
 
   @override
   State<ConfirmedImportPage> createState() => _ConfirmedImportPageState();
@@ -111,13 +119,14 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   ImportEventSummary? event;
   String? eventError;
   bool loadingEvent = false;
+  List<String> eventProgramMismatch = [];
 
   PickedCsv? file;
   CsvTable? table;
   String? fileError;
+  String? formatError;
+  List<String> missingHeadersList = [];
   ImportMapping? mapping;
-  // 「許可する値」等の入力欄の状態(モデルのオブジェクトごとに1つ。再描画で入力が消えないようにする)
-  final Map<String, TextEditingController> _valueControllers = {};
 
   bool previewing = false;
   bool committing = false;
@@ -139,14 +148,6 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     if (_eventFixed) _loadEvent();
   }
 
-  @override
-  void dispose() {
-    for (final c in _valueControllers.values) {
-      c.dispose();
-    }
-    super.dispose();
-  }
-
   // ---- イベント ----------------------------------------------------------------------------------
   // eventIdは常にNavigator経由(/console/import?eventId=…)で引き継ぐ。利用者に入力・選択させない。
   Future<void> _loadEvent() async {
@@ -156,15 +157,23 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       loadingEvent = true;
       eventError = null;
       event = null;
+      eventProgramMismatch = [];
       _resetFile();
     });
     try {
       final loaded = await widget.service.getEvent(id);
       if (!mounted) return;
-      setState(() => event = loaded);
-      // イベントを確認できたら、そのままファイル選択を開く(操作を1手減らす)。
+      final mismatch = missingProfileProgramsInEvent(
+        widget.profile,
+        loaded.programs,
+      );
+      setState(() {
+        event = loaded;
+        eventProgramMismatch = mismatch;
+      });
+      // イベントとprogramが確認できたら、そのままファイル選択を開く(操作を1手減らす)。
       // キャンセルされても、下の「CSVファイルを選択」から改めて選べる。
-      await _pickFile();
+      if (mismatch.isEmpty) await _pickFile();
     } on ImportException catch (e) {
       if (mounted) setState(() => eventError = e.message);
     } catch (_) {
@@ -179,18 +188,16 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     file = null;
     table = null;
     fileError = null;
+    formatError = null;
+    missingHeadersList = [];
     mapping = null;
-    for (final c in _valueControllers.values) {
-      c.dispose();
-    }
-    _valueControllers.clear();
     _invalidatePreview();
     result = null;
     commitError = null;
     commitAmbiguous = false;
   }
 
-  // ファイル・列の対応・program選択が変わったら、以前のプレビュー(と承認)は無効。再プレビューが必要
+  // ファイルが変わったら、以前のプレビュー(と承認)は無効。再プレビューが必要
   void _invalidatePreview() {
     previewedRequest = null;
     preview = null;
@@ -199,7 +206,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   }
 
   Future<void> _pickFile() async {
-    if (busy || event == null) return;
+    if (busy || event == null || eventProgramMismatch.isNotEmpty) return;
     final PickedCsv? picked;
     try {
       picked = await widget.picker();
@@ -212,36 +219,32 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       _resetFile();
       file = picked;
       try {
-        table = parseCsvBytes(picked!.bytes);
-        mapping = ImportMapping(
-          programs: [
-            for (final p in event!.programs)
-              ProgramMapping(programId: p.programId, name: p.name),
-          ],
-        );
+        final parsed = parseCsvBytes(picked!.bytes);
+        table = parsed;
+        // 通常運用ではCSVの列を利用者に選ばせない。CSVのheaderが今年度の正式フォーマットと一致しない場合は、
+        // プレビュー(サーバーへの問い合わせ)を試みる前に、ここで明確に拒否する。
+        final missing = widget.profile.missingHeaders(parsed.headers);
+        if (missing.isNotEmpty) {
+          formatError = 'このCSVは対応している参加者リストの形式ではありません。';
+          missingHeadersList = missing;
+          return;
+        }
+        mapping = buildMappingFromProfile(widget.profile, event!.programs);
       } on CsvParseException catch (e) {
         fileError = e.message;
       }
     });
   }
 
-  void _mappingChanged(VoidCallback change) {
-    if (busy) return;
-    setState(() {
-      change();
-      _invalidatePreview();
-      result = null;
-    });
-  }
-
   // ---- プレビュー ---------------------------------------------------------------------------------
-  List<String> get _mappingIssues => mapping?.validate() ?? const [];
-
   Future<void> _runPreview() async {
     if (busy || table == null || mapping == null || event == null) return;
-    final issues = _mappingIssues;
+    // profileから自動生成したmappingが不正になることは無いはずだが、念のため送信前に確認する(内部エラー)。
+    final issues = mapping!.validate();
     if (issues.isNotEmpty) {
-      setState(() => previewError = issues.join('\n'));
+      setState(
+        () => previewError = '内部エラー: 自動生成した列の対応を確認できませんでした。管理者へご連絡ください。',
+      );
       return;
     }
     final ImportRequest request;
@@ -280,6 +283,33 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     }
   }
 
+  // program別の「予定」(取込対象=ready行のうち、そのprogramへ参加する行)の概算。
+  // サーバーのpreview応答は氏名・人数などの値を返さない(データ最小化)ため、ローカルに保持している
+  // CSVの値(このprogramの人数列)と、サーバーが返す行ごとのprogramIds・分類を突き合わせて概算する。
+  // 表示のみに使い、実際の正本(plannedCount)は常にサーバー(commit時)が決める。
+  ({int participants, int headcount}) _programSummary(ProgramMapping g) {
+    final p = preview;
+    final t = table;
+    if (p == null || t == null || g.countColumn == null) {
+      return (participants: 0, headcount: 0);
+    }
+    final countIndex = t.headers.indexOf(g.countColumn!);
+    var participants = 0;
+    var headcount = 0;
+    for (final r in p.rows) {
+      if (r.classification != RowClass.ready) continue;
+      if (!r.programIds.contains(g.programId)) continue;
+      participants += 1;
+      if (countIndex < 0) continue;
+      final position = r.sourceRowNumber - 2;
+      if (position < 0 || position >= t.records.length) continue;
+      final record = t.records[position];
+      if (countIndex >= record.length) continue;
+      headcount += displayCountOf(record[countIndex]) ?? 0;
+    }
+    return (participants: participants, headcount: headcount);
+  }
+
   // ---- 確定 --------------------------------------------------------------------------------------
   int get _importCount =>
       (preview?.readyCount ?? 0) + approved.length; // 取込対象(取込対象の行+管理者が承認した確認の行)
@@ -295,7 +325,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     if (!_canCommit) return;
     final p = preview!;
     final request = previewedRequest!;
-    final enabled = mapping!.enabledPrograms;
+    final programs = mapping!.programs;
     setState(() => committing = true); // 確認ダイアログの間も、二重に押せないようにする
     final ok = await showDialog<bool>(
       context: context,
@@ -317,11 +347,14 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
               ),
               const SizedBox(height: 6),
               const Text(
-                'programの対応',
+                'program別予定',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
-              for (final g in enabled)
-                _confirmRow(g.name, '人数: ${g.countColumn}'),
+              for (final g in programs)
+                _confirmRow(
+                  g.name,
+                  '${_programSummary(g).headcount}人 / ${_programSummary(g).participants} participant',
+                ),
               const SizedBox(height: 10),
               const Text(
                 '取り込んでも、メールは送信されません。',
@@ -416,261 +449,27 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     child: SelectableText(text),
   );
 
-  Widget _columnDropdown({
-    required Key key,
-    required String label,
-    required String? value,
-    required void Function(String?) onChanged,
-    bool optional = false,
-  }) {
-    final headers = <String>{
-      ...table!.headers.where((h) => h.isNotEmpty),
-    }.toList();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: DropdownButtonFormField<String?>(
-        key: key,
-        isExpanded: true,
-        initialValue: value,
-        decoration: InputDecoration(labelText: label),
-        items: [
-          DropdownMenuItem<String?>(
-            value: null,
-            child: Text(
-              optional ? '(使わない)' : '選択してください',
-              style: const TextStyle(color: Colors.grey),
-            ),
-          ),
-          for (final h in headers)
-            DropdownMenuItem<String?>(
-              value: h,
-              child: Text(h, overflow: TextOverflow.ellipsis),
-            ),
-        ],
-        onChanged: busy ? null : onChanged,
-      ),
-    );
-  }
+  // CSVのheaderが今年度の正式フォーマットと一致しない(通常のUIで列mappingをさせる設計はもう無いため、
+  // ここで拒否するのが唯一の対応窓口)。不足している列名はadminへ表示してよい(個人情報ではない)。
+  Widget _formatErrorSection() => _section('対応していないCSVです', [
+    _notice(formatError!, key: const Key('format-error')),
+    if (missingHeadersList.isNotEmpty) ...[
+      const SizedBox(height: 6),
+      const Text('不足している列', style: TextStyle(fontWeight: FontWeight.bold)),
+      for (final h in missingHeadersList)
+        Text('・$h', key: ValueKey('missing-header-$h')),
+    ],
+  ]);
 
-  List<String> _lines(String text) => [
-    for (final line in text.split('\n'))
-      if (line.trim().isNotEmpty) line.trim(),
-  ];
-
-  // 選んだ列にあるCSVの値(参加・不参加の値を選ぶための参考。先頭の一部だけ)
-  String _valuesOf(String column) {
-    final index = table!.headers.indexOf(column);
-    if (index < 0) return '';
-    final seen = <String>[];
-    for (final record in table!.records) {
-      if (index >= record.length) continue;
-      final v = record[index].trim();
-      if (v.isNotEmpty && !seen.contains(v)) seen.add(v);
-      if (seen.length >= 8) break;
-    }
-    return seen.join(' / ');
-  }
-
-  Widget _valuesField(
-    Object owner,
-    String field,
-    String label,
-    List<String> current,
-    void Function(List<String>) onChanged, {
-    Key? key,
-  }) {
-    final controller = _valueControllers.putIfAbsent(
-      '${identityHashCode(owner)}-$field',
-      () => TextEditingController(text: current.join('\n')),
-    );
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: TextField(
-        key: key,
-        controller: controller,
-        enabled: !busy,
-        minLines: 1,
-        maxLines: 4,
-        decoration: InputDecoration(labelText: label, hintText: '1行に1つ'),
-        onChanged: (text) => _mappingChanged(() => onChanged(_lines(text))),
-      ),
-    );
-  }
-
-  Widget _mappingSection() {
-    final m = mapping!;
-    return _section('列の対応(CSVのどの列を使うか)', [
-      const Text('列は自動では選ばれません。CSVの列を、項目ごとに選んでください。'),
-      const SizedBox(height: 10),
-      _columnDropdown(
-        key: const Key('map-name'),
-        label: '氏名の列(必須)',
-        value: m.nameColumn,
-        onChanged: (v) => _mappingChanged(() => m.nameColumn = v),
-      ),
-      _columnDropdown(
-        key: const Key('map-email'),
-        label: 'メールアドレスの列(必須)',
-        value: m.emailColumn,
-        onChanged: (v) => _mappingChanged(() => m.emailColumn = v),
-      ),
-      _columnDropdown(
-        key: const Key('map-kana'),
-        label: 'かなの列',
-        value: m.kanaColumn,
-        optional: true,
-        onChanged: (v) => _mappingChanged(() => m.kanaColumn = v),
-      ),
-      _columnDropdown(
-        key: const Key('map-external'),
-        label: '参照コードの列',
-        value: m.externalIdColumn,
-        optional: true,
-        onChanged: (v) => _mappingChanged(() => m.externalIdColumn = v),
-      ),
-      _columnDropdown(
-        key: const Key('map-registered'),
-        label: '登録日時の列',
-        value: m.registeredAtColumn,
-        optional: true,
-        onChanged: (v) => _mappingChanged(() => m.registeredAtColumn = v),
-      ),
-      const Divider(),
-      const Text(
-        '行の確認(任意。区分などの列が指定した値の行だけを対象にします)',
-        style: TextStyle(fontWeight: FontWeight.bold),
-      ),
-      for (var i = 0; i < m.rowChecks.length; i++)
-        Card(
-          key: ValueKey('rowcheck-$i'),
-          child: Padding(
-            padding: const EdgeInsets.all(10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _columnDropdown(
-                  key: Key('rowcheck-column-$i'),
-                  label: '確認する列',
-                  value: m.rowChecks[i].column,
-                  onChanged: (v) =>
-                      _mappingChanged(() => m.rowChecks[i].column = v),
-                ),
-                if (m.rowChecks[i].column != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Text(
-                      'この列にある値: ${_valuesOf(m.rowChecks[i].column!)}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xff5c6670),
-                      ),
-                    ),
-                  ),
-                _valuesField(
-                  m.rowChecks[i],
-                  'allowed',
-                  '許可する値',
-                  m.rowChecks[i].allowedValues,
-                  (v) => m.rowChecks[i].allowedValues = v,
-                  key: Key('rowcheck-values-$i'),
-                ),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton.icon(
-                    onPressed: busy
-                        ? null
-                        : () => _mappingChanged(() => m.rowChecks.removeAt(i)),
-                    icon: const Icon(Icons.delete_outline),
-                    label: const Text('この確認を削除'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: OutlinedButton.icon(
-          key: const Key('add-rowcheck'),
-          onPressed: busy
-              ? null
-              : () => _mappingChanged(() => m.rowChecks.add(RowCheck())),
-          icon: const Icon(Icons.add),
-          label: const Text('行の確認を追加'),
-        ),
-      ),
-      const Divider(),
-      const Text(
-        'programごとの対応(イベントに定義されたprogram)',
-        style: TextStyle(fontWeight: FontWeight.bold),
-      ),
-      for (var i = 0; i < m.programs.length; i++)
-        _programMapping(m.programs[i], i),
-    ]);
-  }
-
-  Widget _programMapping(ProgramMapping g, int i) => Card(
-    key: ValueKey('program-map-$i'),
-    child: Padding(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SwitchListTile(
-            key: Key('program-enabled-$i'),
-            contentPadding: EdgeInsets.zero,
-            title: Text(
-              g.name,
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            subtitle: Text('ID: ${g.programId}'),
-            value: g.enabled,
-            onChanged: busy
-                ? null
-                : (v) => _mappingChanged(() => g.enabled = v),
-          ),
-          if (g.enabled) ...[
-            // 通常運用(当選・参加確定者リストの取込)は、人数の列の値だけでそのprogramへの参加を判定する
-            // (1以上=参加・plannedCountになる、空欄または0=参加しない)。参加/不参加を示す別の列は使わない。
-            _columnDropdown(
-              key: Key('program-count-$i'),
-              label: '人数の列(必須。1以上でそのprogramへ参加・予定人数になります)',
-              value: g.countColumn,
-              onChanged: (v) => _mappingChanged(() => g.countColumn = v),
-            ),
-            _columnDropdown(
-              key: Key('program-slot-$i'),
-              label: '時間枠の列(任意)',
-              value: g.slotColumn,
-              optional: true,
-              onChanged: (v) => _mappingChanged(() => g.slotColumn = v),
-            ),
-            if (g.slotColumn != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: DropdownButtonFormField<String>(
-                  key: Key('program-slotformat-$i'),
-                  isExpanded: true,
-                  initialValue: g.slotFormat,
-                  decoration: const InputDecoration(labelText: '時間枠の形式'),
-                  items: const [
-                    DropdownMenuItem(value: 'label', child: Text('文字(そのまま表示)')),
-                    DropdownMenuItem(
-                      value: 'timeRange',
-                      child: Text('時刻の範囲(例: 10:00-10:40)'),
-                    ),
-                  ],
-                  onChanged: busy
-                      ? null
-                      : (v) =>
-                            _mappingChanged(() => g.slotFormat = v ?? 'label'),
-                ),
-              ),
-          ],
-        ],
-      ),
+  Widget _autoAnalysisSection() => _section('自動解析結果', [
+    const Text(
+      'CSVの列を自動で認識しました(列を選ぶ操作は不要です)。',
+      key: Key('auto-mapping-ok'),
     ),
-  );
+    const SizedBox(height: 8),
+    for (final g in mapping!.programs)
+      Text('・${g.name}: 参加判定と人数を自動で読み取ります', key: ValueKey('auto-program-${g.programId}')),
+  ]);
 
   String _rowText(PreviewRow r) {
     final issues = r.issueCodes.map(importIssueLabel).join('、');
@@ -694,7 +493,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     return _section('プレビュー結果(まだ取り込まれていません)', [
       if (p.existingStatus == 'committed')
         _notice(
-          'この内容(ファイルと列の対応)は、既に取り込み済みです(第${p.existingSequence ?? '?'}回)。もう一度取り込んでも、参加者は増えません。',
+          'この内容(ファイル)は、既に取り込み済みです(第${p.existingSequence ?? '?'}回)。もう一度取り込んでも、参加者は増えません。',
           color: const Color(0xffe7f5ec),
           key: const Key('existing-committed'),
         ),
@@ -706,7 +505,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         ),
       if (p.sameFileBatches.isNotEmpty && p.existingStatus == null)
         _notice(
-          '参考: 同じファイルが、別の列の対応で取り込まれています(${p.sameFileBatches.map((b) => '第${b.sequence}回').join('、')})。取り込みを止めるものではありません。',
+          '参考: 同じファイルが、既に別の回として取り込まれています(${p.sameFileBatches.map((b) => '第${b.sequence}回').join('、')})。取り込みを止めるものではありません。',
           color: const Color(0xfffff1cf),
         ),
       for (final column in p.warningColumns)
@@ -719,8 +518,18 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       InfoRow('取込対象', '${p.readyCount}件'),
       InfoRow('確認が必要', '${p.reviewCount}件'),
       InfoRow('エラー', '${p.errorCount}件(取り込まれません)'),
-      InfoRow('参加者の候補', '${p.participantCandidateCount}件'),
-      InfoRow('programの参加の候補', '${p.attendanceCandidateCount}件'),
+      const SizedBox(height: 6),
+      const Text('program別予定', style: TextStyle(fontWeight: FontWeight.bold)),
+      for (final g in mapping!.programs)
+        Builder(
+          builder: (context) {
+            final s = _programSummary(g);
+            return Text(
+              '${g.name}　${s.headcount}人 / ${s.participants} participant',
+              key: ValueKey('program-summary-${g.programId}'),
+            );
+          },
+        ),
       if (p.issueCounts.isNotEmpty) ...[
         const SizedBox(height: 6),
         const Text('判定の内訳', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -818,7 +627,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (_importCount == 0)
         const Padding(
           padding: EdgeInsets.only(top: 6),
-          child: Text('取り込める行がありません。CSVまたは列の対応を見直してください。'),
+          child: Text('取り込める行がありません。CSVの内容を見直してください。'),
         ),
       if (commitError != null)
         _notice(commitError!, key: const Key('commit-error')),
@@ -928,11 +737,16 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                 Text('・${p.name}(ID: ${p.programId})'),
               const SizedBox(height: 6),
               const Text('参加者は、このイベントへ取り込まれます。取り込むだけでは、メールは送信されません。'),
+              if (eventProgramMismatch.isNotEmpty)
+                _notice(
+                  'このイベントには、CSVで想定しているprogramがありません(${eventProgramMismatch.join('、')})。イベントの設定をご確認ください。',
+                  key: const Key('event-program-mismatch'),
+                ),
             ],
           ]),
-          if (event != null)
+          if (event != null && eventProgramMismatch.isEmpty)
             _section('CSVファイル', [
-              const Text('UTF-8(BOMあり・なし)のCSVを選択してください。列名は先頭行から読み取ります。'),
+              const Text('UTF-8(BOMあり・なし)のCSVを選択してください。列は自動で解析します(選ぶ操作は不要です)。'),
               const SizedBox(height: 8),
               OutlinedButton.icon(
                 key: const Key('pick-file'),
@@ -948,18 +762,11 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
               if (fileError != null)
                 _notice(fileError!, key: const Key('file-error')),
             ]),
-          if (mapping != null && table != null) _mappingSection(),
+          if (formatError != null) _formatErrorSection(),
+          if (mapping != null && table != null) _autoAnalysisSection(),
           if (mapping != null && table != null)
             _section('プレビュー', [
               const Text('プレビューでは何も取り込まれません。内容を確認してから取り込みます。'),
-              if (_mappingIssues.isNotEmpty && previewError == null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    '未設定の項目: ${_mappingIssues.length}件(プレビュー時に表示します)',
-                    style: const TextStyle(color: Color(0xff5c6670)),
-                  ),
-                ),
               const SizedBox(height: 8),
               FilledButton(
                 key: const Key('run-preview'),

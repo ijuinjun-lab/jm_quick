@@ -1,6 +1,8 @@
-// Phase 11B: confirmed CSV取込の画面・サービス。通信はすべて差し替え(外部通信0)、Firestoreは使わない。データはすべて完全な架空。
-//  - adminだけ到達でき、イベント表示→ファイル選択→列の対応→プレビュー→内容確認→確定→完了の順でしか進めない
-//  - プレビューなしでは確定できず、ファイル・列の対応を変えるとプレビューは無効になる
+// Phase 11B-4: confirmed CSV取込の画面・サービス。通信はすべて差し替え(外部通信0)、Firestoreは使わない。データはすべて完全な架空。
+//  - adminだけ到達でき、イベント表示→CSVファイル選択→自動解析→プレビュー→内容確認→確定→完了の順でしか進めない
+//  - 通常運用ではCSVの列を利用者に選ばせない(mapping UIは表示しない)。CSVのheaderが今年度の正式フォーマットと
+//    一致しない場合は、プレビュー前に明確に拒否する
+//  - プレビューなしでは確定できず、ファイルを選び直すとプレビューは無効になる
 //  - 二重クリックで確定は1回。通信失敗後は同じ内容(同じbatchId)で再試行でき、完了とは表示しない
 import 'dart:async';
 import 'dart:convert';
@@ -19,17 +21,29 @@ import 'package:jm_quick/confirmed/login_page.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 
-final Map<String, dynamic> _fixture =
-    jsonDecode(
-          File(
-            'functions/test/fixtures/import_ui_case.json',
-          ).readAsStringSync(),
-        )
-        as Map<String, dynamic>;
+// 今年度の正式フォーマット(sipposample形式)向けの、完全な架空CSV(20列。実CSVの主要列+未使用列)。
+const List<String> _headers = [
+  '区分', 'rd', '氏名', 'かな', 'メールアドレス', '都道府県', '性別', '年代',
+  '午前参加時間', '午前参加人数', '午前相談', '午後参加時間', '午後参加人数', '午後相談',
+  'トークショー', 'トークショー人数', 'キャンセル待希望枠', 'キャンセル待希望人数', '登録日時', '備考',
+];
+
+String _row(int i) => [
+  '新規申込', 'R$i', '架空参加者$i', 'かくうさんかしゃ', 'sippo$i@example.invalid',
+  '架空県', '未回答', '未回答', '10:00-11:00', '2', '', '13:00-14:00', '1', '',
+  '参加を希望する', '1', '', '', '2026年01月02日 03時04分05秒', '',
+].join(',');
+
+/// 5レコード(通常2件・空1件・通常2件)。header名だけで自動解析できる、今年度の正式フォーマット。
+String _defaultCsvText() {
+  final blank = List.filled(_headers.length, '').join(',');
+  final rows = [_row(1), _row(2), blank, _row(3), _row(4)];
+  return '${_headers.join(',')}\n${rows.join('\n')}\n';
+}
 
 PickedCsv _csv([String? text, String name = '架空取込.csv']) => (
   name: name,
-  bytes: Uint8List.fromList(utf8.encode(text ?? _fixture['csvText'] as String)),
+  bytes: Uint8List.fromList(utf8.encode(text ?? _defaultCsvText())),
 );
 
 const _event = ImportEventSummary(
@@ -38,10 +52,19 @@ const _event = ImportEventSummary(
   startAt: null,
   venue: '架空ホール',
   programs: [
-    (programId: 'program-a', name: '架空プログラムA', order: 0),
-    (programId: 'program-b', name: '架空プログラムB', order: 1),
-    (programId: 'custom-zeta-9', name: '架空プログラムZ', order: 2),
+    (programId: 'program-1', name: '架空プログラムA', order: 0),
+    (programId: 'program-2', name: '架空プログラムB', order: 1),
+    (programId: 'program-3', name: '架空プログラムZ', order: 2),
   ],
+);
+
+/// program-1/2/3を持たないイベント(このprofileでは取込に対応していない)。
+const _eventWithoutProfilePrograms = ImportEventSummary(
+  eventId: 'evother0123456789',
+  eventName: '別方式のイベント(架空)',
+  startAt: null,
+  venue: '架空ホール2',
+  programs: [(programId: 'program-x', name: '架空プログラムX', order: 0)],
 );
 
 ImportPreview _preview({
@@ -72,7 +95,7 @@ ImportPreview _preview({
         'importRecordId': 'x',
         'classification': 'ready',
         'issueCodes': [],
-        'programIds': ['program-a'],
+        'programIds': ['program-1'],
       },
     for (var i = 0; i < review; i++)
       {
@@ -94,10 +117,11 @@ ImportPreview _preview({
 });
 
 class FakeImportService implements ImportService {
-  FakeImportService({this.previewHandler, this.commitHandler, this.eventError});
+  FakeImportService({this.previewHandler, this.commitHandler, this.eventError, this.event});
   final Future<ImportPreview> Function(ImportRequest)? previewHandler;
   final Future<ImportResult> Function(ImportRequest, List<int>)? commitHandler;
   final ImportException? eventError;
+  final ImportEventSummary? event;
   final List<String> eventCalls = [];
   final List<ImportRequest> previews = [];
   final List<({ImportRequest request, List<int> approved})> commits = [];
@@ -106,7 +130,7 @@ class FakeImportService implements ImportService {
   Future<ImportEventSummary> getEvent(String eventId) async {
     eventCalls.add(eventId);
     if (eventError != null) throw eventError!;
-    return _event;
+    return event ?? _event;
   }
 
   @override
@@ -162,22 +186,11 @@ Future<void> _open(
   await tester.pumpAndSettle();
 }
 
-Future<void> _select(WidgetTester tester, String key, String label) async {
-  await tester.ensureVisible(find.byKey(Key(key)));
-  await tester.tap(find.byKey(Key(key)));
-  await tester.pumpAndSettle();
-  await tester.tap(find.text(label).last);
-  await tester.pumpAndSettle();
-}
-
-Future<void> _pickAndMap(WidgetTester tester) async {
+/// CSVファイルを選ぶだけ(通常運用では列を選ぶ操作は無い。イベント読込直後に自動でも開くが、
+/// テストでは明示的に選び直すケースのために残す)。
+Future<void> _pick(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('pick-file')));
   await tester.pumpAndSettle();
-  await _select(tester, 'map-name', '氏名');
-  await _select(tester, 'map-email', 'メールアドレス');
-  await _select(tester, 'program-count-0', '午前参加人数');
-  await _select(tester, 'program-count-1', '午後参加人数');
-  await _select(tester, 'program-count-2', 'トークショー人数');
 }
 
 Future<void> _preview_(WidgetTester tester) async {
@@ -258,7 +271,7 @@ void main() {
         expect(find.text('PHASE11 STEP3 TEST(架空)'), findsOneWidget);
         expect(find.text('架空ホール'), findsOneWidget);
         expect(find.textContaining('架空プログラムA'), findsWidgets);
-        expect(find.textContaining('custom-zeta-9'), findsWidgets);
+        expect(find.textContaining('program-3'), findsWidgets);
         expect(find.byKey(const Key('event-id')), findsNothing);
         expect(service.eventCalls, ['evfixture0123456789']);
         expect(find.byKey(const Key('pick-file')), findsOneWidget);
@@ -295,25 +308,39 @@ void main() {
     );
 
     testWidgets(
+      'このprofileが想定するprogram(program-1/2/3)が無いイベントでは、CSVファイル選択に進めず理由を表示する(ハードコードした特別扱いはしない。データの突合で検出する)',
+      (tester) async {
+        final service = FakeImportService(event: _eventWithoutProfilePrograms);
+        var picked = 0;
+        await _open(
+          tester,
+          service,
+          eventId: 'evother0123456789',
+          pick: () {
+            picked += 1;
+            return _csv();
+          },
+        );
+        expect(find.byKey(const Key('event-program-mismatch')), findsOneWidget);
+        expect(find.textContaining('program-1'), findsWidgets);
+        expect(find.byKey(const Key('pick-file')), findsNothing);
+        expect(picked, 0, reason: 'programが揃っていなければファイル選択を自動でも開かない');
+      },
+    );
+
+    testWidgets(
       '正常なeventId付きで開くと、イベントを取得した直後にファイル選択が自動で始まる(「CSVファイルを選択」を押さなくてよい)',
       (tester) async {
         final service = FakeImportService();
         await _open(tester, service); // pickは既定(_csv)。ここではpick-fileを一切タップしない。
         expect(service.eventCalls, ['evfixture0123456789']);
         expect(find.text('選択中: 架空取込.csv'), findsOneWidget);
-        expect(find.text('5行 / 15列'), findsOneWidget);
+        expect(find.text('5行 / ${_headers.length}列'), findsOneWidget);
         expect(find.text('PHASE11 STEP3 TEST(架空)'), findsOneWidget);
         expect(find.textContaining('架空プログラムA'), findsWidgets);
-        // 自動で選ばれたファイルの列は、まだ自動では選ばれていない(要件どおり)
-        expect(find.byKey(const Key('map-name')), findsOneWidget);
-        expect(
-          tester
-              .widget<DropdownButtonFormField<String?>>(
-                find.byKey(const Key('map-name')),
-              )
-              .initialValue,
-          isNull,
-        );
+        // CSVの列は自動で認識され、選ぶ操作は不要(mapping UIを表示しない)
+        expect(find.byKey(const Key('auto-mapping-ok')), findsOneWidget);
+        expect(find.byKey(const Key('run-preview')), findsOneWidget);
       },
     );
 
@@ -337,7 +364,7 @@ void main() {
         find.text('PHASE11 STEP3 TEST(架空)'),
         findsOneWidget,
       ); // イベント情報は表示されたまま
-      expect(find.byKey(const Key('map-name')), findsNothing);
+      expect(find.byKey(const Key('auto-mapping-ok')), findsNothing);
       await tester.tap(find.byKey(const Key('pick-file')));
       await tester.pumpAndSettle();
       expect(calls, 2, reason: '「CSVファイルを選択」から再度、手動で開ける');
@@ -345,9 +372,59 @@ void main() {
     });
   });
 
+  group('対応していないCSV(通常のUIで列mappingをさせず、header名で判定する)', () {
+    testWidgets('必要な列が欠けているCSVは、プレビュー前に明確に拒否し、不足している列を表示する', (
+      tester,
+    ) async {
+      final service = FakeImportService();
+      await _open(
+        tester,
+        service,
+        pick: () => _csv('氏名,メールアドレス\n架空太郎,taro@example.invalid\n', '旧形式.csv'),
+      );
+      expect(find.byKey(const Key('format-error')), findsOneWidget);
+      expect(find.textContaining('対応している参加者リストの形式ではありません'), findsOneWidget);
+      // 不足している列名を確認できる(個人情報ではないので表示してよい)
+      expect(find.byKey(const Key('missing-header-かな')), findsOneWidget);
+      expect(find.byKey(const Key('missing-header-午前参加人数')), findsOneWidget);
+      expect(find.byKey(const Key('auto-mapping-ok')), findsNothing);
+      expect(find.byKey(const Key('run-preview')), findsNothing);
+      expect(service.previews, isEmpty);
+    });
+
+    testWidgets('列順が変わっても、header名だけで自動解析できる(拒否されない)', (tester) async {
+      final shuffledHeaders = [..._headers.reversed];
+      final row1 = _row(1).split(',');
+      final shuffledRow = [
+        for (final h in shuffledHeaders) row1[_headers.indexOf(h)],
+      ].join(',');
+      await _open(
+        tester,
+        FakeImportService(),
+        pick: () => _csv('${shuffledHeaders.join(',')}\n$shuffledRow\n'),
+      );
+      expect(find.byKey(const Key('format-error')), findsNothing);
+      expect(find.byKey(const Key('auto-mapping-ok')), findsOneWidget);
+    });
+
+    testWidgets('余分な列(このフォーマットの中の未使用列)があっても、対応している形式として受け入れる', (
+      tester,
+    ) async {
+      final extraHeaders = [..._headers, '未知の自由記述列'];
+      final row1 = '${_row(1)},何かの値';
+      await _open(
+        tester,
+        FakeImportService(),
+        pick: () => _csv('${extraHeaders.join(',')}\n$row1\n'),
+      );
+      expect(find.byKey(const Key('format-error')), findsNothing);
+      expect(find.byKey(const Key('auto-mapping-ok')), findsOneWidget);
+    });
+  });
+
   group('正常フロー', () {
     testWidgets(
-      'ファイル選択→列の対応→プレビュー→(確認が必要な行を承認)→内容確認→確定→完了。確定に送るのはプレビューしたリクエストそのもの',
+      'ファイル選択→自動解析→プレビュー→(確認が必要な行を承認)→内容確認→確定→完了。確定に送るのはプレビューしたリクエストそのもの',
       (tester) async {
         final service = FakeImportService();
         String? doneEvent;
@@ -357,19 +434,27 @@ void main() {
           findsNothing,
           reason: 'プレビュー前は確定できない',
         );
-        await _pickAndMap(tester);
         expect(find.text('選択中: 架空取込.csv'), findsOneWidget);
-        expect(find.text('5行 / 15列'), findsOneWidget);
+        expect(find.text('5行 / ${_headers.length}列'), findsOneWidget);
         await _preview_(tester);
         expect(service.previews.length, 1);
         expect(service.commits, isEmpty, reason: 'プレビューでは何も確定しない');
         final previewed = service.previews.single;
         expect(previewed.json['eventId'], 'evfixture0123456789');
-        expect(previewed.json['totalRecords'], 5);
+        // 列mappingは利用者の操作なしで自動的に組み立てられ、参加/不参加を示す実際の判定に使う
+        // participationColumn等が、サーバーの契約どおりに設定される。
+        final mapping = previewed.json['mapping'] as Map;
+        final programs = mapping['programs'] as List;
+        final program1 = programs.first as Map;
+        expect(program1['programId'], 'program-1');
+        expect(program1['participationColumn'], '午前参加時間');
+        expect(program1['countColumn'], '午前参加人数');
         expect(find.text('プレビュー結果(まだ取り込まれていません)'), findsOneWidget);
         expect(find.text('取込対象'), findsWidgets);
         expect(find.textContaining('行の確認(区分など)に合いません'), findsWidgets);
         expect(find.text('取り込まれる件数: 3件(取込対象+承認した確認の行)'), findsOneWidget);
+        // program別予定が表示される(programIdとCSV列名を利用者へ結び付けさせる操作は無いが、結果は見える)
+        expect(find.byKey(const Key('program-summary-program-1')), findsOneWidget);
         await tester.ensureVisible(find.byKey(const ValueKey('review-20')));
         await tester.tap(find.byKey(const ValueKey('review-20')));
         await tester.pumpAndSettle();
@@ -388,7 +473,7 @@ void main() {
         expect(
           find.descendant(
             of: find.byType(AlertDialog),
-            matching: find.textContaining('午前参加人数'),
+            matching: find.textContaining('program別予定'),
           ),
           findsOneWidget,
         );
@@ -429,7 +514,6 @@ void main() {
     testWidgets('確認ダイアログでキャンセルすれば確定しない。承認しない確認行は取り込まれない(承認は空)', (tester) async {
       final service = FakeImportService();
       await _open(tester, service);
-      await _pickAndMap(tester);
       await _preview_(tester);
       await _commitDialog(tester);
       await tester.tap(find.text('キャンセル'));
@@ -443,43 +527,26 @@ void main() {
   });
 
   group('プレビュー必須・無効化', () {
-    testWidgets('プレビュー前は確定の入口がない。列の対応が不足していればプレビューできず、理由を表示する(サーバーへ送らない)', (
-      tester,
-    ) async {
+    testWidgets('プレビュー前は確定の入口がない', (tester) async {
       final service = FakeImportService();
       await _open(tester, service);
-      await tester.tap(find.byKey(const Key('pick-file')));
-      await tester.pumpAndSettle();
       expect(find.byKey(const Key('commit')), findsNothing);
-      await _preview_(tester);
-      expect(find.textContaining('氏名の列を選択してください'), findsOneWidget);
       expect(service.previews, isEmpty);
     });
 
-    testWidgets('プレビュー後に列の対応・programの選択を変えると、プレビュー結果は消えて確定できなくなる(再プレビューが必要)', (
+    testWidgets('プレビュー後にファイルを選び直すと、プレビュー結果は消えて確定できなくなる(再プレビューが必要)', (
       tester,
     ) async {
       final service = FakeImportService();
       await _open(tester, service);
-      await _pickAndMap(tester);
       await _preview_(tester);
       expect(find.byKey(const Key('commit')), findsOneWidget);
-      await _select(tester, 'map-kana', 'かな');
+      await _pick(tester);
       expect(find.byKey(const Key('commit')), findsNothing);
       expect(find.text('プレビュー結果(まだ取り込まれていません)'), findsNothing);
       await _preview_(tester);
       expect(find.byKey(const Key('commit')), findsOneWidget);
       expect(service.previews.length, 2);
-      await tester.ensureVisible(find.byKey(const Key('program-enabled-2')));
-      await tester.tap(find.byKey(const Key('program-enabled-2')));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('commit')), findsNothing);
-      await _preview_(tester);
-      expect(find.byKey(const Key('commit')), findsOneWidget);
-      // 別のファイルを選び直しても無効になり、列の対応も選び直しになる
-      await tester.tap(find.byKey(const Key('pick-file')));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('commit')), findsNothing);
       expect(service.commits, isEmpty);
     });
 
@@ -490,7 +557,6 @@ void main() {
         previewHandler: (_) async => _preview(ready: 0, review: 1, error: 1),
       );
       await _open(tester, service);
-      await _pickAndMap(tester);
       await _preview_(tester);
       expect(
         tester.widget<FilledButton>(find.byKey(const Key('commit'))).onPressed,
@@ -522,7 +588,6 @@ void main() {
         },
       );
       await _open(tester, service);
-      await _pickAndMap(tester);
       await _preview_(tester);
       await _commitDialog(tester);
       await tester.tap(find.text('取込を確定'));
@@ -563,7 +628,6 @@ void main() {
         },
       );
       await _open(tester, service);
-      await _pickAndMap(tester);
       await _preview_(tester);
       await _commitDialog(tester);
       await tester.tap(find.text('取込を確定'));
@@ -600,7 +664,6 @@ void main() {
           }),
         );
         await _open(tester, service);
-        await _pickAndMap(tester);
         await _preview_(tester);
         await _commitDialog(tester);
         await tester.tap(find.text('取込を確定'));
@@ -627,12 +690,11 @@ void main() {
           tester,
           FakeImportService(
             previewHandler: (_) async =>
-                throw const ImportException('列の対応(mapping)に問題があります。'),
+                throw const ImportException('サーバーで内容を確認できませんでした。'),
           ),
         );
-        await _pickAndMap(tester);
         await _preview_(tester);
-        expect(find.text('列の対応(mapping)に問題があります。'), findsOneWidget);
+        expect(find.text('サーバーで内容を確認できませんでした。'), findsOneWidget);
         expect(find.byKey(const Key('commit')), findsNothing);
         await tester.pumpWidget(const SizedBox());
         await _open(
@@ -642,7 +704,6 @@ void main() {
                 _preview(existing: 'committed', existingSequence: 2),
           ),
         );
-        await _pickAndMap(tester);
         await _preview_(tester);
         expect(find.byKey(const Key('existing-committed')), findsOneWidget);
         expect(find.textContaining('第2回'), findsWidgets);
@@ -653,7 +714,6 @@ void main() {
             previewHandler: (_) async => _preview(existing: 'committing'),
           ),
         );
-        await _pickAndMap(tester);
         await _preview_(tester);
         expect(find.byKey(const Key('existing-incomplete')), findsOneWidget);
       },
@@ -661,72 +721,50 @@ void main() {
   });
 
   group('ファイル・レイアウト', () {
-    testWidgets('UTF-8でないCSV・空のCSVは、対応形式を示して拒否し、列の対応に進まない', (tester) async {
+    testWidgets('UTF-8でないCSV・空のCSVは、対応形式を示して拒否し、プレビューに進まない', (tester) async {
       final sjis = (
         name: 'sjis.csv',
         bytes: Uint8List.fromList([0x82, 0xA0, 0x82, 0xA2, 0x0A, 0x82, 0xA0]),
       );
       await _open(tester, FakeImportService(), pick: () => sjis);
-      await tester.tap(find.byKey(const Key('pick-file')));
-      await tester.pumpAndSettle();
+      await _pick(tester);
       expect(find.textContaining('UTF-8'), findsWidgets);
-      expect(find.byKey(const Key('map-name')), findsNothing);
+      expect(find.byKey(const Key('auto-mapping-ok')), findsNothing);
       expect(find.byKey(const Key('run-preview')), findsNothing);
     });
 
-    testWidgets('列は自動では選ばれない(初期は未選択)。ファイルを選び直すと列の対応も選び直しになる', (tester) async {
+    testWidgets('ファイルを選び直すと、自動解析もプレビューもやり直しになる', (tester) async {
       await _open(tester, FakeImportService());
-      await tester.tap(find.byKey(const Key('pick-file')));
-      await tester.pumpAndSettle();
-      expect(find.text('選択してください'), findsWidgets);
-      await _select(tester, 'map-name', '氏名');
-      await tester.tap(find.byKey(const Key('pick-file')));
-      await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<DropdownButtonFormField<String?>>(
-              find.byKey(const Key('map-name')),
-            )
-            .initialValue,
-        isNull,
-      );
+      expect(find.byKey(const Key('auto-mapping-ok')), findsOneWidget);
+      await _preview_(tester);
+      expect(find.byKey(const Key('commit')), findsOneWidget);
+      await _pick(tester);
+      expect(find.byKey(const Key('commit')), findsNothing);
+      expect(find.byKey(const Key('auto-mapping-ok')), findsOneWidget, reason: '選び直した新しいファイルはまた自動解析される');
     });
 
-    testWidgets('390px幅でも、取込画面全体(mapping・プレビュー・確認)で重大なoverflowや例外が出ない', (
+    testWidgets('390px幅でも、取込画面全体(自動解析・プレビュー・確認)で重大なoverflowや例外が出ない', (
       tester,
     ) async {
       final service = FakeImportService();
       await _open(tester, service, width: 390);
-      await _pickAndMap(tester);
-      await tester.tap(find.byKey(const Key('add-rowcheck')));
-      await tester.pumpAndSettle();
-      await _select(tester, 'rowcheck-column-0', '区分');
-      await tester.enterText(
-        find.byKey(const Key('rowcheck-values-0')),
-        '新規申込',
-      );
-      await _select(tester, 'program-slot-0', '午前参加時間');
+      expect(find.byKey(const Key('auto-mapping-ok')), findsOneWidget);
       await _preview_(tester);
       await _commitDialog(tester);
       expect(find.text('この内容で取り込みます'), findsOneWidget);
       await tester.tap(find.text('キャンセル'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      // 行の確認・人数の列が、リクエストのmappingに反映される(サーバーの契約どおり)。
-      // 参加/不参加は別の列を見ない(人数の列だけで判定する)ため、participationColumn等は送らない。
+      // 参加/不参加の実際の判定に使うmapping(サーバーの契約どおり)が、利用者の操作なしで送られる。
       final mapping = service.previews.single.json['mapping'] as Map;
-      expect(mapping['rowChecks'], [
-        {
-          'column': '区分',
-          'allowedValues': ['新規申込'],
-        },
-      ]);
-      final a = (mapping['programs'] as List).first as Map;
-      expect(a['countColumn'], '午前参加人数');
-      expect(a['slotColumn'], '午前参加時間');
-      expect(a.containsKey('participationColumn'), isFalse);
-      expect(a.containsKey('attendingValues'), isFalse);
-      expect(a.containsKey('notAttendingValues'), isFalse);
+      final program1 = (mapping['programs'] as List).first as Map;
+      expect(program1['countColumn'], '午前参加人数');
+      expect(program1['slotColumn'], '午前参加時間');
+      expect(program1['participationColumn'], '午前参加時間');
+      expect(program1['notAttendingValues'], ['参加を希望しない']);
+      final program3 = (mapping['programs'] as List)[2] as Map;
+      expect(program3['participationColumn'], 'トークショー');
+      expect(program3['attendingValues'], ['参加を希望する']);
     });
   });
 
@@ -843,6 +881,7 @@ void main() {
     ).readAsLinesSync().where((l) => !l.trimLeft().startsWith('//')).join('\n');
     final files = [
       'lib/confirmed/import_models.dart',
+      'lib/confirmed/import_profile.dart',
       'lib/confirmed/import_service.dart',
       'lib/confirmed/import_page.dart',
     ];
@@ -925,35 +964,46 @@ void main() {
       expect(text.contains('widget.eventId'), isTrue);
     });
     test(
-      '通常運用(Phase 11B-3)は人数の列だけで参加を判定する。参加の列・参加/不参加とみなす値・空欄チェックボックスは画面に無い',
+      '通常運用(Phase 11B-4)は列mapping UIを一切表示しない(氏名・メール・かな・参照コード・登録日時・行の確認・'
+      'programごとの人数/時間枠/参加列/参加値/不参加値、いずれも利用者に選ばせない)。CSVのheaderから自動的に組み立てる',
       () {
         final text = code('lib/confirmed/import_page.dart');
         for (final forbidden in [
+          "Key('map-name')",
+          "Key('map-email')",
+          "Key('map-kana')",
+          "Key('map-external')",
+          "Key('map-registered')",
+          "Key('program-count-",
+          "Key('program-slot-",
+          "Key('program-enabled-",
           "Key('program-participation-",
           "Key('program-attending-",
           "Key('program-notattending-",
-          '参加の列',
-          '参加とみなす値',
-          '参加しないとみなす値',
-          '参加しない」とみなす',
+          "Key('rowcheck-column-",
+          "Key('rowcheck-values-",
+          "Key('add-rowcheck')",
+          'DropdownButtonFormField',
         ]) {
           expect(text.contains(forbidden), isFalse, reason: forbidden);
         }
-        // 人数・時間枠の列だけは引き続き選べる。
-        expect(text.contains("Key('program-count-"), isTrue);
-        expect(text.contains("Key('program-slot-"), isTrue);
+        // 自動解析の結果(選択の操作なし)は表示される。
+        expect(text.contains("Key('auto-mapping-ok')"), isTrue);
+        expect(text.contains('ConfirmedImportProfile'), isTrue);
+      },
+    );
+    test(
+      '「programIdの文字列なら必ずこのCSV列」という対応をシステム全体へハードコードしない(profileの外に置かない)',
+      () {
+        // import_profile.dart だけが、実際のprogramId(program-1等)とCSV列名の対応を持つ。
+        // 画面・モデルのコードは、その対応を経由するだけで、programIdを直接特別扱いしない。
         for (final path in [
-          'lib/confirmed/import_models.dart',
           'lib/confirmed/import_page.dart',
+          'lib/confirmed/import_models.dart',
         ]) {
-          final modelText = code(path);
-          for (final forbidden in [
-            'participationColumn',
-            'attendingValues',
-            'notAttendingValues',
-            'emptyMeansNotAttending',
-          ]) {
-            expect(modelText.contains(forbidden), isFalse, reason: '$path: $forbidden');
+          final text = code(path);
+          for (final literal in ['program-1', 'program-2', 'program-3']) {
+            expect(text.contains(literal), isFalse, reason: '$path: $literal');
           }
         }
       },

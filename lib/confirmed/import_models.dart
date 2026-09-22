@@ -121,12 +121,12 @@ class RowCheck {
 
 /// program1つ分の列の対応。programIdは作成済みイベントの program(サーバーが返す)から選ぶ。
 ///
-/// ■ 今回の通常運用(当選・参加確定者リストの取込)は「人数の列の値が1以上ならそのprogramへ参加、
-///   空欄または0なら参加しない」という人数だけの判定に単純化している。参加/不参加を別の列(区分等)で
-///   示すCSV向けの participationColumn / attendingValues / notAttendingValues / emptyMeans は、
-///   サーバー(functions/confirmed/import_mapping.js・import_rows.js)側では元々すべて省略可能な設定
-///   だったため(省略時は"参加列が無いときは人数だけで判定する"という既存の分岐が使われる)、
-///   このクライアントでは公開しない(値を送らない)。サーバー契約・検証ロジックは変更していない。
+/// ■ Phase 11B-4から、通常運用ではこれらの値を利用者が選ばない(画面には出さない)。
+///   [ConfirmedImportProfile](import_profile.dart)が、今年度の正式CSVフォーマットのheader名から
+///   自動的に組み立てる(programIdとCSV列名を利用者に結び付けさせない)。
+///   participationColumn / attendingValues / notAttendingValues / emptyMeans は、サーバー
+///   (functions/confirmed/import_mapping.js・import_rows.js)の既存の分岐(参加/不参加を示す値で判定、
+///   省略時は人数だけで判定)をそのまま使うために必要な値で、サーバー契約・検証ロジックは変更していない。
 class ProgramMapping {
   ProgramMapping({required this.programId, required this.name});
   final String programId;
@@ -135,9 +135,17 @@ class ProgramMapping {
   String? countColumn;
   String? slotColumn;
   String slotFormat = 'label';
+  String? participationColumn;
+  List<String> attendingValues = [];
+  List<String> notAttendingValues = [];
+  bool emptyMeansNotAttending = false;
 
   Map<String, dynamic> toJson() => {
     'programId': programId,
+    if (participationColumn != null) 'participationColumn': participationColumn,
+    if (attendingValues.isNotEmpty) 'attendingValues': attendingValues,
+    if (notAttendingValues.isNotEmpty) 'notAttendingValues': notAttendingValues,
+    if (emptyMeansNotAttending) 'emptyMeans': 'notAttending',
     if (slotColumn != null) 'slotColumn': slotColumn,
     if (slotColumn != null) 'slotFormat': slotFormat,
     'countColumn': countColumn,
@@ -197,6 +205,9 @@ class ImportMapping {
       if (c.column != null && c.allowedValues.isNotEmpty) add(c.column);
     }
     for (final p in enabledPrograms) {
+      // サーバー(functions/confirmed/import_mapping.js の mappedColumns)と同じ順序
+      // (participationColumn → slotColumn → countColumn)。同じ列名を複数回指定しても重複させない。
+      add(p.participationColumn);
       add(p.slotColumn);
       add(p.countColumn);
     }
