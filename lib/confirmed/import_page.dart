@@ -108,7 +108,6 @@ class ConfirmedImportPage extends StatefulWidget {
 }
 
 class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
-  final eventIdController = TextEditingController();
   ImportEventSummary? event;
   String? eventError;
   bool loadingEvent = false;
@@ -137,15 +136,11 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   @override
   void initState() {
     super.initState();
-    if (_eventFixed) {
-      eventIdController.text = widget.eventId!;
-      _loadEvent();
-    }
+    if (_eventFixed) _loadEvent();
   }
 
   @override
   void dispose() {
-    eventIdController.dispose();
     for (final c in _valueControllers.values) {
       c.dispose();
     }
@@ -153,8 +148,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   }
 
   // ---- イベント ----------------------------------------------------------------------------------
+  // eventIdは常にNavigator経由(/console/import?eventId=…)で引き継ぐ。利用者に入力・選択させない。
   Future<void> _loadEvent() async {
-    final id = eventIdController.text.trim();
+    final id = (widget.eventId ?? '').trim();
     if (id.isEmpty) return;
     setState(() {
       loadingEvent = true;
@@ -166,6 +162,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       final loaded = await widget.service.getEvent(id);
       if (!mounted) return;
       setState(() => event = loaded);
+      // イベントを確認できたら、そのままファイル選択を開く(操作を1手減らす)。
+      // キャンセルされても、下の「CSVファイルを選択」から改めて選べる。
+      await _pickFile();
     } on ImportException catch (e) {
       if (mounted) setState(() => eventError = e.message);
     } catch (_) {
@@ -935,89 +934,93 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     ]);
   }
 
-  @override
-  Widget build(BuildContext context) => PageFrame(
-    title: '参加者CSVの取込',
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _section('取り込み先のイベント', [
-          if (!_eventFixed) ...[
-            TextField(
-              key: const Key('event-id'),
-              controller: eventIdController,
-              decoration: const InputDecoration(labelText: 'イベントID'),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton(
-              key: const Key('load-event'),
-              onPressed: loadingEvent || busy ? null : _loadEvent,
-              child: const Text('イベントを読み込む'),
-            ),
-          ],
-          if (loadingEvent)
-            const Padding(
-              padding: EdgeInsets.all(12),
-              child: Center(child: CircularProgressIndicator()),
-            ),
-          if (eventError != null)
-            _notice(eventError!, key: const Key('event-error')),
-          if (event != null) ...[
-            InfoRow('イベント名', event!.eventName),
-            InfoRow('開催日時', formatDateTimeMinute(event!.startAt)),
-            InfoRow('会場', event!.venue.isEmpty ? '未設定' : event!.venue),
-            const Text(
-              'program(表示順)',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            for (final p in event!.programs)
-              Text('・${p.name}(ID: ${p.programId})'),
-            const SizedBox(height: 6),
-            const Text('参加者は、このイベントへ取り込まれます。取り込むだけでは、メールは送信されません。'),
-          ],
-        ]),
-        if (event != null)
-          _section('CSVファイル', [
-            const Text('UTF-8(BOMあり・なし)のCSVを選択してください。列名は先頭行から読み取ります。'),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              key: const Key('pick-file'),
-              onPressed: busy ? null : _pickFile,
-              icon: const Icon(Icons.upload_file),
-              label: Text(file == null ? 'CSVファイルを選択' : 'ファイルを選び直す'),
-            ),
-            if (file != null && table != null) ...[
-              const SizedBox(height: 8),
-              Text('選択中: ${file!.name}'),
-              Text('${table!.records.length}行 / ${table!.headers.length}列'),
-            ],
-            if (fileError != null)
-              _notice(fileError!, key: const Key('file-error')),
-          ]),
-        if (mapping != null && table != null) _mappingSection(),
-        if (mapping != null && table != null)
-          _section('プレビュー', [
-            const Text('プレビューでは何も取り込まれません。内容を確認してから取り込みます。'),
-            if (_mappingIssues.isNotEmpty && previewError == null)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  '未設定の項目: ${_mappingIssues.length}件(プレビュー時に表示します)',
-                  style: const TextStyle(color: Color(0xff5c6670)),
-                ),
-              ),
-            const SizedBox(height: 8),
-            FilledButton(
-              key: const Key('run-preview'),
-              onPressed: busy ? null : _runPreview,
-              child: Text(previewing ? 'プレビュー中…' : 'プレビューする'),
-            ),
-            if (previewError != null)
-              _notice(previewError!, key: const Key('preview-error')),
-          ]),
-        if (preview != null && result == null) _previewSection(),
-        if (result != null) _resultSection(),
-      ],
+  // eventIdを持たずに開かれた場合(直リンク等)。イベントIDの入力・選択は求めず、
+  // 管理画面からやり直す案内だけを表示する。
+  Widget _missingEventSection() => _section('取り込み先のイベントが分かりません', [
+    const Text('イベント管理画面からCSV取込を選択してください。', key: Key('no-event-id-notice')),
+    const SizedBox(height: 12),
+    OutlinedButton(
+      key: const Key('back-to-console'),
+      onPressed: () => Navigator.of(context).pushReplacementNamed('/console'),
+      child: const Text('イベント管理画面へ戻る'),
     ),
-  );
+  ]);
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_eventFixed) {
+      return PageFrame(title: '参加者CSVの取込', child: _missingEventSection());
+    }
+    return PageFrame(
+      title: '参加者CSVの取込',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _section('取り込み先のイベント', [
+            if (loadingEvent)
+              const Padding(
+                padding: EdgeInsets.all(12),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+            if (eventError != null)
+              _notice(eventError!, key: const Key('event-error')),
+            if (event != null) ...[
+              InfoRow('イベント名', event!.eventName),
+              InfoRow('開催日時', formatDateTimeMinute(event!.startAt)),
+              InfoRow('会場', event!.venue.isEmpty ? '未設定' : event!.venue),
+              const Text(
+                'program(表示順)',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              for (final p in event!.programs)
+                Text('・${p.name}(ID: ${p.programId})'),
+              const SizedBox(height: 6),
+              const Text('参加者は、このイベントへ取り込まれます。取り込むだけでは、メールは送信されません。'),
+            ],
+          ]),
+          if (event != null)
+            _section('CSVファイル', [
+              const Text('UTF-8(BOMあり・なし)のCSVを選択してください。列名は先頭行から読み取ります。'),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                key: const Key('pick-file'),
+                onPressed: busy ? null : _pickFile,
+                icon: const Icon(Icons.upload_file),
+                label: Text(file == null ? 'CSVファイルを選択' : 'ファイルを選び直す'),
+              ),
+              if (file != null && table != null) ...[
+                const SizedBox(height: 8),
+                Text('選択中: ${file!.name}'),
+                Text('${table!.records.length}行 / ${table!.headers.length}列'),
+              ],
+              if (fileError != null)
+                _notice(fileError!, key: const Key('file-error')),
+            ]),
+          if (mapping != null && table != null) _mappingSection(),
+          if (mapping != null && table != null)
+            _section('プレビュー', [
+              const Text('プレビューでは何も取り込まれません。内容を確認してから取り込みます。'),
+              if (_mappingIssues.isNotEmpty && previewError == null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    '未設定の項目: ${_mappingIssues.length}件(プレビュー時に表示します)',
+                    style: const TextStyle(color: Color(0xff5c6670)),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              FilledButton(
+                key: const Key('run-preview'),
+                onPressed: busy ? null : _runPreview,
+                child: Text(previewing ? 'プレビュー中…' : 'プレビューする'),
+              ),
+              if (previewError != null)
+                _notice(previewError!, key: const Key('preview-error')),
+            ]),
+          if (preview != null && result == null) _previewSection(),
+          if (result != null) _resultSection(),
+        ],
+      ),
+    );
+  }
 }

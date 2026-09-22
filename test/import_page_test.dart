@@ -264,20 +264,84 @@ void main() {
         expect(find.byKey(const Key('pick-file')), findsOneWidget);
       },
     );
-    testWidgets('eventIdが無い場合だけ入力欄が出る。読み込めないイベント(legacy・存在しない)ではファイル選択に進めない', (
+    testWidgets(
+      'eventIdが無い場合は、イベントID入力欄を出さず、管理画面からやり直す案内だけを表示する(利用者にIDを意識させない)',
+      (tester) async {
+        final service = FakeImportService();
+        await _open(tester, service, eventId: null);
+        expect(find.byKey(const Key('event-id')), findsNothing);
+        expect(find.byKey(const Key('load-event')), findsNothing);
+        expect(find.byKey(const Key('no-event-id-notice')), findsOneWidget);
+        expect(find.text('イベント管理画面からCSV取込を選択してください。'), findsOneWidget);
+        expect(find.byKey(const Key('back-to-console')), findsOneWidget);
+        expect(find.byKey(const Key('pick-file')), findsNothing);
+        expect(service.eventCalls, isEmpty, reason: 'eventIdが無ければイベントを問い合わせない');
+      },
+    );
+
+    testWidgets(
+      '読み込めないイベント(legacy・存在しない)では、eventId入力欄を出さずエラー表示のみで、ファイル選択に進めない',
+      (tester) async {
+        final service = FakeImportService(
+          eventError: const ImportException('新方式のイベントを確認できませんでした。'),
+        );
+        await _open(tester, service, eventId: 'legacy1');
+        expect(find.byKey(const Key('event-id')), findsNothing);
+        expect(find.byKey(const Key('load-event')), findsNothing);
+        expect(find.text('新方式のイベントを確認できませんでした。'), findsOneWidget);
+        expect(find.byKey(const Key('pick-file')), findsNothing);
+        expect(service.eventCalls, ['legacy1']);
+      },
+    );
+
+    testWidgets(
+      '正常なeventId付きで開くと、イベントを取得した直後にファイル選択が自動で始まる(「CSVファイルを選択」を押さなくてよい)',
+      (tester) async {
+        final service = FakeImportService();
+        await _open(tester, service); // pickは既定(_csv)。ここではpick-fileを一切タップしない。
+        expect(service.eventCalls, ['evfixture0123456789']);
+        expect(find.text('選択中: 架空取込.csv'), findsOneWidget);
+        expect(find.text('5行 / 15列'), findsOneWidget);
+        expect(find.text('PHASE11 STEP3 TEST(架空)'), findsOneWidget);
+        expect(find.textContaining('架空プログラムA'), findsWidgets);
+        // 自動で選ばれたファイルの列は、まだ自動では選ばれていない(要件どおり)
+        expect(find.byKey(const Key('map-name')), findsOneWidget);
+        expect(
+          tester
+              .widget<DropdownButtonFormField<String?>>(
+                find.byKey(const Key('map-name')),
+              )
+              .initialValue,
+          isNull,
+        );
+      },
+    );
+
+    testWidgets('自動のファイル選択をキャンセルしても画面に留まり、「CSVファイルを選択」から改めて選べる', (
       tester,
     ) async {
-      final service = FakeImportService(
-        eventError: const ImportException('新方式のイベントを確認できませんでした。'),
+      final service = FakeImportService();
+      var calls = 0;
+      await _open(
+        tester,
+        service,
+        pick: () {
+          calls += 1;
+          return null; // 自動選択・手動選択とも、常にキャンセルする
+        },
       );
-      await _open(tester, service, eventId: null);
-      expect(find.byKey(const Key('event-id')), findsOneWidget);
-      expect(find.byKey(const Key('pick-file')), findsNothing);
-      await tester.enterText(find.byKey(const Key('event-id')), 'legacy1');
-      await tester.tap(find.byKey(const Key('load-event')));
+      expect(calls, 1, reason: 'イベント読込直後に自動で1回だけ開く');
+      expect(find.byKey(const Key('pick-file')), findsOneWidget);
+      expect(find.text('CSVファイルを選択'), findsOneWidget);
+      expect(
+        find.text('PHASE11 STEP3 TEST(架空)'),
+        findsOneWidget,
+      ); // イベント情報は表示されたまま
+      expect(find.byKey(const Key('map-name')), findsNothing);
+      await tester.tap(find.byKey(const Key('pick-file')));
       await tester.pumpAndSettle();
-      expect(find.text('新方式のイベントを確認できませんでした。'), findsOneWidget);
-      expect(find.byKey(const Key('pick-file')), findsNothing);
+      expect(calls, 2, reason: '「CSVファイルを選択」から再度、手動で開ける');
+      expect(tester.takeException(), isNull);
     });
   });
 
@@ -846,6 +910,19 @@ void main() {
         );
         expect(code(path).contains('demo_repository'), isFalse, reason: path);
       }
+    });
+    test('eventIdを利用者へ入力・選択させるUI(テキスト欄・読込ボタン)は存在しない', () {
+      final text = code('lib/confirmed/import_page.dart');
+      for (final forbidden in [
+        "Key('event-id')",
+        "Key('load-event')",
+        'イベントID',
+        'イベントを読み込む',
+      ]) {
+        expect(text.contains(forbidden), isFalse, reason: forbidden);
+      }
+      // eventIdはNavigator経由(widget.eventId)でだけ受け取る。
+      expect(text.contains('widget.eventId'), isTrue);
     });
     test('サーバーの上限(行数5000・値2000文字・列60)と同じ値を使う', () {
       expect(
