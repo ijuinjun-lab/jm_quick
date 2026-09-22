@@ -867,25 +867,111 @@ void main() {
       expect(source.contains('if (_detecting'), isTrue);
     });
 
-    test(
-      'QR decodeは標準BarcodeDetectorを使い、mobile_scanner相当の巨大なfallbackライブラリを追加していない',
-      () {
-        final source = _codeOnly('lib/confirmed/web_qr_camera_web.dart');
-        expect(source.contains("@JS('BarcodeDetector')"), isTrue);
-        for (final forbidden in [
-          'zxing',
-          'jsQR',
-          'cdn.jsdelivr.net',
-          'unpkg.com',
-        ]) {
-          expect(
-            source.toLowerCase().contains(forbidden.toLowerCase()),
-            isFalse,
-            reason: forbidden,
+    test('QR decodeは標準BarcodeDetectorを優先し、無ければjsQR(自前配信・QR専用の小さいfallback)を使う。'
+        '外部CDN・zxing相当の巨大な実装は追加していない', () {
+      final source = _codeOnly('lib/confirmed/web_qr_camera_web.dart');
+      expect(source.contains("@JS('BarcodeDetector')"), isTrue);
+      expect(source.contains("@JS('jsQR')"), isTrue);
+      for (final forbidden in [
+        'zxing',
+        'cdn.jsdelivr.net',
+        'unpkg.com',
+        'wasm',
+      ]) {
+        expect(
+          source.toLowerCase().contains(forbidden.toLowerCase()),
+          isFalse,
+          reason: forbidden,
+        );
+      }
+    });
+
+    test('jsQRはFirebase Hostingと同一origin(web/vendor)から配信し、外部CDNへは依存しない', () {
+      final source = _codeOnly('lib/confirmed/web_qr_camera_web.dart');
+      expect(source.contains('web.window.location.origin'), isTrue);
+      expect(source.contains('/vendor/jsqr.min.js'), isTrue);
+      final asset = File('web/vendor/jsqr.min.js');
+      expect(
+        asset.existsSync(),
+        isTrue,
+        reason: 'jsQRのdecoder assetがbuild成果物に含まれる必要がある',
+      );
+      expect(asset.readAsStringSync().contains('jsQR'), isTrue);
+    });
+
+    test('BarcodeDetectorが使えるときは、jsQRのスクリプトをロードしない(不要な読み込みをしない)', () {
+      final source = _codeOnly('lib/confirmed/web_qr_camera_web.dart');
+      // _resolveFrameDecoder: BarcodeDetectorが使えるときはBarcodeDetectorのdecoderをそのまま返し、
+      // _ensureJsQrLoaded(スクリプト注入)は呼ばれない経路になっていることをソース構造で確認する。
+      final resolver = source.substring(
+        source.indexOf('Future<_FrameDecoder> _resolveFrameDecoder()'),
+      );
+      final ifBlockEnd = resolver.indexOf('}\n  try {');
+      final earlyReturnBlock = resolver.substring(0, ifBlockEnd);
+      expect(earlyReturnBlock.contains('_ensureJsQrLoaded'), isFalse);
+    });
+
+    test('BarcodeDetectorが使えないときは、jsQRを読み込んでfallback decoderを使う', () {
+      final resolver = _codeOnly('lib/confirmed/web_qr_camera_web.dart')
+          .substring(
+            _codeOnly(
+              'lib/confirmed/web_qr_camera_web.dart',
+            ).indexOf('Future<_FrameDecoder> _resolveFrameDecoder()'),
           );
-        }
+      final fallbackBlock = resolver.substring(resolver.indexOf('try {'));
+      expect(fallbackBlock.contains('_ensureJsQrLoaded()'), isTrue);
+      expect(fallbackBlock.contains('_JsQrFrameDecoder()'), isTrue);
+    });
+
+    test('decoderが1つも用意できない場合(jsQRの読み込み失敗を含む)は、明確なエラー(generic)として報告する', () {
+      final resolver = _codeOnly('lib/confirmed/web_qr_camera_web.dart')
+          .substring(
+            _codeOnly(
+              'lib/confirmed/web_qr_camera_web.dart',
+            ).indexOf('Future<_FrameDecoder> _resolveFrameDecoder()'),
+          );
+      expect(
+        resolver.contains('WebCameraException(QrCameraProblem.generic)'),
+        isTrue,
+      );
+    });
+
+    test(
+      'getUserMedia成功＋BarcodeDetectorなし(jsQR fallback)でも、videoの生成・camera previewの開始は行われる'
+      '(decoderの種類でcamera previewの有無を分けていない)',
+      () {
+        final body = _codeOnly('lib/confirmed/web_qr_camera_web.dart')
+            .substring(
+              _codeOnly(
+                'lib/confirmed/web_qr_camera_web.dart',
+              ).indexOf('Future<void> open({'),
+            );
+        final decoderLine = body.indexOf(
+          '_decoder = await _resolveFrameDecoder();',
+        );
+        final videoLine = body.indexOf('final video = web.HTMLVideoElement()');
+        // decoderを決めた直後(BarcodeDetector/jsQRのどちらであっても)、同じ手順でvideo/previewを作る。
+        expect(decoderLine, greaterThan(-1));
+        expect(videoLine, greaterThan(decoderLine));
+        expect(body.contains('is _BarcodeDetectorFrameDecoder'), isFalse);
       },
     );
+
+    test('fallback decoder(jsQR)は、見つからなければnullを返すだけで、無効QRの拒否・連続decode抑止を複製しない'
+        '(既存のonDetect→parseReceptionQrPayloadの経路へそのまま委ねる)', () {
+      final source = _codeOnly('lib/confirmed/web_qr_camera_web.dart');
+      final classBody = source.substring(
+        source.indexOf('class _JsQrFrameDecoder'),
+      );
+      expect(classBody.contains('return result?.data;'), isTrue);
+      for (final forbidden in [
+        'parseReceptionQrPayload',
+        'qrRejectMessage',
+        'ReceptionRoutePage',
+      ]) {
+        expect(classBody.contains(forbidden), isFalse, reason: forbidden);
+      }
+    });
 
     test('参加者向けの参加証(pass_page.dart)にはカメラ機能を追加していない', () {
       final source = File('lib/confirmed/pass_page.dart').readAsStringSync();
