@@ -68,16 +68,58 @@ const _draft = ConfirmedEventDraft(
 
 Widget _app(Widget child) => MaterialApp(home: child);
 
-Future<void> _fill(WidgetTester tester, {bool valid = true}) async {
+/// 開催日時/終了日時のpicker(カレンダー→時刻)を操作する。[monthsForward]回だけ「次の月」を押してから
+/// [day]日を選び、時刻はキーボード入力モードへ切り替えて[hour]:[minute]を入力する。
+/// キャンセルはしない(呼び出し側が別途キャンセルの検証をする)。
+Future<void> _pickDateTime(
+  WidgetTester tester,
+  Key buttonKey, {
+  int monthsForward = 0,
+  required int day,
+  required int hour,
+  required int minute,
+}) async {
+  await tester.ensureVisible(find.byKey(buttonKey));
+  await tester.tap(find.byKey(buttonKey));
+  await tester.pumpAndSettle();
+  for (var i = 0; i < monthsForward; i++) {
+    await tester.tap(find.byTooltip('Next month'));
+    await tester.pumpAndSettle(); // 月送りのページ遷移を完了させてから次のタップへ進む
+  }
+  await tester.tap(find.text('$day'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('次へ(時刻を選択)'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byTooltip('Switch to text input mode'));
+  await tester.pumpAndSettle();
+  final fields = find.byType(TextFormField);
+  await tester.enterText(fields.at(0), hour.toString().padLeft(2, '0'));
+  await tester.enterText(fields.at(1), minute.toString().padLeft(2, '0'));
+  await tester.tap(find.text('選択する'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _fill(WidgetTester tester) async {
   await tester.enterText(
     find.byKey(const Key('event-name')),
     'PHASE11 STEP3 TEST(架空)',
   );
-  await tester.enterText(
-    find.byKey(const Key('start-at')),
-    valid ? '2030-11-30 10:00' : 'あした',
+  // now は 2030-01-01 (JST) 固定。11ヶ月先の30日、10:00〜17:00を選ぶ。
+  await _pickDateTime(
+    tester,
+    const Key('start-at'),
+    monthsForward: 10,
+    day: 30,
+    hour: 10,
+    minute: 0,
   );
-  await tester.enterText(find.byKey(const Key('end-at')), '2030-11-30 17:00');
+  await _pickDateTime(
+    tester,
+    const Key('end-at'),
+    day: 30,
+    hour: 17,
+    minute: 0,
+  );
   await tester.enterText(find.byKey(const Key('venue')), '架空ホール');
   await tester.enterText(find.byKey(const Key('access')), '架空駅から徒歩5分');
   await tester.enterText(find.byKey(const Key('program-name-0')), '架空プログラムA');
@@ -445,66 +487,139 @@ void main() {
       },
     );
 
-    testWidgets(
-      '入力不備(空・不正な日時・過去・終了が開始以前・program不備・ID重複)では作成要求を送らず、確認ダイアログも出ない',
-      (tester) async {
-        final service = FakeEventCreateService();
-        await _open(
-          tester,
-          ConfirmedEventCreatePage(
-            service: service,
-            now: () => DateTime.utc(2030, 1, 1),
-          ),
-        );
-        await tester.tap(find.byKey(const Key('create-event')));
-        await tester.pump();
-        expect(find.textContaining('イベント名を入力してください'), findsOneWidget);
-        expect(find.textContaining('会場名を入力してください'), findsOneWidget);
-        expect(find.textContaining('表示名を入力してください'), findsOneWidget);
-        expect(find.text('この内容でイベントを作成します'), findsNothing);
-        await _fill(tester, valid: false);
-        await tester.tap(find.byKey(const Key('create-event')));
-        await tester.pump();
-        expect(find.textContaining('開催日時を'), findsOneWidget);
-        await tester.enterText(
-          find.byKey(const Key('start-at')),
-          '2029-01-01 10:00',
-        );
-        await tester.tap(find.byKey(const Key('create-event')));
-        await tester.pump();
-        expect(find.textContaining('現在より後'), findsOneWidget);
-        await tester.enterText(
-          find.byKey(const Key('start-at')),
-          '2030-11-30 10:00',
-        );
-        await tester.enterText(
-          find.byKey(const Key('end-at')),
-          '2030-11-30 09:00',
-        );
-        await tester.tap(find.byKey(const Key('create-event')));
-        await tester.pump();
-        expect(find.textContaining('終了日時は開催日時より後'), findsOneWidget);
-        await tester.enterText(
-          find.byKey(const Key('end-at')),
-          '2030-11-30 17:00',
-        );
-        await tester.tap(find.byKey(const Key('add-program')));
-        await tester.pump();
-        await tester.enterText(
-          find.byKey(const Key('program-id-1')),
-          'program-1',
-        );
-        await tester.enterText(find.byKey(const Key('program-name-1')), 'B');
-        await tester.tap(find.byKey(const Key('create-event')));
-        await tester.pump();
-        expect(find.textContaining('IDが重複'), findsOneWidget);
-        await tester.enterText(find.byKey(const Key('program-id-1')), 'Bad_ID');
-        await tester.tap(find.byKey(const Key('create-event')));
-        await tester.pump();
-        expect(find.textContaining('英小文字・数字・ハイフン'), findsWidgets);
-        expect(service.calls, isEmpty);
-      },
-    );
+    testWidgets('入力不備(空・未選択・過去・終了が開始以前・program不備・ID重複)では作成要求を送らず、確認ダイアログも出ない', (
+      tester,
+    ) async {
+      final service = FakeEventCreateService();
+      await _open(
+        tester,
+        ConfirmedEventCreatePage(
+          service: service,
+          now: () => DateTime.utc(2030, 1, 1),
+        ),
+      );
+      await tester.tap(find.byKey(const Key('create-event')));
+      await tester.pump();
+      expect(find.textContaining('イベント名を入力してください'), findsOneWidget);
+      expect(find.textContaining('会場名を入力してください'), findsOneWidget);
+      expect(find.textContaining('表示名を入力してください'), findsOneWidget);
+      expect(find.textContaining('開催日時をカレンダーから選択してください'), findsOneWidget);
+      expect(find.text('この内容でイベントを作成します'), findsNothing);
+
+      await tester.enterText(
+        find.byKey(const Key('event-name')),
+        'PHASE11 STEP3 TEST(架空)',
+      );
+      await tester.enterText(find.byKey(const Key('venue')), '架空ホール');
+      await tester.enterText(find.byKey(const Key('access')), '架空駅から徒歩5分');
+      await tester.enterText(
+        find.byKey(const Key('program-name-0')),
+        '架空プログラムA',
+      );
+
+      // 今日(2030-01-01)は選べるが、現在(JST 09:00相当)より前の時刻08:00を選ぶと拒否される。
+      await _pickDateTime(
+        tester,
+        const Key('start-at'),
+        day: 1,
+        hour: 8,
+        minute: 0,
+      );
+      expect(
+        find.textContaining('2030-01-01 08:00'), // pickerで選んだ値がそのままボタンに表示されている
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('create-event')));
+      await tester.pump();
+      expect(find.textContaining('現在より後'), findsOneWidget);
+
+      // 未来の正しい開催日時へ選び直す(11ヶ月先の30日 10:00)。
+      await _pickDateTime(
+        tester,
+        const Key('start-at'),
+        monthsForward: 10,
+        day: 30,
+        hour: 10,
+        minute: 0,
+      );
+      // 終了日時を開始より前(同日09:00)にすると、送信前にも案内が出る。
+      await _pickDateTime(
+        tester,
+        const Key('end-at'),
+        day: 30,
+        hour: 9,
+        minute: 0,
+      );
+      expect(find.byKey(const Key('date-order-warning')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('create-event')));
+      await tester.pump();
+      // 送信前の事前案内(date-order-warning)と、送信時のproblems一覧の両方に同じ理由が出る。
+      expect(find.textContaining('終了日時は開催日時より後'), findsWidgets);
+
+      // 終了日時を17:00へ選び直すと、事前案内は消える。
+      await _pickDateTime(
+        tester,
+        const Key('end-at'),
+        day: 30,
+        hour: 17,
+        minute: 0,
+      );
+      expect(find.byKey(const Key('date-order-warning')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('add-program')));
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const Key('program-id-1')),
+        'program-1',
+      );
+      await tester.enterText(find.byKey(const Key('program-name-1')), 'B');
+      await tester.tap(find.byKey(const Key('create-event')));
+      await tester.pump();
+      expect(find.textContaining('IDが重複'), findsOneWidget);
+      await tester.enterText(find.byKey(const Key('program-id-1')), 'Bad_ID');
+      await tester.tap(find.byKey(const Key('create-event')));
+      await tester.pump();
+      expect(find.textContaining('英小文字・数字・ハイフン'), findsWidgets);
+      expect(service.calls, isEmpty);
+    });
+
+    testWidgets('date/time pickerをキャンセルすると、既存の選択値は変更されない', (tester) async {
+      await _open(
+        tester,
+        ConfirmedEventCreatePage(
+          service: FakeEventCreateService(),
+          now: () => DateTime.utc(2030, 1, 1),
+        ),
+      );
+      await _pickDateTime(
+        tester,
+        const Key('start-at'),
+        monthsForward: 10,
+        day: 30,
+        hour: 10,
+        minute: 0,
+      );
+      expect(find.textContaining('2030-11-30 10:00'), findsOneWidget);
+
+      // 日付pickerを開いてキャンセルしても、既存値のまま。
+      await tester.tap(find.byKey(const Key('start-at')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('キャンセル'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('2030-11-30 10:00'), findsOneWidget);
+
+      // 日付だけ選んで時刻pickerでキャンセルしても、既存値のまま(日付だけ確定させない)。
+      await tester.tap(find.byKey(const Key('start-at')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('15')); // 同じ月の別の日
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('次へ(時刻を選択)'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('キャンセル'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('2030-11-30 10:00'), findsOneWidget);
+      expect(find.textContaining('2030-11-15'), findsNothing);
+    });
 
     testWidgets(
       '最終確認ダイアログにイベント名・開催日時・会場・program数・program名が表示され、キャンセルなら作成要求は送られない',
@@ -691,6 +806,164 @@ void main() {
         );
       },
     );
+  });
+
+  group('開催日時・終了日時のdate/time picker', () {
+    testWidgets(
+      '開催日時: カレンダーで日付を選び、時刻を選ぶと、選択値がそのままボタンに表示される(キーボードで文字列を打たなくてよい)',
+      (tester) async {
+        await _open(
+          tester,
+          ConfirmedEventCreatePage(
+            service: FakeEventCreateService(),
+            now: () => DateTime.utc(2030, 1, 1),
+          ),
+        );
+        expect(find.text('日付・時刻を選択'), findsNWidgets(2)); // 開催・終了とも未選択
+        await _pickDateTime(
+          tester,
+          const Key('start-at'),
+          monthsForward: 10,
+          day: 30,
+          hour: 10,
+          minute: 0,
+        );
+        expect(find.textContaining('2030-11-30 10:00'), findsOneWidget);
+        expect(
+          tester
+              .widget<OutlinedButton>(find.byKey(const Key('start-at')))
+              .onPressed,
+          isNotNull,
+        );
+      },
+    );
+
+    testWidgets('終了日時: 開催日時と同様に選べる。「クリア」で未選択に戻せる(終了日時は任意のまま)', (tester) async {
+      await _open(
+        tester,
+        ConfirmedEventCreatePage(
+          service: FakeEventCreateService(),
+          now: () => DateTime.utc(2030, 1, 1),
+        ),
+      );
+      expect(
+        find.byKey(const Key('end-at-clear')),
+        findsNothing,
+      ); // 未選択の間はクリアを出さない
+      await _pickDateTime(
+        tester,
+        const Key('start-at'),
+        monthsForward: 10,
+        day: 30,
+        hour: 10,
+        minute: 0,
+      );
+      await _pickDateTime(
+        tester,
+        const Key('end-at'),
+        day: 30,
+        hour: 17,
+        minute: 0,
+      );
+      expect(find.textContaining('2030-11-30 17:00'), findsOneWidget);
+      expect(find.byKey(const Key('end-at-clear')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('end-at-clear')));
+      await tester.pump();
+      expect(find.textContaining('2030-11-30 17:00'), findsNothing);
+      expect(find.byKey(const Key('end-at-clear')), findsNothing);
+      // 終了日時は任意なので、クリアしたままでも他が正しければ作成要求を送れる。
+      final service = FakeEventCreateService();
+      await _open(
+        tester,
+        ConfirmedEventCreatePage(
+          service: service,
+          now: () => DateTime.utc(2030, 1, 1),
+        ),
+      );
+      await tester.enterText(
+        find.byKey(const Key('event-name')),
+        'PHASE11 STEP3 TEST(架空)',
+      );
+      await _pickDateTime(
+        tester,
+        const Key('start-at'),
+        monthsForward: 10,
+        day: 30,
+        hour: 10,
+        minute: 0,
+      );
+      await tester.enterText(find.byKey(const Key('venue')), '架空ホール');
+      await tester.enterText(
+        find.byKey(const Key('program-name-0')),
+        '架空プログラムA',
+      );
+      await tester.tap(find.byKey(const Key('create-event')));
+      await tester.pumpAndSettle();
+      expect(find.text('この内容でイベントを作成します'), findsOneWidget);
+      await tester.tap(find.text('作成する'));
+      await tester.pumpAndSettle();
+      expect(service.calls.single.draft.endAt, isNull);
+    });
+
+    testWidgets('PC相当の幅(900px)でも、date/time pickerを含めて重大なoverflowが出ない', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(900, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        _app(
+          ConfirmedEventCreatePage(
+            service: FakeEventCreateService(),
+            now: () => DateTime.utc(2030, 1, 1),
+          ),
+        ),
+      );
+      await tester.pump();
+      await _pickDateTime(
+        tester,
+        const Key('start-at'),
+        monthsForward: 10,
+        day: 30,
+        hour: 10,
+        minute: 0,
+      );
+      await _pickDateTime(
+        tester,
+        const Key('end-at'),
+        day: 30,
+        hour: 17,
+        minute: 0,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('390px幅でも、date/time picker(カレンダー・時刻入力)を含めて重大なoverflowが出ない', (
+      tester,
+    ) async {
+      await _open(
+        tester,
+        ConfirmedEventCreatePage(
+          service: FakeEventCreateService(),
+          now: () => DateTime.utc(2030, 1, 1),
+        ),
+      );
+      await _pickDateTime(
+        tester,
+        const Key('start-at'),
+        monthsForward: 10,
+        day: 30,
+        hour: 10,
+        minute: 0,
+      );
+      await _pickDateTime(
+        tester,
+        const Key('end-at'),
+        day: 30,
+        hour: 17,
+        minute: 0,
+      );
+      expect(tester.takeException(), isNull);
+    });
   });
 
   group('境界の静的検査', () {

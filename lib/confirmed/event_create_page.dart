@@ -148,10 +148,43 @@ class ConfirmedEventCreatePage extends StatefulWidget {
       _ConfirmedEventCreatePageState();
 }
 
+/// "2026-11-30 10:00"のような、日本時間の日付+時刻の文字列から、date/time pickerの初期値を取り出す。
+/// 形式はparseJstDateTimeが受け付けるものと同じ(pickerが作る文字列は必ずこの形式になる)。
+({DateTime date, TimeOfDay time})? _seedFromJstText(String text) {
+  final match = RegExp(
+    r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})$',
+  ).firstMatch(text.trim());
+  if (match == null) return null;
+  final y = int.parse(match.group(1)!);
+  final mo = int.parse(match.group(2)!);
+  final d = int.parse(match.group(3)!);
+  final h = int.parse(match.group(4)!);
+  final mi = int.parse(match.group(5)!);
+  // 日付部分だけをカレンダーの初期値に使う(実際のタイムゾーンとしては扱わない。y/mo/dの入れ物)。
+  final date = DateTime(y, mo, d);
+  if (date.year != y ||
+      date.month != mo ||
+      date.day != d ||
+      h > 23 ||
+      mi > 59) {
+    return null;
+  }
+  return (date: date, time: TimeOfDay(hour: h, minute: mi));
+}
+
+/// pickerで選んだ日付+時刻を、既存のparseJstDateTimeが受け付ける"yyyy-MM-dd HH:mm"へ整形する。
+String formatJstPicked(DateTime date, TimeOfDay time) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${date.year.toString().padLeft(4, '0')}-${two(date.month)}-${two(date.day)} '
+      '${two(time.hour)}:${two(time.minute)}';
+}
+
 class _ConfirmedEventCreatePageState extends State<ConfirmedEventCreatePage> {
   final eventName = TextEditingController();
-  final startAt = TextEditingController();
-  final endAt = TextEditingController();
+  // 開催日時・終了日時は、キーボード入力ではなくdate/time pickerで選ぶ。値は既存のparseJstDateTimeが
+  // 受け付ける"yyyy-MM-dd HH:mm"の文字列のまま保持し、検証(_draft)は既存のロジックを変更しない。
+  String startAtText = '';
+  String endAtText = '';
   final venue = TextEditingController();
   final address = TextEditingController();
   final access = TextEditingController();
@@ -164,7 +197,78 @@ class _ConfirmedEventCreatePageState extends State<ConfirmedEventCreatePage> {
   List<String> problems = const [];
   int _nextProgramNumber = 1;
 
+  /// 終了日時が開催日時以前になっている場合の、送信前の案内(サーバー送信前にも分かるようにする)。
+  /// 実際の拒否は既存の_draft()のvalidationが正本(ここは事前の案内だけ)。
+  String? _dateOrderWarning;
+
   String _newId() => widget.requestIdFactory?.call() ?? newRequestId();
+
+  DateTime _nowJst() {
+    final now = (widget.now ?? DateTime.now)().toUtc().add(
+      const Duration(hours: 9),
+    );
+    return DateTime(now.year, now.month, now.day);
+  }
+
+  void _refreshDateOrderWarning() {
+    final start = parseJstDateTime(startAtText);
+    final endText = endAtText.trim();
+    if (endText.isEmpty || start == null) {
+      _dateOrderWarning = null;
+      return;
+    }
+    final end = parseJstDateTime(endText);
+    _dateOrderWarning =
+        (end != null && !DateTime.parse(end).isAfter(DateTime.parse(start)))
+        ? '終了日時は開催日時より後にしてください。'
+        : null;
+  }
+
+  /// 開催日時(isStart)または終了日時の、日付→時刻の順でpickerを開く。
+  /// いずれかの段階でキャンセルされたら、既存の値は変更しない。
+  Future<void> _pickDateTime({required bool isStart}) async {
+    final currentText = isStart ? startAtText : endAtText;
+    final seed = _seedFromJstText(currentText);
+    final today = _nowJst();
+    final startSeed = _seedFromJstText(startAtText);
+    final firstDate = isStart ? today : (startSeed?.date ?? today);
+    final lastDate = today.add(const Duration(days: 1095)); // 約3年後まで選べる
+
+    final date = await showDatePicker(
+      context: context,
+      initialDate: seed?.date ?? (firstDate.isAfter(today) ? firstDate : today),
+      firstDate: firstDate.isBefore(today) ? today : firstDate,
+      lastDate: lastDate,
+      helpText: isStart ? '開催日を選択(日本時間)' : '終了日を選択(日本時間)',
+      cancelText: 'キャンセル',
+      confirmText: '次へ(時刻を選択)',
+    );
+    if (date == null || !mounted) return; // キャンセル: 既存値は変更しない
+
+    final time = await showTimePicker(
+      context: context,
+      initialTime: seed?.time ?? const TimeOfDay(hour: 10, minute: 0),
+      helpText: isStart ? '開催時刻を選択(日本時間)' : '終了時刻を選択(日本時間)',
+      cancelText: 'キャンセル',
+      confirmText: '選択する',
+      builder: (context, child) => MediaQuery(
+        // 24時間表示に固定する(日本時間としての分かりやすさを優先し、AM/PM表記にしない)。
+        data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      ),
+    );
+    if (time == null || !mounted) return; // キャンセル: 日付だけは確定させない(既存値は変更しない)
+
+    setState(() {
+      final text = formatJstPicked(date, time);
+      if (isStart) {
+        startAtText = text;
+      } else {
+        endAtText = text;
+      }
+      _refreshDateOrderWarning();
+    });
+  }
 
   @override
   void initState() {
@@ -174,16 +278,7 @@ class _ConfirmedEventCreatePageState extends State<ConfirmedEventCreatePage> {
 
   @override
   void dispose() {
-    for (final c in [
-      eventName,
-      startAt,
-      endAt,
-      venue,
-      address,
-      access,
-      senderName,
-      contact,
-    ]) {
+    for (final c in [eventName, venue, address, access, senderName, contact]) {
       c.dispose();
     }
     for (final row in programs) {
@@ -197,17 +292,17 @@ class _ConfirmedEventCreatePageState extends State<ConfirmedEventCreatePage> {
   }
 
   ConfirmedEventDraft? _draft(List<String> issues) {
-    final start = parseJstDateTime(startAt.text);
-    final endText = endAt.text.trim();
+    final start = parseJstDateTime(startAtText);
+    final endText = endAtText.trim();
     final end = endText.isEmpty ? null : parseJstDateTime(endText);
     if (eventName.text.trim().isEmpty) issues.add('イベント名を入力してください。');
     if (start == null) {
-      issues.add('開催日時を「2026-11-30 10:00」の形式で入力してください(日本時間)。');
+      issues.add('開催日時をカレンダーから選択してください(日本時間)。');
     } else if (!DateTime.parse(start).isAfter((widget.now ?? DateTime.now)())) {
       issues.add('開催日時は現在より後の日時にしてください。');
     }
     if (endText.isNotEmpty && end == null) {
-      issues.add('終了日時を「2026-11-30 17:00」の形式で入力してください(日本時間)。');
+      issues.add('終了日時をカレンダーから選択してください(日本時間)。');
     }
     if (start != null &&
         end != null &&
@@ -271,7 +366,7 @@ class _ConfirmedEventCreatePageState extends State<ConfirmedEventCreatePage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               _confirmRow('イベント名', eventName.text.trim()),
-              _confirmRow('開催日時', startAt.text.trim()),
+              _confirmRow('開催日時', startAtText),
               _confirmRow('会場', venue.text.trim()),
               _confirmRow('program数', '${programs.length}件'),
               for (var i = 0; i < programs.length; i++)
@@ -350,6 +445,54 @@ class _ConfirmedEventCreatePageState extends State<ConfirmedEventCreatePage> {
     ),
   );
 
+  // 日時はキーボードで文字列を打たなくても選べる: タップでカレンダー→時刻のpickerを開く。
+  // 選択済みの値はボタンの文字としてそのまま表示され、利用者が明確に確認できる。
+  Widget _dateTimeField({
+    required String label,
+    required String value,
+    required VoidCallback? onTap,
+    VoidCallback? onClear,
+    Key? buttonKey,
+    Key? clearKey,
+  }) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(fontSize: 12, color: Color(0xff5c6670)),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                key: buttonKey,
+                onPressed: onTap,
+                icon: const Icon(Icons.calendar_month),
+                label: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    value.isEmpty ? '日付・時刻を選択' : value,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+            if (onClear != null)
+              IconButton(
+                key: clearKey,
+                tooltip: 'クリアする',
+                onPressed: onClear,
+                icon: const Icon(Icons.clear),
+              ),
+          ],
+        ),
+      ],
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => PageFrame(
     title: '新方式のイベントを作成',
@@ -362,18 +505,34 @@ class _ConfirmedEventCreatePageState extends State<ConfirmedEventCreatePage> {
             const Text('作成しただけでは、メールは送信されません。参加者の取込・メール設定は、作成後の管理画面で行います。'),
             const SizedBox(height: 16),
             _field('イベント名(必須)', eventName, key: const Key('event-name')),
-            _field(
-              '開催日時(必須・日本時間)',
-              startAt,
-              hint: '例: 2026-11-30 10:00',
-              key: const Key('start-at'),
+            _dateTimeField(
+              label: '開催日時(必須・日本時間)',
+              value: startAtText,
+              onTap: busy ? null : () => _pickDateTime(isStart: true),
+              buttonKey: const Key('start-at'),
             ),
-            _field(
-              '終了日時(日本時間)',
-              endAt,
-              hint: '例: 2026-11-30 17:00',
-              key: const Key('end-at'),
+            _dateTimeField(
+              label: '終了日時(日本時間・任意)',
+              value: endAtText,
+              onTap: busy ? null : () => _pickDateTime(isStart: false),
+              onClear: busy || endAtText.isEmpty
+                  ? null
+                  : () => setState(() {
+                      endAtText = '';
+                      _dateOrderWarning = null;
+                    }),
+              buttonKey: const Key('end-at'),
+              clearKey: const Key('end-at-clear'),
             ),
+            if (_dateOrderWarning != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Text(
+                  _dateOrderWarning!,
+                  key: const Key('date-order-warning'),
+                  style: const TextStyle(color: Color(0xffb42318)),
+                ),
+              ),
             _field('会場名(必須)', venue, key: const Key('venue')),
             _field('住所', address, key: const Key('address')),
             _field('アクセス', access, maxLines: 2, key: const Key('access')),
