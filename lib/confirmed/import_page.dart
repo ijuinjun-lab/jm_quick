@@ -283,11 +283,14 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     }
   }
 
-  // program別の「予定」(取込対象=ready行のうち、そのprogramへ参加する行)の概算。
-  // サーバーのpreview応答は氏名・人数などの値を返さない(データ最小化)ため、ローカルに保持している
-  // CSVの値(このprogramの人数列)と、サーバーが返す行ごとのprogramIds・分類を突き合わせて概算する。
-  // 表示のみに使い、実際の正本(plannedCount)は常にサーバー(commit時)が決める。
-  ({int participants, int headcount}) _programSummary(ProgramMapping g) {
+  // program別の集計の概算。サーバーのpreview応答は氏名・人数などの値を返さない(データ最小化)ため、
+  // ローカルに保持しているCSVの値(このprogramの人数列)と、サーバーが返す行ごとのprogramIds・分類を
+  // 突き合わせて概算する。表示のみに使い、実際の正本(plannedCount)は常にサーバー(commit時)が決める。
+  // [include]で対象にする行(分類)を選ぶ(ready行だけ・review行だけ・確定される行だけ、等)。
+  ({int participants, int headcount}) _programTotals(
+    ProgramMapping g,
+    bool Function(PreviewRow r) include,
+  ) {
     final p = preview;
     final t = table;
     if (p == null || t == null || g.countColumn == null) {
@@ -297,7 +300,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     var participants = 0;
     var headcount = 0;
     for (final r in p.rows) {
-      if (r.classification != RowClass.ready) continue;
+      if (!include(r)) continue;
       if (!r.programIds.contains(g.programId)) continue;
       participants += 1;
       if (countIndex < 0) continue;
@@ -309,6 +312,23 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     }
     return (participants: participants, headcount: headcount);
   }
+
+  /// 確定できる予定(ready行だけ)。取り込むと必ずこの件数のattendanceが作られる。
+  ({int participants, int headcount}) _readyTotals(ProgramMapping g) =>
+      _programTotals(g, (r) => r.classification == RowClass.ready);
+
+  /// 確認が必要なデータ(review行のうち、このprogramへの参加候補があるもの。未承認)。
+  ({int participants, int headcount}) _reviewTotals(ProgramMapping g) =>
+      _programTotals(g, (r) => r.classification == RowClass.review);
+
+  /// 実際に確定する予定(ready行 + 管理者が承認したreview行)。確認ダイアログで使う。
+  ({int participants, int headcount}) _committingTotals(ProgramMapping g) =>
+      _programTotals(
+        g,
+        (r) =>
+            r.classification == RowClass.ready ||
+            approved.contains(r.sourceRowNumber),
+      );
 
   // ---- 確定 --------------------------------------------------------------------------------------
   int get _importCount =>
@@ -347,13 +367,13 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
               ),
               const SizedBox(height: 6),
               const Text(
-                'program別予定',
+                'program別予定(この内容で確定する分)',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
               for (final g in programs)
                 _confirmRow(
                   g.name,
-                  '${_programSummary(g).headcount}人 / ${_programSummary(g).participants} participant',
+                  '${_committingTotals(g).headcount}人 / ${_committingTotals(g).participants} participant',
                 ),
               const SizedBox(height: 10),
               const Text(
@@ -471,12 +491,72 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       Text('・${g.name}: 参加判定と人数を自動で読み取ります', key: ValueKey('auto-program-${g.programId}')),
   ]);
 
+  /// programId → 表示名。programIdそのものは利用者へ表示しない(内部の識別子のため)。
+  String _programName(String programId) {
+    for (final g in mapping?.programs ?? const <ProgramMapping>[]) {
+      if (g.programId == programId) return g.name;
+    }
+    return programId; // 通常は到達しない(念のためのフォールバック)
+  }
+
   String _rowText(PreviewRow r) {
     final issues = r.issueCodes.map(importIssueLabel).join('、');
     final programs = r.programIds.isEmpty
         ? ''
-        : ' / program: ${r.programIds.join(', ')}';
+        : ' / ${r.programIds.map(_programName).join('、')}';
     return '${r.classification.label}${issues.isEmpty ? '' : ' — $issues'}$programs';
+  }
+
+  /// 確認が必要な行の、利用者向けの具体的な説明。内部の判定コード(slot-zero-length等)や
+  /// programId(program-1等)をそのまま出さない。
+  ///
+  /// 「不参加なのに人数が入っている」(not-attending-count-present)は、CSVの元の値(参加時間・人数の列)
+  /// を突き合わせて、どのprogramのどんな矛盾かを具体的な日本語で示す。プレビュー応答はデータ最小化のため
+  /// これらの値そのものを返さないので、ローカルに保持しているCSVの値を使う(判定条件はサーバー
+  /// functions/confirmed/import_rows.js の decideParticipation と同じ規則を表示のためだけに再現する。
+  /// 実際の分類・確定は常にサーバーが行い、ここでの再現は表示専用)。
+  List<String> _reviewMessages(PreviewRow r) {
+    final t = table;
+    final m = mapping;
+    if (t == null || m == null || !r.issueCodes.contains('not-attending-count-present')) {
+      return r.issueCodes.map(importIssueLabel).toList();
+    }
+    final position = r.sourceRowNumber - 2;
+    if (position < 0 || position >= t.records.length) {
+      return r.issueCodes.map(importIssueLabel).toList();
+    }
+    final record = t.records[position];
+    String cellOf(String? column) {
+      if (column == null) return '';
+      final i = t.headers.indexOf(column);
+      if (i < 0 || i >= record.length) return '';
+      return record[i].trim();
+    }
+
+    final messages = <String>[];
+    for (final g in m.programs) {
+      final participationColumn = g.participationColumn;
+      if (participationColumn == null) continue;
+      final participationValue = cellOf(participationColumn);
+      final notAttending =
+          participationValue.isEmpty ||
+          g.notAttendingValues.contains(participationValue);
+      if (!notAttending) continue;
+      final countText = cellOf(g.countColumn);
+      if (countText.isEmpty) continue;
+      final count = displayCountOf(countText);
+      if (count == 0) continue; // 0は不参加と矛盾しない
+      final countLabel = count != null ? '$count名' : '「$countText」';
+      final stateLabel = participationValue.isEmpty ? '空欄' : '『参加を希望しない』';
+      messages.add(
+        '${g.name}は$stateLabelとなっていますが、参加人数が$countLabelになっています。内容を確認してください。',
+      );
+    }
+    if (messages.isEmpty) return r.issueCodes.map(importIssueLabel).toList();
+    final others = r.issueCodes
+        .where((c) => c != 'not-attending-count-present')
+        .map(importIssueLabel);
+    return [...messages, ...others];
   }
 
   Widget _previewSection() {
@@ -520,13 +600,35 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       InfoRow('エラー', '${p.errorCount}件(取り込まれません)'),
       const SizedBox(height: 6),
       const Text('program別予定', style: TextStyle(fontWeight: FontWeight.bold)),
+      const Text(
+        '「確定できる予定」は今すぐ取り込める件数、「確認が必要」は下の行を承認しないと取り込まれない件数です。'
+        '「確認が必要」を含めた合計が、このイベントの参加予定の実態に近い数字です。',
+        style: TextStyle(fontSize: 12, color: Color(0xff5c6670)),
+      ),
       for (final g in mapping!.programs)
         Builder(
+          key: ValueKey('program-summary-${g.programId}'),
           builder: (context) {
-            final s = _programSummary(g);
-            return Text(
-              '${g.name}　${s.headcount}人 / ${s.participants} participant',
-              key: ValueKey('program-summary-${g.programId}'),
+            final ready = _readyTotals(g);
+            final review = _reviewTotals(g);
+            return Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(g.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(
+                    '　確定できる予定: ${ready.headcount}人 / ${ready.participants} participant',
+                    key: ValueKey('program-summary-ready-${g.programId}'),
+                  ),
+                  if (review.participants > 0)
+                    Text(
+                      '　確認が必要: ${review.headcount}人 / ${review.participants} participant(未承認)',
+                      key: ValueKey('program-summary-review-${g.programId}'),
+                      style: const TextStyle(color: Color(0xffb54708)),
+                    ),
+                ],
+              ),
             );
           },
         ),
@@ -568,7 +670,16 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
             contentPadding: EdgeInsets.zero,
             controlAffinity: ListTileControlAffinity.leading,
             title: Text('${r.sourceRowNumber}行目を承認して取り込む'),
-            subtitle: Text(_rowText(r)),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final (i, msg) in _reviewMessages(r).indexed)
+                  Text(
+                    msg,
+                    key: ValueKey('review-${r.sourceRowNumber}-message-$i'),
+                  ),
+              ],
+            ),
             value: approved.contains(r.sourceRowNumber),
             onChanged: busy
                 ? null

@@ -96,11 +96,23 @@ class ConfirmedImportProfileProgram {
 ///
 /// 参加判定:
 /// - program-1・program-2: 参加時間の列(午前/午後参加時間)を参加列としても使う。「参加を希望しない」
-///   または空は不参加、それ以外(有効な時間枠文字列を含む)は参加とみなす。plannedCountは対応する人数列。
-///   時間枠は既存のprogramAttendance.slotLabel(・timeRange形式ならstartAt/endAt)として保存される
-///   (新しいフィールドは追加していない)。
+///   または空は不参加、それ以外は参加とみなす。plannedCountは対応する人数列。
 /// - program-3(トークショー): 「トークショー」列が「参加を希望する」なら参加、「参加を希望しない」または
 ///   空なら不参加。plannedCountはトークショー人数。
+///
+/// ■ Phase 11G: 午前/午後参加時間の`slotFormat`は`'label'`(文字列としてそのまま保持。既存の
+///   programAttendance.slotLabelをそのまま使う。新しいフィールドは追加していない)。実CSV(sipposample1.csv、
+///   本番E2Eで確認)には「22:20-22:20」「22:20-21:20」のような値が多数(約3割)含まれており、これは
+///   主催者の確定参加者リスト上の「時間枠の表示値」であって、JM Quickが開始・終了時刻として妥当性検証
+///   (開始<終了・非ゼロ長)する対象ではない。`slotFormat: 'timeRange'`のままだと、この種の値が
+///   slot-zero-length/slot-reversedとして大量にreview化され、1件ずつの手動承認が必要になっていた
+///   (本番E2E: 90行中37件がreview化。うち34件は時間枠表記だけが理由で、参加の意思自体は明確だった)。
+///   `label`にすることで、JM QuickはstartAt/endAtを生成せず、CSVの値をそのままslotLabelとして保持する
+///   (開始・終了時刻への変換はしない)。参加/不参加の判定(participationColumn・notAttendingValues・
+///   emptyMeansNotAttending)はこれまでと同じ列・同じ規則のまま変更していない。
+///   汎用のtimeRange検証機構(functions/confirmed/import_rows.js の parseSlot)自体は削除していない。
+///   将来、開始・終了時刻の妥当性検証が必要な別CSV形式では、そのprofileで`slotFormat: 'timeRange'`を
+///   引き続き使える。
 const sipposample2026Profile = ConfirmedImportProfile(
   label: '当選・参加確定者リスト(sipposample形式)',
   nameColumn: '氏名',
@@ -112,7 +124,7 @@ const sipposample2026Profile = ConfirmedImportProfile(
       programId: 'program-1',
       countColumn: '午前参加人数',
       slotColumn: '午前参加時間',
-      slotFormat: 'timeRange',
+      slotFormat: 'label',
       participationColumn: '午前参加時間',
       notAttendingValues: ['参加を希望しない'],
       emptyMeansNotAttending: true,
@@ -121,7 +133,7 @@ const sipposample2026Profile = ConfirmedImportProfile(
       programId: 'program-2',
       countColumn: '午後参加人数',
       slotColumn: '午後参加時間',
-      slotFormat: 'timeRange',
+      slotFormat: 'label',
       participationColumn: '午後参加時間',
       notAttendingValues: ['参加を希望しない'],
       emptyMeansNotAttending: true,

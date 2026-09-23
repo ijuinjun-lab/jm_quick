@@ -165,7 +165,7 @@ void main() {
             'notAttendingValues': ['参加を希望しない'],
             'emptyMeans': 'notAttending',
             'slotColumn': '午前参加時間',
-            'slotFormat': 'timeRange',
+            'slotFormat': 'label',
             'countColumn': '午前参加人数',
           },
           {
@@ -174,7 +174,7 @@ void main() {
             'notAttendingValues': ['参加を希望しない'],
             'emptyMeans': 'notAttending',
             'slotColumn': '午後参加時間',
-            'slotFormat': 'timeRange',
+            'slotFormat': 'label',
             'countColumn': '午後参加人数',
           },
           {

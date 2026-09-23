@@ -526,6 +526,94 @@ void main() {
     });
   });
 
+  group(
+    'Phase 11G: 確認が必要な行の表示(データ矛盾は具体的な日本語、内部コード・programIdは出さない)',
+    () {
+      // 午後の譲渡会(program-2)が「参加を希望しない」なのに人数が2になっている行(実CSVで確認した矛盾パターン)。
+      String reviewCsv() {
+        final blank = List.filled(_headers.length, '').join(',');
+        final row = [
+          '新規申込', 'R1', '架空参加者1', 'かくうさんかしゃ', 'sippo1@example.invalid',
+          '架空県', '未回答', '未回答', '', '', '', '参加を希望しない', '2', '',
+          '参加を希望しない', '', '', '', '2026年01月02日 03時04分05秒', '',
+        ].join(',');
+        return '${_headers.join(',')}\n$row\n$blank\n';
+      }
+
+      ImportPreview notAttendingCountPreview() => ImportPreview.fromJson({
+        'batchId': 'b1',
+        'totalRecords': 2,
+        'totalRows': 1,
+        'readyCount': 0,
+        'reviewCount': 1,
+        'errorCount': 0,
+        'blankRecordCount': 1,
+        'participantCandidateCount': 1,
+        'attendanceCandidateCount': 0,
+        'issueCounts': {'not-attending-count-present': 1},
+        'sameFileBatches': [],
+        'mappingWarnings': [],
+        'rows': [
+          {
+            'sourceRowNumber': 2,
+            'importRecordId': 'x',
+            'classification': 'review',
+            'issueCodes': ['not-attending-count-present'],
+            'programIds': [],
+          },
+        ],
+      });
+
+      testWidgets(
+        '「不参加なのに人数あり」は、program名と人数を使った具体的な日本語になる(内部コード・programIdは出さない)',
+        (tester) async {
+          final service = FakeImportService(
+            previewHandler: (_) async => notAttendingCountPreview(),
+          );
+          await _open(tester, service, pick: () => _csv(reviewCsv()));
+          await _preview_(tester);
+          expect(
+            find.text(
+              '架空プログラムBは『参加を希望しない』となっていますが、参加人数が2名になっています。内容を確認してください。',
+            ),
+            findsOneWidget,
+          );
+          // 確認行そのもの(チェックボックスの説明文)には、内部コード・programIdを出さない
+          // (画面上部の「取り込み先のイベント」情報(programId表示)は、この確認理由とは別の既存表示のため対象外)。
+          final reviewRowText = find.descendant(
+            of: find.byKey(const Key('review-2')),
+            matching: find.byType(Text),
+          );
+          final texts = tester
+              .widgetList<Text>(reviewRowText)
+              .map((t) => t.data ?? '')
+              .join('\n');
+          expect(texts.contains('not-attending-count-present'), isFalse);
+          expect(texts.contains('program-2'), isFalse);
+        },
+      );
+
+      testWidgets(
+        'program別予定は「確定できる予定」と「確認が必要」を分けて表示する(確認待ちを除外した数字を全体の予定に見せない)',
+        (tester) async {
+          final service = FakeImportService(
+            previewHandler: (_) async => notAttendingCountPreview(),
+          );
+          await _open(tester, service, pick: () => _csv(reviewCsv()));
+          await _preview_(tester);
+          // 確定できる予定は0(このCSVの1行は不参加のため、どのprogramにも参加候補が無い)。
+          expect(
+            find.textContaining('確定できる予定: 0人 / 0 participant'),
+            findsWidgets,
+          );
+          // データ矛盾の行はどのprogramへも参加候補にならない(サーバーはattendanceを作らない)ため、
+          // program別の「確認が必要」件数には出ない(行自体は下の確認リストに残る)。
+          expect(find.byKey(const Key('review-2')), findsOneWidget);
+        },
+      );
+    },
+  );
+
   group('プレビュー必須・無効化', () {
     testWidgets('プレビュー前は確定の入口がない', (tester) async {
       final service = FakeImportService();

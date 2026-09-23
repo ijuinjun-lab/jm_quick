@@ -8,6 +8,7 @@ const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {createImportApi} = require("../confirmed/import_api");
+const {createPassApi} = require("../confirmed/pass_api");
 const {confirmedCallable} = require("../auth");
 
 const silent = {warn: () => {}};
@@ -20,15 +21,19 @@ const HEADERS = ["区分", "rd", "氏名", "かな", "メールアドレス", "�
   "午前参加時間", "午前参加人数", "午前相談", "午後参加時間", "午後参加人数", "午後相談",
   "トークショー", "トークショー人数", "キャンセル待希望枠", "キャンセル待希望人数", "登録日時", "備考"];
 
+// Phase 11G: 午前/午後参加時間はslotFormat="label"(文字列としてそのまま保持。開始・終了時刻としての
+// 妥当性検証はしない)。実CSV(sipposample1.csv、本番E2Eで確認)には「22:20-22:20」のような、主催者の
+// 確定参加者リスト上の時間枠の表示値が含まれ、これをtimeRangeとして厳密検証するとslot-zero-length・
+// slot-reversedが大量に発生し、37/90行が不要にreview化されていた(読み取り専用監査で確認済み)。
 function sippoMapping() {
   return {
     version: 1,
     participant: {nameColumn: "氏名", kanaColumn: "かな", emailColumn: "メールアドレス", registeredAtColumn: "登録日時"},
     programs: [
       {programId: "program-1", participationColumn: "午前参加時間", notAttendingValues: [NOT_ATTENDING],
-        emptyMeans: "notAttending", slotColumn: "午前参加時間", slotFormat: "timeRange", countColumn: "午前参加人数"},
+        emptyMeans: "notAttending", slotColumn: "午前参加時間", slotFormat: "label", countColumn: "午前参加人数"},
       {programId: "program-2", participationColumn: "午後参加時間", notAttendingValues: [NOT_ATTENDING],
-        emptyMeans: "notAttending", slotColumn: "午後参加時間", slotFormat: "timeRange", countColumn: "午後参加人数"},
+        emptyMeans: "notAttending", slotColumn: "午後参加時間", slotFormat: "label", countColumn: "午後参加人数"},
       {programId: "program-3", participationColumn: "トークショー", attendingValues: [ATTENDING],
         notAttendingValues: [NOT_ATTENDING], emptyMeans: "notAttending", countColumn: "トークショー人数"},
     ],
@@ -62,14 +67,20 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
 
   const makeApi = () => {
     const api = createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+    const passApi = createPassApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
     const wrap = (level, handler) => {
       const callable = confirmedCallable(level, handler, {db, logger: silent});
       return (request) => callable.run(request);
     };
-    return {preview: wrap("admin", api.preview), commit: wrap("admin", api.commit)};
+    return {
+      preview: wrap("admin", api.preview),
+      commit: wrap("admin", api.commit),
+      checkIn: wrap("staffOrAdmin", passApi.checkIn),
+    };
   };
   let api;
   const asAdmin = (data) => ({auth: {uid: "u-admin"}, data});
+  const asStaff = (data) => ({auth: {uid: "u-staff"}, data});
 
   async function seedEvent(overrides = {}) {
     const program = (programId, name, order) => ({programId, name, order});
@@ -98,6 +109,7 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
   beforeEach(async () => {
     await env.clear();
     await db.collection("accessRoles").doc("u-admin").set({role: "admin", active: true});
+    await db.collection("accessRoles").doc("u-staff").set({role: "staff", active: true});
     await seedEvent();
     api = makeApi();
   });
@@ -106,6 +118,42 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
     const result = await api.preview(asAdmin(request(90)));
     assert.deepEqual([result.totalRows, result.readyCount, result.reviewCount, result.errorCount], [90, 90, 0, 0]);
     assert.equal(result.participantCandidateCount, 90);
+  });
+
+  // Phase 11G: 本番E2Eで確認した実CSV(sipposample1.csv、90行)と同じ比率の「時間枠の表示値」パターンを
+  // 架空データで再現したfixture(実CSVの値はコピーしない。読み取り専用監査で確認した現象の再現のみ)。
+  // A: 午前参加時間="22:20-22:20"(開始=終了に見える値)21件 + 午後="21:20-21:20" 2件 = 23件
+  // B: 午後参加時間="22:20-21:20"(逆転に見える値)8件
+  // C: 「参加を希望しない」なのに人数が入っている(データ矛盾)3件
+  // D: A・Bのパターンと、Cのパターンが同じ行に同時発生 3件
+  // 残り53件は通常の参加(defaults()どおり)。合計90行。
+  function sipposampleLikeTable() {
+    const overridesFor = (i) => {
+      if (i >= 1 && i <= 21) return {"午前参加時間": "22:20-22:20", "午前参加人数": "2"};
+      if (i >= 22 && i <= 23) return {"午後参加時間": "21:20-21:20", "午後参加人数": "2"};
+      if (i >= 24 && i <= 31) return {"午後参加時間": "22:20-21:20", "午後参加人数": "2"};
+      if (i >= 32 && i <= 34) {
+        return {"午前参加時間": NOT_ATTENDING, "午前参加人数": "", "午後参加時間": NOT_ATTENDING, "午後参加人数": "2"};
+      }
+      if (i >= 35 && i <= 37) {
+        // 午前は「22:20-22:20」に見える値だが参加の意思あり(label化により問題なし)、
+        // 午後は「参加を希望しない」なのに人数が入っている(データ矛盾)、という2つのパターンが同じ行に発生。
+        return {"午前参加時間": "22:20-22:20", "午前参加人数": "2", "午後参加時間": NOT_ATTENDING, "午後参加人数": "2"};
+      }
+      return {};
+    };
+    return makeTable(90, overridesFor);
+  }
+
+  test("Phase 11G: 実CSVと同じ比率のfixture(90行)で、時間枠だけを理由とするreviewは0件、データ矛盾だけがreviewに残る", async () => {
+    const result = await api.preview(asAdmin(request(sipposampleLikeTable())));
+    assert.deepEqual(
+      [result.totalRows, result.readyCount, result.reviewCount, result.errorCount],
+      [90, 84, 6, 0],
+    );
+    assert.deepEqual(result.issueCounts, {"not-attending-count-present": 6});
+    assert.ok(!("slot-zero-length" in result.issueCounts), "slot-zero-lengthは発生しない");
+    assert.ok(!("slot-reversed" in result.issueCounts), "slot-reversedは発生しない");
   });
 
   test("氏名・かな・メールが自動取得され、午前参加時間/午前参加人数からprogram-1、午後参加時間/午後参加人数からprogram-2、トークショー/トークショー人数からprogram-3のattendanceが作られる。1人が3program参加してもparticipantは1件・attendanceは3件", async () => {
@@ -174,11 +222,42 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
     assert.deepEqual(text.rows[0].issueCodes, ["count-invalid"]);
   });
 
-  test("22:20-22:20のような値も「有効な時間枠文字列」として参加の意思ありと扱う(時間枠自体の問題はreview)", async () => {
+  test("Phase 11G: 時間枠はlabelとして保持するため、22:20-22:20(開始=終了に見える値)もreadyになる(slot-zero-lengthは発生しない)", async () => {
     const result = await api.preview(asAdmin(request(makeTable(1, () => ({"午前参加時間": "22:20-22:20"})))));
+    assert.equal(result.rows[0].classification, "ready");
+    assert.deepEqual(result.rows[0].issueCodes, []);
+    assert.deepEqual(result.rows[0].programIds, ["program-1"]);
+    const committed = await api.commit(asAdmin(request(makeTable(1, () => ({"午前参加時間": "22:20-22:20"})))));
+    assert.equal(committed.createdCount, 1);
+    const attendance = (await docs("programAttendances"))[0].data();
+    assert.deepEqual([attendance.slotLabel, attendance.startAt, attendance.endAt], ["22:20-22:20", null, null]);
+  });
+
+  test("Phase 11G: 22:20-21:20(逆転に見える値)もlabelとして保持し、slot-reversedは発生しない", async () => {
+    const result = await api.preview(asAdmin(request(makeTable(1, () => ({"午後参加時間": "22:20-21:20", "午後参加人数": "2"})))));
+    assert.equal(result.rows[0].classification, "ready");
+    assert.deepEqual(result.rows[0].issueCodes, []);
+    const committed = await api.commit(asAdmin(request(makeTable(1, () => ({"午後参加時間": "22:20-21:20", "午後参加人数": "2"})))));
+    assert.equal(committed.createdCount, 1);
+    const beta = (await docs("programAttendances")).find((d) => d.data().programId === "program-2").data();
+    assert.deepEqual([beta.slotLabel, beta.startAt, beta.endAt, beta.plannedCount], ["22:20-21:20", null, null, 2]);
+  });
+
+  test("Phase 11G: 21:20-21:20(開始=終了に見える値。別の時刻)も同様にreadyのままlabelとして保持する", async () => {
+    const result = await api.preview(asAdmin(request(makeTable(1, () => ({"午後参加時間": "21:20-21:20", "午後参加人数": "2"})))));
+    assert.equal(result.rows[0].classification, "ready");
+    assert.deepEqual(result.rows[0].issueCodes, []);
+  });
+
+  test("Phase 11G: 「参加を希望しない」なのに人数が入っている行は、引き続き自動判断せずreviewに残す(データ矛盾は緩めない)", async () => {
+    const table = makeTable(1, () => ({
+      "午前参加時間": NOT_ATTENDING, "午前参加人数": "",
+      "午後参加時間": NOT_ATTENDING, "午後参加人数": "2",
+    }));
+    const result = await api.preview(asAdmin(request(table)));
     assert.equal(result.rows[0].classification, "review");
-    assert.deepEqual(result.rows[0].issueCodes, ["slot-zero-length"]);
-    assert.deepEqual(result.rows[0].programIds, ["program-1"], "参加の意思はあるのでattendance候補は作られる");
+    assert.deepEqual(result.rows[0].issueCodes, ["not-attending-count-present"]);
+    assert.deepEqual(result.rows[0].programIds, [], "不参加のためattendance候補にはならない(午前は不参加・人数も無し、トークショーはdefaultsで不参加)");
   });
 
   test("slotLabelは参加者ごとに独立している", async () => {
@@ -258,5 +337,28 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
     const ids = (await docs("participants")).map((d) => d.data().publicId);
     assert.equal(new Set(ids).size, 30);
     assert.ok(ids.every((id) => /^pub_[A-Za-z0-9_-]{32}$/.test(id)));
+  });
+
+  test("Phase 11G回帰: 当日のQR受付(既存・無変更のcheckIn)は、CSV取込時のplannedCountを変更せず、attendedCountだけを実参加人数として保存する", async () => {
+    // 予定4名(CSVの人数)で取込 → 当日は2名だけ来場、というplannedCount≠attendedCountの典型例。
+    await api.commit(asAdmin(request(makeTable(1, () => ({"午前参加時間": "22:20-22:20", "午前参加人数": "4"})))));
+    const before = (await docs("participants"))[0].data();
+    const attendanceBefore = (await db.collection("programAttendances").doc(`${before.participantId}_program-1`).get()).data();
+    assert.deepEqual([attendanceBefore.plannedCount, attendanceBefore.slotLabel, attendanceBefore.checkedIn, attendanceBefore.attendedCount],
+      [4, "22:20-22:20", false, null], "取込直後はplannedCount=4・未受付(attendedCountはまだ無い)");
+
+    const outcome = await api.checkIn(asStaff({
+      eventId: "event1", participantId: before.participantId, publicId: before.publicId,
+      programId: "program-1", attendedCount: 2,
+    }));
+    assert.equal(outcome.alreadyCheckedIn, false);
+    assert.deepEqual([outcome.program.plannedCount, outcome.program.attendedCount], [4, 2]);
+
+    const attendanceAfter = (await db.collection("programAttendances").doc(`${before.participantId}_program-1`).get()).data();
+    assert.deepEqual(
+      [attendanceAfter.plannedCount, attendanceAfter.slotLabel, attendanceAfter.checkedIn, attendanceAfter.attendedCount],
+      [4, "22:20-22:20", true, 2],
+      "受付後もplannedCountは4のまま変わらず、attendedCountだけが実参加人数(2)として記録される",
+    );
   });
 });
