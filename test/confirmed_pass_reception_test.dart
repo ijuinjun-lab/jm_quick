@@ -921,6 +921,88 @@ void main() {
       expect(reception.viewCalls, 0);
     });
 
+    testWidgets(
+      'Phase 11K: 未ログインでこのQRを開くと「受付スタッフへご提示ください」の案内が出て、'
+      '受付操作(来場人数入力・受付する)は無い。ログイン欄自体は残る(受付スタッフはここからログインできる)',
+      (tester) async {
+        setPhone(tester, height: 1600);
+        final reception = FakeReceptionService(programs: [...threePrograms]);
+        await tester.pumpWidget(
+          route(
+            legacy: false,
+            auth: FakeAuthClient(signedIn: false),
+            access: FakeAccessService([]),
+            reception: reception,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('このQRコードは、受付スタッフへご提示ください。'), findsOneWidget);
+        expect(find.text('参加証を確認する'), findsOneWidget);
+        // 受付操作に関する表示・欄は一切無い。
+        expect(find.text('受付する'), findsNothing);
+        expect(find.widgetWithText(TextField, '実来場人数'), findsNothing);
+        // ログイン(受付スタッフ用)の欄はそのまま残っている。
+        expect(find.widgetWithText(TextField, 'メールアドレス'), findsOneWidget);
+        expect(find.widgetWithText(TextField, 'パスワード'), findsOneWidget);
+        expect(find.text('ログイン'), findsWidgets);
+        expect(reception.viewCalls, 0);
+      },
+    );
+
+    testWidgets(
+      'Phase 11K: 「参加証を確認する」で、同じparticipantの既存Web参加証(/p/…、ログイン不要)へ遷移する。'
+      '参加証データはここで新しく組み立てない(既存の/pルートへ遷移するだけ)',
+      (tester) async {
+        String? navigatedTo;
+        await tester.pumpWidget(
+          MaterialApp(
+            onGenerateRoute: (settings) => MaterialPageRoute<void>(
+              settings: settings,
+              builder: (_) {
+                if (settings.name != '/') {
+                  navigatedTo = settings.name;
+                  return const Scaffold(body: Text('NAVIGATED'));
+                }
+                return ReceptionRoutePage(
+                  eventId: 'event1',
+                  participantId: 'batchA-000002',
+                  publicId: 'pub_x',
+                  legacyBuilder: (_) =>
+                      const Scaffold(body: Text('LEGACY-RECEPTION')),
+                  authClient: FakeAuthClient(signedIn: false),
+                  accessService: FakeAccessService([]),
+                  receptionService: FakeReceptionService(programs: const []),
+                  isLegacyEvent: (_) async => false,
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('参加証を確認する'));
+        await tester.pumpAndSettle();
+        expect(navigatedTo, '/p/batchA-000002?publicId=pub_x');
+        expect(find.text('NAVIGATED'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'Phase 11K: 390px幅でも、未ログイン時の案内・受付画面ともオーバーフローしない',
+      (tester) async {
+        setPhone(tester, width: 390, height: 1600);
+        await tester.pumpWidget(
+          route(
+            legacy: false,
+            auth: FakeAuthClient(signedIn: false),
+            access: FakeAccessService([]),
+            reception: FakeReceptionService(programs: [...threePrograms]),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      },
+    );
+
     testWidgets('staff・adminはログイン後に受付画面が表示される', (tester) async {
       for (final role in [AccessRole.staff, AccessRole.admin]) {
         setPhone(tester, height: 1800);
@@ -936,6 +1018,12 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('架空 太郎 様'), findsOneWidget, reason: '$role');
         expect(find.text('受付する'), findsNWidgets(3));
+        // ログイン済みなら、未ログイン向けの案内(受付スタッフへ提示してください等)は出ない。
+        expect(
+          find.text('このQRコードは、受付スタッフへご提示ください。'),
+          findsNothing,
+          reason: '$role',
+        );
       }
     });
 

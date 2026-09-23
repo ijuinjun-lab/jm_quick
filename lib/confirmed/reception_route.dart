@@ -79,6 +79,15 @@ class _ReceptionRoutePageState extends State<ReceptionRoutePage> {
       accessService:
           widget._accessService ??
           CallableAccessService(authClient: authClient),
+      // 未ログインでこのQRを開いた人(参加者本人を含む)には、受付スタッフ用ログイン画面はそのまま出すが
+      // (受付スタッフがこのURLから直接ログインし直す場合にも変わらず使える)、その上に「これは受付スタッフへ
+      // 提示するもの」という案内と、自分の参加証(/p/…読み取り専用・ログイン不要)への導線を追加する。
+      // 受付操作UI(来場人数入力・受付するボタン)は、この案内の有無にかかわらず未ログインでは元々出ない
+      // (AuthGateの構造上、adminBuilder/staffBuilderは権限確認後にしか呼ばれない)。
+      signedOutBanner: _ParticipantGuidanceBanner(
+        participantId: widget.participantId!,
+        publicId: widget.publicId!,
+      ),
       adminBuilder: (context, signOut) => _KindResolver(
         route: widget,
         authClient: authClient,
@@ -181,6 +190,53 @@ class _KindResolverState extends State<_KindResolver> {
             : null,
       );
     },
+  );
+}
+
+/// 未ログインで受付用QRの/receptionを開いた人(参加者本人を含む)向けの案内。ログイン画面(参加者は使わない)の
+/// 上に表示するだけで、受付操作(来場人数入力・「受付する」)は含まない。
+/// 「参加証を確認する」は、既存の読み取り専用ページ(/p/{participantId}?publicId=…。ログイン不要・
+/// getConfirmedParticipantPassを使う既存の仕組み)への遷移だけで、ここで新しく参加証データを取得・
+/// 組み立てることはしない。
+class _ParticipantGuidanceBanner extends StatelessWidget {
+  const _ParticipantGuidanceBanner({
+    required this.participantId,
+    required this.publicId,
+  });
+  final String participantId;
+  final String publicId;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    color: const Color(0xfff7f8fa),
+    child: Padding(
+      padding: const EdgeInsets.all(18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'このQRコードは、受付スタッフへご提示ください。',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'ご参加者ご本人がこの画面から受付を行うことはできません。'
+            '参加内容を確認したい場合は、下記から参加証をご覧いただけます(ログイン不要)。',
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton(
+              key: const Key('reception-open-pass'),
+              onPressed: () => Navigator.of(context).pushReplacementNamed(
+                '/p/$participantId?publicId=${Uri.encodeQueryComponent(publicId)}',
+              ),
+              child: const Text('参加証を確認する'),
+            ),
+          ),
+        ],
+      ),
+    ),
   );
 }
 

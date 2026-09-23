@@ -24,12 +24,17 @@ class AuthGate extends StatefulWidget {
     required this.accessService,
     required this.adminBuilder,
     required this.staffBuilder,
+    this.signedOutBanner,
   });
 
   final AuthClient authClient;
   final AccessService accessService;
   final RoleBuilder adminBuilder;
   final RoleBuilder staffBuilder;
+
+  /// 未ログイン時のログイン画面の上に表示する、任意の案内(既定はnull=これまでと同じログイン画面のまま)。
+  /// 管理系の各画面(イベント一覧・CSV取込・scanner等)はこれを渡さず、動作は変わらない。
+  final Widget? signedOutBanner;
 
   @override
   State<AuthGate> createState() => _AuthGateState();
@@ -96,7 +101,10 @@ class _AuthGateState extends State<AuthGate> {
       case _Phase.starting:
         return const _Waiting('読み込み中…');
       case _Phase.signedOut:
-        return ConfirmedLoginPage(authClient: widget.authClient);
+        return ConfirmedLoginPage(
+          authClient: widget.authClient,
+          banner: widget.signedOutBanner,
+        );
       case _Phase.checking:
         return const _Waiting('権限を確認中…');
       case _Phase.decided:
