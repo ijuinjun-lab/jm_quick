@@ -93,6 +93,11 @@ Widget _page(FakeWinnerMailService service) => MaterialApp(
   home: WinnerMailPage(service: service, initialEventId: 'event-a'),
 );
 
+// 実際にデコードできる最小のPNG(1x1・透明)。サーバーのcomposeWinnerMailForが返すQR画像と同じ形式
+// (PNG・base64)であることだけを確認するための架空データ(実物のQRペイロードではない)。
+const _fakePngBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
 Future<void> _load(WidgetTester tester) async {
   // 縦長の画面(スクロールなしでボタンまで届く)にして、テストがレイアウトに左右されないようにする。
   tester.view.physicalSize = const Size(1200, 4000);
@@ -193,7 +198,7 @@ void main() {
 
     testWidgets(
       'プレビューは、利用者が入力しなくても、サーバーが選んだ参加者に対して自動的に呼ばれ、'
-      'サーバーが作った件名・本文をそのまま表示する(送信はしない)',
+      'サーバーが作った件名・本文・QR画像・Web参加証URLをそのまま表示する(送信はしない)',
       (tester) async {
         final service = FakeWinnerMailService(
           settings: _settings(previewParticipantId: 'batch-000001-0001'),
@@ -203,6 +208,10 @@ void main() {
             subject: '【当選】ご案内',
             text: '架空 花子 様\n参加証: https://example.invalid/p/x',
             templateVersion: 2,
+            webPassUrl: 'https://example.invalid/p/batch-000001-0001',
+            qrPayload:
+                'https://example.invalid/reception?eventId=event-a&participantId=batch-000001-0001',
+            qrPngBase64: _fakePngBase64,
           ),
         );
         await tester.pumpWidget(_page(service));
@@ -215,12 +224,88 @@ void main() {
         await tester.tap(find.text('プレビューを表示'));
         await tester.pumpAndSettle();
         expect(find.textContaining('架空 花子 様'), findsOneWidget);
-        expect(find.textContaining('受付用QRコードの画像が表示されます'), findsOneWidget);
+        // HTMLメールプレビュー(QR画像を含む)が、テキスト版に加えて表示される。
+        expect(find.textContaining('HTMLメールプレビュー'), findsOneWidget);
+        expect(find.textContaining('受付QR画像を含む完成形'), findsOneWidget);
+        // サーバーが返したQR画像(qrPngBase64)がデコードされ、Image.memoryとして表示される。
+        // (ここでQRを作り直していない。サーバーの返却バイト列とウィジェットのバイト列が一致する)
+        final image = tester.widget<Image>(find.byType(Image));
+        final provider = image.image as MemoryImage;
+        expect(provider.bytes, base64Decode(_fakePngBase64));
+        // Web参加証URLも、サーバーが返した値がそのまま表示される。
+        expect(
+          find.text('https://example.invalid/p/batch-000001-0001'),
+          findsOneWidget,
+        );
         // サーバー(settings.previewParticipantId)が選んだIDがそのまま使われる。
         expect(service.calls.last, 'preview:event-a:batch-000001-0001');
-        // メール送信・更新につながる呼び出しは一切無い(プレビューは副作用を持たない)。
+        // メール送信・更新・送信ジョブ関連の呼び出しは一切無い(プレビューは副作用を持たない)。
         expect(service.calls.any((c) => c.startsWith('update')), isFalse);
         expect(service.calls.where((c) => c.startsWith('preview')).length, 1);
+      },
+    );
+
+    testWidgets(
+      'プレビューを何度押しても、preview呼び出しが増えるだけで、送信・配送に類する呼び出しは一切発生しない',
+      (tester) async {
+        final service = FakeWinnerMailService(
+          settings: _settings(),
+          previewResult: const WinnerMailPreview(
+            ready: true,
+            problems: [],
+            subject: '【当選】ご案内',
+            text: '架空 花子 様',
+            templateVersion: 2,
+            webPassUrl: 'https://example.invalid/p/x',
+            qrPngBase64: _fakePngBase64,
+          ),
+        );
+        await tester.pumpWidget(_page(service));
+        await _load(tester);
+        for (var i = 0; i < 3; i++) {
+          await tester.tap(find.text('プレビューを表示'));
+          await tester.pumpAndSettle();
+        }
+        expect(
+          service.calls.where((c) => c.startsWith('preview')).length,
+          3,
+        );
+        // FakeWinnerMailServiceにはそもそも送信・ジョブ作成の手段が無い(WinnerMailServiceの契約に無い)。
+        // callsに現れるのは get/update/preview だけであることを確認し、それ以外が紛れ込んでいないことを担保する。
+        expect(
+          service.calls.every(
+            (c) =>
+                c.startsWith('get:') ||
+                c.startsWith('update:') ||
+                c.startsWith('preview:'),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets(
+      'サーバーの応答にQR画像が無い・壊れている場合でも、画面全体は落ちずエラー文言だけを表示する',
+      (tester) async {
+        final service = FakeWinnerMailService(
+          settings: _settings(),
+          previewResult: const WinnerMailPreview(
+            ready: true,
+            problems: [],
+            subject: '【当選】ご案内',
+            text: '架空 花子 様',
+            templateVersion: 2,
+            webPassUrl: 'https://example.invalid/p/x',
+            qrPngBase64: '', // 想定外の空応答
+          ),
+        );
+        await tester.pumpWidget(_page(service));
+        await _load(tester);
+        await tester.tap(find.text('プレビューを表示'));
+        await tester.pumpAndSettle();
+        expect(find.text('QR画像を取得できませんでした。'), findsOneWidget);
+        expect(find.byType(Image), findsNothing);
+        expect(tester.takeException(), isNull);
       },
     );
 
@@ -282,7 +367,9 @@ void main() {
       },
     );
 
-    testWidgets('幅390pxでもレイアウト例外(オーバーフロー)が起きない', (tester) async {
+    testWidgets('幅390pxでもレイアウト例外(オーバーフロー)が起きない(QR画像プレビューを含む)', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(390, 1600);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -294,6 +381,8 @@ void main() {
           subject: '【当選】ご案内',
           text: '架空 花子 様',
           templateVersion: 2,
+          webPassUrl: 'https://example.invalid/p/batch-000001-0001',
+          qrPngBase64: _fakePngBase64,
         ),
       );
       await tester.pumpWidget(_page(service));
@@ -302,6 +391,7 @@ void main() {
       await tester.tap(find.text('プレビューを表示'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
+      expect(find.byType(Image), findsOneWidget);
     });
   });
 

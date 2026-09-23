@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../widgets/common.dart';
@@ -279,6 +281,30 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     ),
   );
 
+  /// 実送信と同じ composeWinnerMailFor が生成したQR画像(PNG・base64)をそのまま表示する。
+  /// ここで新しくQRを生成することはしない(サーバーが返した画像バイト列をデコードして表示するだけ)。
+  /// サーバーの応答が想定外(空・壊れたbase64)でも、例外で画面全体を落とさない。
+  Widget _qrPreview(String base64Png) {
+    if (base64Png.isEmpty) {
+      return const Text(
+        'QR画像を取得できませんでした。',
+        style: TextStyle(color: Color(0xffb42318)),
+      );
+    }
+    try {
+      final bytes = base64Decode(base64Png);
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Image.memory(bytes, width: 240, height: 240, fit: BoxFit.contain),
+      );
+    } catch (_) {
+      return const Text(
+        'QR画像を表示できませんでした。',
+        style: TextStyle(color: Color(0xffb42318)),
+      );
+    }
+  }
+
   Widget _previewCard() => Card(
     child: Padding(
       padding: const EdgeInsets.all(18),
@@ -332,11 +358,31 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
                 color: const Color(0xfff7f8fa),
                 child: SelectableText(preview!.text),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 20),
+              // Phase 11J: HTMLメール自体(preview!.html)はここに埋め込まない。QR画像はメールでは
+              // cid:(MIME添付の参照)で埋め込まれておりブラウザでは解決できず、また任意のサーバーHTMLを
+              // そのままFlutter側でDOM描画する経路を新設しない(script実行・危険なnavigation対策)。
+              // 代わりに、実送信と全く同じ composeWinnerMailFor が生成したQR画像そのもの(preview!.qrPngBase64。
+              // ここでQRを作り直してはいない)と、実送信と同じWeb参加証URLを、Flutter widgetとして表示する。
               const Text(
-                '実際のメールは、この内容に加えて受付用QRコードの画像が表示されます(HTMLメール)。',
+                'HTMLメールプレビュー(受付QR画像を含む完成形)',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '実際のHTMLメールに表示されるのと同じQR画像です(実送信と同じ処理で生成したものをそのまま表示しています)。'
+                '宛名・参加program・参加時間・参加人数・開催情報は、上の本文(テキスト版)と同じ内容がHTMLメールにも入ります。',
                 style: TextStyle(color: Color(0xff5c6670)),
               ),
+              const SizedBox(height: 10),
+              _qrPreview(preview!.qrPngBase64),
+              const SizedBox(height: 14),
+              const Text(
+                'Web参加証URL(QRコードが読み取れない場合、メール内にもこのリンクが表示されます)',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 4),
+              SelectableText(preview!.webPassUrl),
             ],
           ],
         ],
