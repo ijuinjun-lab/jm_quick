@@ -69,6 +69,10 @@ class FakeWinnerMailService implements WinnerMailService {
 WinnerMailSettings _settings({
   bool ready = true,
   List<String> problems = const [],
+  // サーバー(getConfirmedWinnerMailSettings)が選んだ、プレビュー対象のparticipantId。
+  // Phase 11I: 利用者は入力しない。既定は「取込済み参加者が1件ある」状態(架空のID)。
+  // nullにすると「取込済みの参加者がありません」の案内を再現できる。
+  String? previewParticipantId = 'batch-000001-0001',
 }) => WinnerMailSettings(
   eventId: 'event-a',
   eventName: 'テスト譲渡会',
@@ -82,6 +86,7 @@ WinnerMailSettings _settings({
   ready: ready,
   problems: problems,
   missingOptional: const [],
+  previewParticipantId: previewParticipantId,
 );
 
 Widget _page(FakeWinnerMailService service) => MaterialApp(
@@ -186,34 +191,42 @@ void main() {
       expect(find.text('保存'), findsNothing);
     });
 
-    testWidgets('プレビューはサーバーが作った件名・本文をそのまま表示し、送信はしない', (tester) async {
-      final service = FakeWinnerMailService(
-        settings: _settings(),
-        previewResult: const WinnerMailPreview(
-          ready: true,
-          problems: [],
-          subject: '【当選】ご案内',
-          text: '架空 花子 様\n参加証: https://example.invalid/p/x',
-          templateVersion: 2,
-        ),
-      );
-      await tester.pumpWidget(_page(service));
-      await _load(tester);
-      await tester.enterText(
-        find.widgetWithText(TextField, '参加者ID'),
-        'batch-000001',
-      );
-      await tester.tap(find.text('プレビューを表示'));
-      await tester.pumpAndSettle();
-      expect(find.textContaining('架空 花子 様'), findsOneWidget);
-      expect(find.textContaining('受付用QRコードの画像が表示されます'), findsOneWidget);
-      expect(service.calls.last, 'preview:event-a:batch-000001');
-      expect(service.calls.any((c) => c.startsWith('update')), isFalse);
-    });
+    testWidgets(
+      'プレビューは、利用者が入力しなくても、サーバーが選んだ参加者に対して自動的に呼ばれ、'
+      'サーバーが作った件名・本文をそのまま表示する(送信はしない)',
+      (tester) async {
+        final service = FakeWinnerMailService(
+          settings: _settings(previewParticipantId: 'batch-000001-0001'),
+          previewResult: const WinnerMailPreview(
+            ready: true,
+            problems: [],
+            subject: '【当選】ご案内',
+            text: '架空 花子 様\n参加証: https://example.invalid/p/x',
+            templateVersion: 2,
+          ),
+        );
+        await tester.pumpWidget(_page(service));
+        await _load(tester);
+        // 参加者IDを入力する欄自体が存在しない。
+        expect(
+          find.widgetWithText(TextField, '参加者ID'),
+          findsNothing,
+        );
+        await tester.tap(find.text('プレビューを表示'));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('架空 花子 様'), findsOneWidget);
+        expect(find.textContaining('受付用QRコードの画像が表示されます'), findsOneWidget);
+        // サーバー(settings.previewParticipantId)が選んだIDがそのまま使われる。
+        expect(service.calls.last, 'preview:event-a:batch-000001-0001');
+        // メール送信・更新につながる呼び出しは一切無い(プレビューは副作用を持たない)。
+        expect(service.calls.any((c) => c.startsWith('update')), isFalse);
+        expect(service.calls.where((c) => c.startsWith('preview')).length, 1);
+      },
+    );
 
-    testWidgets('プレビューできない理由は日本語で表示される', (tester) async {
+    testWidgets('プレビューできない理由は日本語で表示される(参加者は自動的に選ばれる)', (tester) async {
       final service = FakeWinnerMailService(
-        settings: _settings(),
+        settings: _settings(previewParticipantId: 'batch-000001-0001'),
         previewResult: const WinnerMailPreview(
           ready: false,
           problems: ['no-attendance'],
@@ -221,10 +234,74 @@ void main() {
       );
       await tester.pumpWidget(_page(service));
       await _load(tester);
-      await tester.enterText(find.widgetWithText(TextField, '参加者ID'), 'p1');
       await tester.tap(find.text('プレビューを表示'));
       await tester.pumpAndSettle();
       expect(find.text('この参加者には参加するprogramがありません。'), findsOneWidget);
+    });
+
+    testWidgets(
+      '取込済みの参加者が0件なら、案内文だけを表示し、IDを入力させる欄には切り替わらない',
+      (tester) async {
+        final service = FakeWinnerMailService(
+          settings: _settings(previewParticipantId: null),
+        );
+        await tester.pumpWidget(_page(service));
+        await _load(tester);
+        expect(find.text('取込済みの参加者がありません。先にCSV取込を行ってください。'), findsOneWidget);
+        expect(find.text('プレビューを表示'), findsNothing);
+        // 代替として参加者IDやpublicIdを入力させる欄は一切出ない。
+        expect(find.byType(TextField).evaluate().any((e) {
+          final label = (e.widget as TextField).decoration?.labelText ?? '';
+          return label.contains('参加者ID') || label.contains('publicId');
+        }), isFalse);
+        // 0件なのでpreview呼び出し自体が起きない(サーバーへの無駄打ち・誤ったプレビューを防ぐ)。
+        expect(service.calls.any((c) => c.startsWith('preview')), isFalse);
+      },
+    );
+
+    testWidgets(
+      '複数の取込回(バッチ)があっても、画面はサーバーが返したpreviewParticipantIdをそのまま使うだけで、'
+      'バッチを気にしない(イベント単位の設計)',
+      (tester) async {
+        // 「第2回」相当の取込由来のIDでも、画面側は特別扱いせずそのまま使う。
+        final service = FakeWinnerMailService(
+          settings: _settings(previewParticipantId: 'batch-000002-0007'),
+          previewResult: const WinnerMailPreview(
+            ready: true,
+            problems: [],
+            subject: '【当選】ご案内',
+            text: '架空 次郎 様',
+            templateVersion: 2,
+          ),
+        );
+        await tester.pumpWidget(_page(service));
+        await _load(tester);
+        await tester.tap(find.text('プレビューを表示'));
+        await tester.pumpAndSettle();
+        expect(service.calls.last, 'preview:event-a:batch-000002-0007');
+      },
+    );
+
+    testWidgets('幅390pxでもレイアウト例外(オーバーフロー)が起きない', (tester) async {
+      tester.view.physicalSize = const Size(390, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final service = FakeWinnerMailService(
+        settings: _settings(),
+        previewResult: const WinnerMailPreview(
+          ready: true,
+          problems: [],
+          subject: '【当選】ご案内',
+          text: '架空 花子 様',
+          templateVersion: 2,
+        ),
+      );
+      await tester.pumpWidget(_page(service));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('プレビューを表示'));
+      await tester.tap(find.text('プレビューを表示'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
     });
   });
 
@@ -400,30 +477,65 @@ void main() {
       }
     });
 
-    test('getSettingsの結果はモデルに変換される(未設定のtemplateはnullでも落ちない)', () async {
-      final s = service(
-        MockClient(
-          (request) async => http.Response(
-            jsonEncode({
-              'result': {
-                'eventId': 'e1',
-                'template': null,
-                'venueInfo': {'address': '', 'access': ''},
-                'event': {'eventName': '名前'},
-                'ready': false,
-                'problems': ['template-not-configured'],
-                'missingOptional': [],
-              },
-            }),
-            200,
-            headers: {'content-type': 'application/json; charset=utf-8'},
+    test(
+      'getSettingsの結果はモデルに変換される(未設定のtemplateはnullでも落ちない。'
+      'previewParticipantIdは未指定ならnullのまま)',
+      () async {
+        final s = service(
+          MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'result': {
+                  'eventId': 'e1',
+                  'template': null,
+                  'venueInfo': {'address': '', 'access': ''},
+                  'event': {'eventName': '名前'},
+                  'ready': false,
+                  'problems': ['template-not-configured'],
+                  'missingOptional': [],
+                  'previewParticipantId': null,
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            ),
           ),
-        ),
-      );
-      final settings = await s.getSettings('e1');
-      expect(settings.ready, isFalse);
-      expect(settings.subject, '');
-      expect(settings.problems, ['template-not-configured']);
-    });
+        );
+        final settings = await s.getSettings('e1');
+        expect(settings.ready, isFalse);
+        expect(settings.subject, '');
+        expect(settings.problems, ['template-not-configured']);
+        expect(settings.previewParticipantId, isNull);
+      },
+    );
+
+    test(
+      'getSettingsが返すpreviewParticipantIdはそのままモデルに反映される'
+      '(サーバーが選んだ値をクライアントが書き換えない)',
+      () async {
+        final s = service(
+          MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'result': {
+                  'eventId': 'e1',
+                  'template': null,
+                  'venueInfo': {'address': '', 'access': ''},
+                  'event': {'eventName': '名前'},
+                  'ready': false,
+                  'problems': ['template-not-configured'],
+                  'missingOptional': [],
+                  'previewParticipantId': 'batch-000001-0003',
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            ),
+          ),
+        );
+        final settings = await s.getSettings('e1');
+        expect(settings.previewParticipantId, 'batch-000001-0003');
+      },
+    );
   });
 }

@@ -12,6 +12,9 @@ const {isValidParticipantId} = require("../programs");
 const {validateTemplateInput, validateVenueInfo} = require("./winner_mail_template");
 const {buildMailSnapshot, missingOptionalFields, toDate} = require("./mail_view_model");
 const {composeWinnerMailFor} = require("./winner_mail_message");
+// イベント全体で「有効(active)かつ取込(committed)済み」のparticipantを、既存の安定した並び順(participantId昇順)
+// で集める既存関数を再利用する(前日リマインドのプレビュー対象選択と同じもの。新しいFunctionsは追加しない)。
+const {collectReminderTargets} = require("./reminder_targets");
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const invalid = (code, extra) => new ApiError("invalid-argument", `リクエストが不正です: ${code}`, {code, ...extra});
@@ -38,9 +41,14 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
   // 現在のテンプレート・会場情報・不足している項目(送信できるか)を返す。個人情報は含まない。
   async function getSettings({data}) {
     const {eventId} = parseKeys(data, ["eventId"]);
-    const {event} = await loadConfirmedEvent(getDb(), eventId);
+    const db = getDb();
+    const {event} = await loadConfirmedEvent(db, eventId);
     const built = buildMailSnapshot(eventId, event);
     const template = event.winnerMailTemplate || null;
+    // プレビュー用に、このイベントの有効(active)かつ取込(committed)済みのparticipantから1件だけ選ぶ。
+    // 取込回(第1回・第2回…)は問わない(前日リマインドの対象選択と同じ既存ロジック・同じ安定した並び順)。
+    // 0件ならnull(クライアントは「取込済みの参加者がありません」という案内だけを表示し、IDの入力は求めない)。
+    const targets = await collectReminderTargets(db, eventId);
     return {
       eventId,
       template: template ? {
@@ -53,6 +61,7 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       ready: built.ok,
       problems: built.ok ? [] : built.problems,
       missingOptional: built.ok ? missingOptionalFields(built.snapshot) : [],
+      previewParticipantId: targets.targets.length > 0 ? targets.targets[0] : null,
     };
   }
 

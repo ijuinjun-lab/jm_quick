@@ -184,6 +184,45 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
       assert.deepEqual([after.ready, after.template.version, after.template.subject, after.venueInfo], [true, 1, TEMPLATE.subject, VENUE]);
       await rejectsWith(mail.settings(asStaff({eventId: "event1"})), "permission-denied");
     });
+
+    // Phase 11I: プレビュー対象の参加者IDは、利用者が入力するのではなく、getSettingsがサーバー側で自動的に選ぶ。
+    // 前日リマインド(reminder_api.js)のプレビュー対象選択と同じcollectReminderTargets(event全体・active・
+    // committedなbatch由来・participantId昇順)を再利用しているため、ここでは「取込回を問わない」
+    // 「0件ならnull」「同じ状態なら毎回同じ値」の3点だけを確認する(選択ロジック自体の詳細な検証は
+    // reminder_targets.jsの既存テストが担う。新しいFunctionsは追加していない)。
+    test("getSettings.previewParticipantId: 取込済みactiveな参加者から自動的に1件選ばれ、0件ならnull", async () => {
+      const before = await mail.settings(asAdmin({eventId: "event1"}));
+      assert.equal(before.previewParticipantId, null, "取込前は0件");
+      await importBatch("batchA", 5);
+      const after = await mail.settings(asAdmin({eventId: "event1"}));
+      assert.equal(after.previewParticipantId, "batchA-000002", "参加者IDの並び順で先頭(既存の安定した並び順)");
+    });
+
+    test("getSettings.previewParticipantId: 取込回(batch)は問わない。イベント単位で毎回同じ値になる(決定的)", async () => {
+      await importBatch("batchA", 3);
+      await importBatch("batchB", 3);
+      const r1 = await mail.settings(asAdmin({eventId: "event1"}));
+      const r2 = await mail.settings(asAdmin({eventId: "event1"}));
+      assert.equal(r1.previewParticipantId, r2.previewParticipantId, "同じデータ状態なら同じ参加者が選ばれる");
+      assert.equal(r1.previewParticipantId, "batchA-000002");
+      // 実際にそのIDでプレビューできる(preview()自体は変更していない)。
+      const preview = await mail.preview(asAdmin({eventId: "event1", participantId: r1.previewParticipantId}));
+      assert.equal(preview.ready, true);
+    });
+
+    test("getSettings.previewParticipantId: cancelledな参加者・committedでないbatch由来は選ばれない", async () => {
+      await importBatch("batchA", 2);
+      await db.collection("participants").doc("batchA-000002").update({status: "cancelled"});
+      await importBatch("batchB", 2);
+      await db.collection("importBatches").doc("batchB").update({status: "committing"});
+      const r = await mail.settings(asAdmin({eventId: "event1"}));
+      assert.equal(r.previewParticipantId, "batchA-000003", "cancelledとcommitting由来は飛ばす");
+    });
+
+    test("getSettings.previewParticipantIdはstaffには見えない(permission-denied)", async () => {
+      await importBatch("batchA", 2);
+      await rejectsWith(mail.settings(asStaff({eventId: "event1"})), "permission-denied");
+    });
   });
 
   // ---------------------------------------------------------------------------------------------

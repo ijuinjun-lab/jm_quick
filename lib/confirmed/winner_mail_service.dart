@@ -27,6 +27,7 @@ class WinnerMailSettings {
     required this.ready,
     required this.problems,
     required this.missingOptional,
+    this.previewParticipantId,
   });
 
   factory WinnerMailSettings.fromJson(Map<String, dynamic> json) {
@@ -54,6 +55,7 @@ class WinnerMailSettings {
       ready: json['ready'] == true,
       problems: strings(json['problems']),
       missingOptional: strings(json['missingOptional']),
+      previewParticipantId: json['previewParticipantId'] as String?,
     );
   }
 
@@ -69,6 +71,11 @@ class WinnerMailSettings {
   final bool ready;
   final List<String> problems;
   final List<String> missingOptional;
+
+  /// サーバーが選んだ、プレビュー用のparticipantId(このイベントの有効・取込済みparticipantのうち1件。
+  /// 安定した既存の並び順で選ばれる)。取込済みparticipantが0件ならnull。利用者はこの値を見ない・入力しない
+  /// (画面には表示しない。内部的にプレビュー要求へそのまま使うだけ)。
+  final String? previewParticipantId;
 }
 
 /// プレビュー結果。ready=falseのときはproblems(理由コード)だけ。

@@ -468,6 +468,35 @@ void main() {
       },
     );
 
+    test(
+      'Phase 11I: confirmedの通常管理UIに、利用者が参加者ID・publicIdを入力するTextField(欄)が無い'
+      '(当選メール設定のプレビュー対象は、サーバーが取込済み参加者から自動的に選ぶ)',
+      () {
+        expect(files, isNotEmpty);
+        for (final file in files) {
+          final text = file
+              .readAsLinesSync()
+              .where((line) => !line.trimLeft().startsWith('//'))
+              .join('\n');
+          expect(
+            text.contains("labelText: '参加者ID'"),
+            isFalse,
+            reason: file.path,
+          );
+          expect(
+            text.contains("labelText: 'publicId'"),
+            isFalse,
+            reason: file.path,
+          );
+          expect(
+            text.contains("Key('participant-id')"),
+            isFalse,
+            reason: file.path,
+          );
+        }
+      },
+    );
+
     test('認可の判断はサーバーの確認結果だけで行い、emailやクライアントの値を根拠にしない', () {
       final gate = File('lib/confirmed/auth_gate.dart').readAsStringSync();
       expect(gate, contains('fetchMyAccess'));

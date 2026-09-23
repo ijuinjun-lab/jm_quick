@@ -49,7 +49,6 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   final notes = TextEditingController();
   final address = TextEditingController();
   final access = TextEditingController();
-  final participantId = TextEditingController();
   bool busy = false;
   bool loaded = false;
   String? message;
@@ -75,7 +74,6 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       notes,
       address,
       access,
-      participantId,
     ]) {
       c.dispose();
     }
@@ -151,9 +149,12 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     });
   });
 
+  /// プレビュー対象の参加者は、利用者が入力するのではなく、サーバー([WinnerMailSettings.previewParticipantId])
+  /// が選んだ「このイベントの有効(active)かつ取込(committed)済み」の参加者から自動的に決まる
+  /// (取込回=第1回・第2回…は問わない。0件ならこのメソッドは呼ばれない=ボタン自体を表示しない)。
   Future<void> showPreview() => _run(() async {
-    final id = participantId.text.trim();
-    if (id.isEmpty) throw const WinnerMailException('プレビューする参加者IDを入力してください。');
+    final id = settings?.previewParticipantId;
+    if (id == null || id.isEmpty) return; // ボタンを表示していないので通常到達しない
     final result = await widget.service.preview(
       eventId: _eventId,
       participantId: id,
@@ -294,21 +295,21 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
             style: TextStyle(color: Color(0xff5c6670)),
           ),
           const SizedBox(height: 10),
-          TextField(
-            controller: participantId,
-            decoration: const InputDecoration(
-              labelText: '参加者ID',
-              helperText: '取込済み(committed)の参加者のID',
+          // 参加者ID・publicId・eventIdなど、内部IDを利用者が入力する欄は置かない。
+          // プレビュー対象は、このイベントの取込済み参加者からシステムが自動的に選ぶ。
+          if (settings?.previewParticipantId != null)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton(
+                onPressed: busy ? null : showPreview,
+                child: const Text('プレビューを表示'),
+              ),
+            )
+          else
+            const Text(
+              '取込済みの参加者がありません。先にCSV取込を行ってください。',
+              style: TextStyle(color: Color(0xff5c6670)),
             ),
-          ),
-          const SizedBox(height: 10),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: OutlinedButton(
-              onPressed: busy ? null : showPreview,
-              child: const Text('プレビューを表示'),
-            ),
-          ),
           if (preview != null) ...[
             const Divider(height: 28),
             if (!preview!.ready)
