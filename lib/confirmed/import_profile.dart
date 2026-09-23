@@ -62,6 +62,7 @@ class ConfirmedImportProfileProgram {
     this.attendingValues,
     this.notAttendingValues,
     this.emptyMeansNotAttending = false,
+    this.ignoreCountWhenNotAttending = false,
   });
 
   /// このprofileが対象とするイベントで、実際に(event.programsに)定義されているprogramId。
@@ -73,6 +74,11 @@ class ConfirmedImportProfileProgram {
   final List<String>? attendingValues;
   final List<String>? notAttendingValues;
   final bool emptyMeansNotAttending;
+
+  /// 既定false(既存の安全チェックのまま)。trueにすると、このprogramで不参加と判定した行の人数列を
+  /// (値が残っていても)無視する(サーバー functions/confirmed/import_rows.js の
+  /// ignoreCountWhenNotAttendingオプション。既定・他のprofileの安全チェックは変更しない)。
+  final bool ignoreCountWhenNotAttending;
 
   List<String> get requiredHeaders => {
     countColumn,
@@ -113,6 +119,16 @@ class ConfirmedImportProfileProgram {
 ///   汎用のtimeRange検証機構(functions/confirmed/import_rows.js の parseSlot)自体は削除していない。
 ///   将来、開始・終了時刻の妥当性検証が必要な別CSV形式では、そのprofileで`slotFormat: 'timeRange'`を
 ///   引き続き使える。
+///
+/// ■ Phase 11H: 各programの`ignoreCountWhenNotAttending`を`true`にしている。実CSV(sipposample1.csv、
+///   本番E2Eで確認)には、参加意思の列(午前/午後参加時間・トークショー)では明確に「参加を希望しない」で
+///   ありながら、同じ行の別programの人数(例: 2名)がそのまま複製されたように見える人数が、不参加と判定した
+///   programの人数列に残っている行が5/90件あった(読み取り専用監査で確認。全5件で、他の少なくとも1つの
+///   programには明確な参加(参加時間の値+一致する人数)があった)。SIPPO形式では「参加意思の列を唯一の
+///   正本とし、不参加と判定したprogramの人数列は使わない」という業務規則を採用し、この5件をreview化しない
+///   (参加意思が不参加なら、そのprogramのplannedCount・programAttendance・slotLabelは元々作られない。
+///   人数列を無視してもこれは変わらない)。汎用の安全チェック(not-attending-count-present。
+///   ignoreCountWhenNotAttendingを指定しない他のprofile)は変更していない。
 const sipposample2026Profile = ConfirmedImportProfile(
   label: '当選・参加確定者リスト(sipposample形式)',
   nameColumn: '氏名',
@@ -128,6 +144,7 @@ const sipposample2026Profile = ConfirmedImportProfile(
       participationColumn: '午前参加時間',
       notAttendingValues: ['参加を希望しない'],
       emptyMeansNotAttending: true,
+      ignoreCountWhenNotAttending: true,
     ),
     ConfirmedImportProfileProgram(
       programId: 'program-2',
@@ -137,6 +154,7 @@ const sipposample2026Profile = ConfirmedImportProfile(
       participationColumn: '午後参加時間',
       notAttendingValues: ['参加を希望しない'],
       emptyMeansNotAttending: true,
+      ignoreCountWhenNotAttending: true,
     ),
     ConfirmedImportProfileProgram(
       programId: 'program-3',
@@ -144,6 +162,7 @@ const sipposample2026Profile = ConfirmedImportProfile(
       participationColumn: 'トークショー',
       attendingValues: ['参加を希望する'],
       notAttendingValues: ['参加を希望しない'],
+      ignoreCountWhenNotAttending: true,
       emptyMeansNotAttending: true,
     ),
   ],
@@ -185,7 +204,8 @@ ImportMapping buildMappingFromProfile(
           ..participationColumn = pp.participationColumn
           ..attendingValues = List.of(pp.attendingValues ?? const [])
           ..notAttendingValues = List.of(pp.notAttendingValues ?? const [])
-          ..emptyMeansNotAttending = pp.emptyMeansNotAttending,
+          ..emptyMeansNotAttending = pp.emptyMeansNotAttending
+          ..ignoreCountWhenNotAttending = pp.ignoreCountWhenNotAttending,
     ],
   )
     ..nameColumn = profile.nameColumn

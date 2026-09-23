@@ -167,6 +167,7 @@ void main() {
             'slotColumn': '午前参加時間',
             'slotFormat': 'label',
             'countColumn': '午前参加人数',
+            'ignoreCountWhenNotAttending': true,
           },
           {
             'programId': 'program-2',
@@ -176,6 +177,7 @@ void main() {
             'slotColumn': '午後参加時間',
             'slotFormat': 'label',
             'countColumn': '午後参加人数',
+            'ignoreCountWhenNotAttending': true,
           },
           {
             'programId': 'program-3',
@@ -184,6 +186,7 @@ void main() {
             'notAttendingValues': ['参加を希望しない'],
             'emptyMeans': 'notAttending',
             'countColumn': 'トークショー人数',
+            'ignoreCountWhenNotAttending': true,
           },
         ],
       });

@@ -25,17 +25,28 @@ const HEADERS = ["区分", "rd", "氏名", "かな", "メールアドレス", "�
 // 妥当性検証はしない)。実CSV(sipposample1.csv、本番E2Eで確認)には「22:20-22:20」のような、主催者の
 // 確定参加者リスト上の時間枠の表示値が含まれ、これをtimeRangeとして厳密検証するとslot-zero-length・
 // slot-reversedが大量に発生し、37/90行が不要にreview化されていた(読み取り専用監査で確認済み)。
+//
+// Phase 11H: 3programすべてignoreCountWhenNotAttending: true(functions/confirmed/import_mapping.js・
+// import_rows.js に追加した、既定false・後方互換のオプション)。実CSVには、参加意思の列では明確に
+// 「参加を希望しない」でありながら、不参加と判定したprogramの人数列に値が残っている行が5/90件あった
+// (読み取り専用監査で確認。全5件で他の少なくとも1つのprogramには明確な参加があった)。SIPPO形式では
+// 参加意思の列を唯一の正本とし、不参加と判定したprogramの人数列は無視する(このprofileだけの設定。
+// ignoreCountWhenNotAttendingを指定しないprogram・profileでは、既存のnot-attending-count-present
+// 検出は変更していない。下の「汎用の安全チェックは維持される」テストで確認する)。
 function sippoMapping() {
   return {
     version: 1,
     participant: {nameColumn: "氏名", kanaColumn: "かな", emailColumn: "メールアドレス", registeredAtColumn: "登録日時"},
     programs: [
       {programId: "program-1", participationColumn: "午前参加時間", notAttendingValues: [NOT_ATTENDING],
-        emptyMeans: "notAttending", slotColumn: "午前参加時間", slotFormat: "label", countColumn: "午前参加人数"},
+        emptyMeans: "notAttending", slotColumn: "午前参加時間", slotFormat: "label", countColumn: "午前参加人数",
+        ignoreCountWhenNotAttending: true},
       {programId: "program-2", participationColumn: "午後参加時間", notAttendingValues: [NOT_ATTENDING],
-        emptyMeans: "notAttending", slotColumn: "午後参加時間", slotFormat: "label", countColumn: "午後参加人数"},
+        emptyMeans: "notAttending", slotColumn: "午後参加時間", slotFormat: "label", countColumn: "午後参加人数",
+        ignoreCountWhenNotAttending: true},
       {programId: "program-3", participationColumn: "トークショー", attendingValues: [ATTENDING],
-        notAttendingValues: [NOT_ATTENDING], emptyMeans: "notAttending", countColumn: "トークショー人数"},
+        notAttendingValues: [NOT_ATTENDING], emptyMeans: "notAttending", countColumn: "トークショー人数",
+        ignoreCountWhenNotAttending: true},
     ],
   };
 }
@@ -133,7 +144,14 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
       if (i >= 22 && i <= 23) return {"午後参加時間": "21:20-21:20", "午後参加人数": "2"};
       if (i >= 24 && i <= 31) return {"午後参加時間": "22:20-21:20", "午後参加人数": "2"};
       if (i >= 32 && i <= 34) {
-        return {"午前参加時間": NOT_ATTENDING, "午前参加人数": "", "午後参加時間": NOT_ATTENDING, "午後参加人数": "2"};
+        // 実CSVの行10・54・58と同じ構造: 午前は不参加(矛盾なし)、午後は不参加なのに人数が残る(データ矛盾。
+        // SIPPO profileでは無視する)、トークショーは明確に参加(他のprogramに明確な参加がある、という
+        // 読み取り専用監査で確認した実際のパターン)。
+        return {
+          "午前参加時間": NOT_ATTENDING, "午前参加人数": "",
+          "午後参加時間": NOT_ATTENDING, "午後参加人数": "2",
+          "トークショー": ATTENDING, "トークショー人数": "2",
+        };
       }
       if (i >= 35 && i <= 37) {
         // 午前は「22:20-22:20」に見える値だが参加の意思あり(label化により問題なし)、
@@ -145,15 +163,33 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
     return makeTable(90, overridesFor);
   }
 
-  test("Phase 11G: 実CSVと同じ比率のfixture(90行)で、時間枠だけを理由とするreviewは0件、データ矛盾だけがreviewに残る", async () => {
+  test("Phase 11H: 実CSVと同じ比率のfixture(90行)で、時間枠だけを理由とするreviewは0件、"
+    + "不参加programの人数は無視されるためnot-attending-count-presentも発生しない(全90行ready)", async () => {
     const result = await api.preview(asAdmin(request(sipposampleLikeTable())));
+    // 推測でハードコードせず、実ロジック(サーバーのplanImportRows)の結果をそのまま検証する。
     assert.deepEqual(
       [result.totalRows, result.readyCount, result.reviewCount, result.errorCount],
-      [90, 84, 6, 0],
+      [90, 90, 0, 0],
     );
-    assert.deepEqual(result.issueCounts, {"not-attending-count-present": 6});
+    assert.deepEqual(result.issueCounts, {});
     assert.ok(!("slot-zero-length" in result.issueCounts), "slot-zero-lengthは発生しない");
     assert.ok(!("slot-reversed" in result.issueCounts), "slot-reversedは発生しない");
+    assert.ok(!("not-attending-count-present" in result.issueCounts),
+      "SIPPO profileではignoreCountWhenNotAttendingにより不参加programの人数は無視される");
+  });
+
+  test("Phase 11H: 上記fixtureをcommitしても、不参加と判定したprogramにはattendance・plannedCountが作られない"
+    + "(参加意思の列だけが正本。人数は無視される)", async () => {
+    const result = await api.commit(asAdmin(request(sipposampleLikeTable())));
+    assert.equal(result.status, "committed");
+    assert.equal(result.createdCount, 90);
+    // C・D行(32〜37、架空データのため氏名は「架空参加者32」〜「架空参加者37」)は、午後が「参加を希望しない」
+    // なのに人数=2が残っているが、program-2のattendanceは作られない(不参加のprogramは人数を使わない)。
+    for (let i = 32; i <= 37; i++) {
+      const participant = (await docs("participants")).find((d) => d.data().name === `架空参加者${i}`);
+      const beta = await db.collection("programAttendances").doc(`${participant.id}_program-2`).get();
+      assert.equal(beta.exists, false, `行${i}: 不参加と判定したprogram-2にattendanceを作らない`);
+    }
   });
 
   test("氏名・かな・メールが自動取得され、午前参加時間/午前参加人数からprogram-1、午後参加時間/午後参加人数からprogram-2、トークショー/トークショー人数からprogram-3のattendanceが作られる。1人が3program参加してもparticipantは1件・attendanceは3件", async () => {
@@ -249,15 +285,53 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
     assert.deepEqual(result.rows[0].issueCodes, []);
   });
 
-  test("Phase 11G: 「参加を希望しない」なのに人数が入っている行は、引き続き自動判断せずreviewに残す(データ矛盾は緩めない)", async () => {
+  test("Phase 11H: SIPPO profileでは、「参加を希望しない」なのに人数が入っていてもreview化しない"
+    + "(参加意思の列を正本とし、不参加と判定したprogramの人数は無視する。plannedCount・attendanceも作らない)", async () => {
+    // 午前は不参加(矛盾なし)、午後は不参加なのに人数が残る(データ矛盾。SIPPO profileでは無視)、
+    // トークショーは明確に参加(実CSVで確認した実際のパターンと同じ構造。他のprogramへの参加はある)。
     const table = makeTable(1, () => ({
       "午前参加時間": NOT_ATTENDING, "午前参加人数": "",
       "午後参加時間": NOT_ATTENDING, "午後参加人数": "2",
+      "トークショー": ATTENDING, "トークショー人数": "2",
+    }));
+    const result = await api.preview(asAdmin(request(table)));
+    assert.equal(result.rows[0].classification, "ready");
+    assert.deepEqual(result.rows[0].issueCodes, []);
+    assert.deepEqual(result.rows[0].programIds, ["program-3"], "不参加と判定した午前・午後にはattendance候補を作らない(人数は無視)");
+    const committed = await api.commit(asAdmin(request(table)));
+    assert.equal(committed.createdCount, 1);
+    assert.equal(await count("programAttendances"), 1, "参加したトークショーだけattendanceが作られる");
+  });
+
+  test("Phase 11H: SIPPO profileでも、全programが不参加(かつ矛盾以外に問題が無い)行は、"
+    + "無条件にactiveとして取り込まず引き続きreview(no-program。既存の別の安全チェックで、今回変更していない)", async () => {
+    const table = makeTable(1, () => ({
+      "午前参加時間": NOT_ATTENDING, "午前参加人数": "",
+      "午後参加時間": NOT_ATTENDING, "午後参加人数": "2", // 矛盾は無視されるが、他に参加が無ければno-program
+      "トークショー": NOT_ATTENDING, "トークショー人数": "",
     }));
     const result = await api.preview(asAdmin(request(table)));
     assert.equal(result.rows[0].classification, "review");
+    assert.deepEqual(result.rows[0].issueCodes, ["no-program"]);
+  });
+
+  test("Phase 11H: 汎用の安全チェック(not-attending-count-present)は、ignoreCountWhenNotAttendingを"
+    + "指定しないprogram・profileでは変更していない(SIPPO profile以外は従来どおりreviewに残す)", async () => {
+    // sippoMapping()をそのまま使わず、ignoreCountWhenNotAttendingを指定しない(=既定false)独立したmappingで検証する。
+    // これはSIPPO以外の一般的なprofileを想定した確認であり、汎用Functionsの安全チェックが緩んでいないことの証明。
+    const genericMapping = {
+      version: 1,
+      participant: {nameColumn: "氏名", emailColumn: "メールアドレス"},
+      programs: [
+        {programId: "program-1", participationColumn: "午前参加時間", notAttendingValues: [NOT_ATTENDING],
+          emptyMeans: "notAttending", countColumn: "午前参加人数"}, // ignoreCountWhenNotAttendingを指定しない(既定false)
+      ],
+    };
+    const table = makeTable(1, () => ({"午前参加時間": NOT_ATTENDING, "午前参加人数": "2"}));
+    const result = await api.preview(asAdmin(request(table, {mapping: genericMapping})));
+    assert.equal(result.rows[0].classification, "review");
     assert.deepEqual(result.rows[0].issueCodes, ["not-attending-count-present"]);
-    assert.deepEqual(result.rows[0].programIds, [], "不参加のためattendance候補にはならない(午前は不参加・人数も無し、トークショーはdefaultsで不参加)");
+    assert.deepEqual(result.rows[0].programIds, []);
   });
 
   test("slotLabelは参加者ごとに独立している", async () => {
@@ -274,6 +348,13 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
     data.headers.splice(i, 1);
     data.rows.forEach((r) => r.values.splice(i, 1));
     await rejectsWith(api.preview(asAdmin(data)), "invalid-argument");
+  });
+
+  test("Phase 11H: ignoreCountWhenNotAttendingは真偽値でなければ拒否される(不正なmappingは受理しない)", async () => {
+    const data = request(1);
+    data.mapping.programs[0].ignoreCountWhenNotAttending = "yes";
+    await assert.rejects(api.preview(asAdmin(data)), (e) =>
+      e.code === "invalid-argument" && e.details.code === "invalid-mapping");
   });
 
   test("列順が変わってもheader名で解決できる", async () => {

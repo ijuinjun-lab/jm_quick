@@ -20,10 +20,20 @@
 //       participationColumn?,          // 省略すると人数だけで参加を判定
 //       attendingValues?, notAttendingValues?,
 //       emptyMeans?: 'review'|'notAttending',    // 参加列が空のときの扱い(既定review)
-//       slotColumn?, slotFormat?: 'timeRange'|'label'   // 既定label
+//       slotColumn?, slotFormat?: 'timeRange'|'label',   // 既定label
+//       ignoreCountWhenNotAttending?: boolean    // 既定false(既存の安全チェックのまま)。
 //     }]
 //   }
 // participationColumn と slotColumn は同じ列でもよい(時間欄に「参加を希望しない」と入るCSV向け)。
+//
+// ■ ignoreCountWhenNotAttending(既定false・後方互換): falseまたは省略時は既存どおり、不参加(not-attending)
+//   と判定したprogramの人数列に値(0以外の数値・不正値)が残っていれば not-attending-count-present として
+//   reviewに残す(矛盾を自動判断しない、という既存の安全チェック。このprofile以外・既定値では変更していない)。
+//   trueを明示したprofile(例: 参加意思の列と人数の列が別の設問として独立しているCSV形式)だけ、不参加と
+//   判定したprogramの人数列は完全に無視する(矛盾があってもreview化しない。参加意思(participationColumn)を
+//   唯一の正本として扱う)。不参加のprogramでattendance・plannedCount・slotLabelを作らないのは、
+//   ignoreCountWhenNotAttendingの値に関わらずこれまでと同じ(not-attending状態からattendanceを作る分岐が
+//   元々存在しないため)。
 
 const {isValidProgramId} = require("../programs");
 
@@ -36,7 +46,7 @@ const MAX_PROGRAMS = 50;
 const TOP_KEYS = ["version", "participant", "rowChecks", "programs"];
 const PARTICIPANT_KEYS = ["externalIdColumn", "nameColumn", "kanaColumn", "emailColumn", "registeredAtColumn"];
 const PROGRAM_KEYS = ["programId", "participationColumn", "attendingValues", "notAttendingValues",
-  "emptyMeans", "slotColumn", "slotFormat", "countColumn"];
+  "emptyMeans", "slotColumn", "slotFormat", "countColumn", "ignoreCountWhenNotAttending"];
 const ROW_CHECK_KEYS = ["column", "allowedValues"];
 const WAITLIST_FRAGMENT = "キャンセル待";
 
@@ -172,6 +182,10 @@ function validateImportMapping(mapping, {eventProgramIds} = {}) {
       if (program.slotFormat !== undefined && !isColumnName(program.slotColumn)) {
         errors.push({code: "slot-format-without-slot-column", path: `${path}.slotFormat`});
       }
+      if (program.ignoreCountWhenNotAttending !== undefined &&
+          typeof program.ignoreCountWhenNotAttending !== "boolean") {
+        errors.push({code: "invalid-ignore-count-when-not-attending", path: `${path}.ignoreCountWhenNotAttending`});
+      }
     });
   }
 
@@ -210,6 +224,7 @@ function normalizeImportMapping(mapping, options) {
       slotColumn: text(g.slotColumn),
       slotFormat: g.slotFormat || "label",
       countColumn: text(g.countColumn),
+      ignoreCountWhenNotAttending: g.ignoreCountWhenNotAttending === true,
     })),
   };
 }

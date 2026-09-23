@@ -140,6 +140,12 @@ class ProgramMapping {
   List<String> notAttendingValues = [];
   bool emptyMeansNotAttending = false;
 
+  /// 既定false(既存の安全チェックのまま): 不参加と判定した場合、人数列に値が残っていれば
+  /// not-attending-count-presentとしてreviewに残す。trueを明示したときだけ、参加意思の列を正本として、
+  /// 不参加と判定したprogramの人数列を無視する(サーバー functions/confirmed/import_rows.js の
+  /// 既存の安全チェックは、これを明示しない限り変更しない)。
+  bool ignoreCountWhenNotAttending = false;
+
   Map<String, dynamic> toJson() => {
     'programId': programId,
     if (participationColumn != null) 'participationColumn': participationColumn,
@@ -149,6 +155,7 @@ class ProgramMapping {
     if (slotColumn != null) 'slotColumn': slotColumn,
     if (slotColumn != null) 'slotFormat': slotFormat,
     'countColumn': countColumn,
+    if (ignoreCountWhenNotAttending) 'ignoreCountWhenNotAttending': true,
   };
 }
 

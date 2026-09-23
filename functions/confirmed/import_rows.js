@@ -166,8 +166,11 @@ function planRow(row, mapping, eventDate) {
     if (state === "review-empty") issues.push(makeIssue("participation-empty", {...at, column: program.participationColumn}));
     else if (state === "review-unknown") issues.push(makeIssue("participation-unknown", {...at, column: program.participationColumn}));
     else if (state === "not-attending") {
-      // 不参加なのに人数が入っている。どちらが正しいか決められないため自動判断しない。
-      if (count.kind === "ok" || count.kind === "invalid") {
+      // 不参加なのに人数が入っている。既定(ignoreCountWhenNotAttendingを指定しないprofile)では、
+      // どちらが正しいか決められないため自動判断しない(既存の安全チェック。変更していない)。
+      // profileが明示的にignoreCountWhenNotAttending: trueを指定した場合だけ、参加意思の列を唯一の
+      // 正本として扱い、不参加と判定したprogramの人数列は無視する(このprogramの矛盾チェック自体を行わない)。
+      if (!program.ignoreCountWhenNotAttending && (count.kind === "ok" || count.kind === "invalid")) {
         issues.push(makeIssue("not-attending-count-present", {...at, column: program.countColumn}));
       }
     } else if (count.kind === "empty") {
