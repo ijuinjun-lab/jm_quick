@@ -54,7 +54,6 @@ class WinnerSendPage extends StatefulWidget {
 }
 
 class _WinnerSendPageState extends State<WinnerSendPage> {
-  final participantIds = <String, TextEditingController>{};
   SendBatchList? batchList;
   bool loading = false;
   String? error;
@@ -71,14 +70,6 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
   void initState() {
     super.initState();
     if (_hasEventId) _load();
-  }
-
-  @override
-  void dispose() {
-    for (final c in participantIds.values) {
-      c.dispose();
-    }
-    super.dispose();
   }
 
   Future<void> _load({bool keepError = false}) async {
@@ -106,16 +97,12 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
     }
   }
 
-  TextEditingController _controllerFor(SendBatch batch) =>
-      participantIds.putIfAbsent(
-        batch.batchId,
-        () => TextEditingController(text: batch.previewParticipantId ?? ''),
-      );
-
+  /// batch内の送信対象から、サーバーが選んだ代表1件(previewParticipantId)でプレビューする。
+  /// 利用者はparticipantIdを見ない・入力しない(サーバーの決定的な選択規則をそのまま使う)。
   Future<void> _preview(SendBatch batch) async {
-    final id = _controllerFor(batch).text.trim();
-    if (id.isEmpty) {
-      setState(() => previewErrors[batch.batchId] = 'プレビューする参加者IDを入力してください。');
+    final id = batch.previewParticipantId;
+    if (id == null || id.isEmpty) {
+      setState(() => previewErrors[batch.batchId] = 'メール送信対象がありません。');
       return;
     }
     setState(() => previewErrors.remove(batch.batchId));
@@ -425,12 +412,9 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
       children: [
         const Text('送信前プレビュー', style: TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 6),
-        TextField(
-          controller: _controllerFor(batch),
-          decoration: const InputDecoration(
-            labelText: 'プレビューする参加者ID',
-            helperText: '実際に届くメールと同じ内容を、サーバーが作成して表示します(送信はしません)。',
-          ),
+        const Text(
+          'この取込回の送信対象からサーバーが選んだ代表1件について、実際に届くメールと同じ内容を作成して表示します(送信はしません)。',
+          style: TextStyle(color: Color(0xff5c6670)),
         ),
         const SizedBox(height: 8),
         Align(

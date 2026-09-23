@@ -146,6 +146,20 @@ describe("当選メール送信管理API(Emulator + 実Admin SDK + 偽transport)
       assert.equal(rowOf(result, "batchB").previewParticipantId, null);
     });
 
+    test("committedでも対象0件(全員cancelled)のbatchはpreviewParticipantId=null・targetCount=0・no-targetsで、送信もできない", async () => {
+      await importBatch("batchA", 3);
+      const participants = await docs("participants");
+      for (const doc of participants) {
+        await doc.ref.update({status: "cancelled"});
+      }
+      const row = rowOf(await list(), "batchA");
+      assert.deepEqual(
+        [row.status, row.targetCount, row.excludedInactiveCount, row.previewParticipantId, row.canCreateJob, row.blockedReasons],
+        ["committed", 0, 3, null, false, ["no-targets"]],
+      );
+      await rejectsWith(create("batchA"), "failed-precondition");
+    });
+
     test("同一メール100participantでも対象100、同一氏名100でも対象100(人物の重複排除をしない)", async () => {
       await importBatch("batchA", makeTable(100, () => ({"メールアドレス": "same@example.invalid"})));
       await importBatch("batchB", makeTable(100, () => ({"氏名": "架空同姓同名"})));

@@ -260,6 +260,18 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
       await rejectsWith(mail.preview({data: {eventId: "event1", participantId: P1}}), "unauthenticated");
     });
 
+    test("プレビューはFirestoreに何も書き込まない(sendJobs・mailDeliveries・mailJobs・participants等が完全に不変)", async () => {
+      await importBatch("batchA", 2);
+      const snapshot = async () => JSON.stringify(await Promise.all(
+        ["events", "importBatches", "participants", "programAttendances", "sendJobs", "mailDeliveries", "mailJobs"]
+          .map(async (c) => (await docs(c)).map((d) => [d.id, d.data()])),
+      ));
+      const before = await snapshot();
+      const r = await preview();
+      assert.equal(r.ready, true, "前提: プレビュー自体は成立している");
+      assert.equal(await snapshot(), before, "読み取り専用(1件も作成・更新されない)");
+    });
+
     test("クライアントが氏名・人数・本文を偽装できない(未知のキーを拒否。表示は常にFirestoreの値)", async () => {
       await importBatch("batchA", 2);
       for (const extra of [{name: "偽名"}, {plannedCount: 99}, {programs: []}, {subject: "偽件名"}, {email: "x@example.invalid"}, {template: TEMPLATE}]) {

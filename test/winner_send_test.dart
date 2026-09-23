@@ -678,6 +678,132 @@ void main() {
     });
   });
 
+  group('Phase 11E: プレビュー対象participantIdは利用者に見せない(batch単位でサーバーが自動選択)', () {
+    testWidgets('participantId入力欄は存在しない。プレビューはサーバーが返したpreviewParticipantIdをそのまま使う', (
+      tester,
+    ) async {
+      setPhone(tester, height: 4000);
+      final mail = FakeMailService();
+      await tester.pumpWidget(
+        sendPage(FakeSendService(batches: [committed('batchA', 1, 5)]), mail),
+      );
+      await settle(tester);
+      expect(
+        find.byType(TextField),
+        findsNothing,
+        reason: '参加者IDを入力・編集する欄は無い',
+      );
+      expect(find.text('プレビューする参加者ID'), findsNothing);
+      await previewFirst(tester);
+      expect(mail.previewCalls, ['p001'], reason: 'サーバーの決定規則(先頭1件)をそのまま使う');
+      expect(
+        find.text('p001'),
+        findsNothing,
+        reason: '内部participantIdは画面に一切表示しない',
+      );
+    });
+
+    testWidgets('対象0件のbatchはプレビューできない。明確な案内が出て、プレビュー欄・送信ボタンは出ない', (
+      tester,
+    ) async {
+      setPhone(tester, height: 3000);
+      final service = FakeSendService(
+        batches: [
+          SendBatch(
+            batchId: 'batchA',
+            sequence: 1,
+            label: '第1回',
+            status: 'committed',
+            importedCount: 0,
+            targetCount: 0,
+            excludedInactiveCount: 0,
+            consistent: true,
+            previewParticipantId: null,
+            canCreateJob: false,
+            blockedReasons: const ['no-targets'],
+          ),
+        ],
+      );
+      await tester.pumpWidget(sendPage(service, FakeMailService()));
+      await settle(tester);
+      expect(find.text('送信対象の参加者がいません。'), findsOneWidget);
+      expect(find.text('プレビューを表示'), findsNothing);
+      expect(find.textContaining('この取込回へ送信'), findsNothing);
+    });
+
+    testWidgets('対象1件のbatchでも、サーバーが返したその1件でプレビューできる', (tester) async {
+      setPhone(tester, height: 4000);
+      final mail = FakeMailService();
+      await tester.pumpWidget(
+        sendPage(FakeSendService(batches: [committed('batchA', 1, 1)]), mail),
+      );
+      await settle(tester);
+      await previewFirst(tester);
+      expect(mail.previewCalls, ['p001']);
+      expect(find.text('【当選】ご案内'), findsOneWidget);
+    });
+
+    testWidgets('第1回をプレビューしても第2回は確認済みにならない。別々にプレビューすればそれぞれ有効になる', (
+      tester,
+    ) async {
+      setPhone(tester, height: 6000);
+      final mail = FakeMailService();
+      final service = FakeSendService(
+        batches: [committed('batchA', 1, 90), committed('batchB', 2, 5)],
+      );
+      await tester.pumpWidget(sendPage(service, mail));
+      await settle(tester);
+      final sendButtons = find.widgetWithText(FilledButton, 'この取込回へ送信…');
+      expect(sendButtons, findsNWidgets(2));
+      expect(tester.widget<FilledButton>(sendButtons.at(0)).onPressed, isNull);
+      expect(tester.widget<FilledButton>(sendButtons.at(1)).onPressed, isNull);
+
+      await tester.tap(find.text('プレビューを表示').first);
+      await settle(tester);
+      expect(
+        tester.widget<FilledButton>(sendButtons.at(0)).onPressed,
+        isNotNull,
+        reason: '第1回だけ確認済み',
+      );
+      expect(
+        tester.widget<FilledButton>(sendButtons.at(1)).onPressed,
+        isNull,
+        reason: '第2回は未確認のまま',
+      );
+
+      await tester.tap(find.text('プレビューを表示').last);
+      await settle(tester);
+      expect(tester.widget<FilledButton>(sendButtons.at(0)).onPressed, isNotNull);
+      expect(
+        tester.widget<FilledButton>(sendButtons.at(1)).onPressed,
+        isNotNull,
+        reason: '第2回も確認済みになった',
+      );
+    });
+
+    testWidgets('プレビュー取得に失敗した場合、送信ボタンは有効にならない', (tester) async {
+      setPhone(tester, height: 4000);
+      final mail = FakeMailService()
+        ..preview_ = const WinnerMailPreview(
+          ready: false,
+          problems: ['template-not-configured'],
+        );
+      final service = FakeSendService(batches: [committed('batchA', 1, 5)]);
+      await tester.pumpWidget(sendPage(service, mail));
+      await settle(tester);
+      await previewFirst(tester);
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.widgetWithText(FilledButton, 'この取込回へ送信…'),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(find.textContaining('このメールはまだ作成できません'), findsOneWidget);
+    });
+  });
+
   group('送信状況(pending / sending / sent / failed / unknown)', () {
     testWidgets('5つの状態が別々の欄・別の名前で表示され、failedとunknownは混同されない', (tester) async {
       setPhone(tester);
@@ -1607,6 +1733,20 @@ void main() {
         }).dispatchActive,
         isTrue,
       );
+    });
+
+    test('Phase 11E: プレビュー対象participantIdを利用者に入力・編集させる仕組みが無い', () {
+      final source = read('lib/confirmed/winner_send_page.dart');
+      expect(source.contains('プレビューする参加者ID'), isFalse);
+      expect(source.contains('TextEditingController'), isFalse);
+      expect(source.contains('TextField('), isFalse);
+      expect(
+        source.contains('participantIds'),
+        isFalse,
+        reason: '利用者が編集するparticipantIdのKey/Controllerは無い',
+      );
+      // previewParticipantId(サーバーが返す内部値)を内部処理で使うこと自体は禁止ではない。
+      expect(source.contains('batch.previewParticipantId'), isTrue);
     });
 
     test('再送ボタンの条件: unknown・sentを対象にする再送操作が無い(retryFailed=failedだけ)', () {
