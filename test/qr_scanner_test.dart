@@ -756,6 +756,52 @@ void main() {
       expect(find.byType(ConfirmedQrScannerView), findsOneWidget);
     });
 
+    testWidgets(
+      'Phase 11L: 受付スタッフ用QR経由(eventId付きURL)で未ログインのまま開いても、'
+      'ログイン後にeventIdが保持され、そのイベントのscannerへ進む(eventIdが失われない)',
+      (tester) async {
+        final auth = FakeAuthClient(signedIn: false);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ConfirmedScanReceptionRoute(
+              eventId: 'event1',
+              authClient: auth,
+              accessService: FakeAccessService([
+                const AccessCheck.granted(AccessRole.staff),
+              ]),
+            ),
+          ),
+        );
+        await tester.pump();
+        // ログイン前は、scannerもeventIdの引き継ぎ先(ConfirmedScanReceptionFlow)もまだ作られない。
+        expect(find.text('メールアドレス'), findsOneWidget);
+        expect(find.byType(ConfirmedQrScannerView), findsNothing);
+        await tester.enterText(
+          find.widgetWithText(TextField, 'メールアドレス'),
+          'staff@example.invalid',
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, 'パスワード'),
+          'password123',
+        );
+        // AppBarのタイトルにも「ログイン」の文字列があるため、ボタン(FilledButton)を指定してtapする。
+        await tester.tap(find.widgetWithText(FilledButton, 'ログイン'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 10));
+        // ログイン後、URLのクエリ由来のeventId('event1')がそのままConfirmedScanReceptionFlowへ渡り、
+        // そのイベントのscannerへ進む(ログインによってeventIdが失われていない)。
+        expect(
+          tester
+              .widget<ConfirmedScanReceptionFlow>(
+                find.byType(ConfirmedScanReceptionFlow),
+              )
+              .initialEventId,
+          'event1',
+        );
+        expect(find.byType(ConfirmedQrScannerView), findsOneWidget);
+      },
+    );
+
     testWidgets('カメラ非対応環境(このテスト実行環境=VM)でも、既定のカメラ面はクラッシュせず「利用できません」表示に落ち着く', (
       tester,
     ) async {

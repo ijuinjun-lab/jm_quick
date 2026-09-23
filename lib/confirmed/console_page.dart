@@ -6,6 +6,7 @@ import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'import_models.dart';
 import 'import_service.dart';
+import 'reception_staff_qr_page.dart';
 import 'reminder_page.dart';
 import 'reminder_service.dart';
 import 'winner_mail_page.dart';
@@ -206,9 +207,16 @@ class _EventConsoleState extends State<_EventConsole> {
                 'CSV取込': () => Navigator.of(context).pushNamed(
                   '/console/import?eventId=${Uri.encodeQueryComponent(id)}',
                 ),
-                // QRカメラで受付(このイベントへscannerを固定する。program別受付ロジックは変更しない)。
-                '受付': () => Navigator.of(context).pushNamed(
-                  '/console/scan?eventId=${Uri.encodeQueryComponent(id)}',
+                // Phase 11L: PC(このイベント管理画面)自身のカメラは起動しない。「受付スタッフ用QR」
+                // (このイベントに固定されたスマホ受付スキャナ`/console/scan?eventId=…`を開くだけのURL。
+                // participantId/publicIdは含まない)を表示する画面へ遷移する(カメラはスマホ側だけで使う)。
+                '受付': () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ConfirmedReceptionStaffQrPage(
+                      eventId: id,
+                      eventName: event!.eventName,
+                    ),
+                  ),
                 ),
                 'リマインド': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -241,7 +249,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 '当選メール送信': '取込回ごとの送信・進行状況・失敗分の再送',
                 '当選メール設定': '件名・本文の設定とプレビュー',
                 'リマインド': '前日リマインドの設定・プレビュー・送信状況',
-                '受付': 'QRカメラで参加者を読み取り、programごとに受付する',
+                '受付': '受付スタッフ用QRを表示する(受付スタッフがスマホで読み取って受付する)',
               },
             ),
         ],

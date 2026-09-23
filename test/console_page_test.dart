@@ -13,6 +13,8 @@ import 'package:jm_quick/confirmed/access_role.dart';
 import 'package:jm_quick/confirmed/console_page.dart';
 import 'package:jm_quick/confirmed/import_models.dart';
 import 'package:jm_quick/confirmed/import_service.dart' show ImportException;
+import 'package:jm_quick/confirmed/reception_staff_qr_page.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'import_page_test.dart' show FakeImportService;
@@ -181,38 +183,29 @@ void main() {
     );
 
     testWidgets(
-      '受付を開くと、選択中のeventIdが自動的に引き継がれる(scannerへの引き継ぎ)',
+      'Phase 11L: 「受付」を開くと、PCのカメラは起動せず、受付スタッフ用QR(選択中のeventIdが自動的に'
+      '引き継がれた、既存のスマホ受付スキャナ`/console/scan?eventId=…`を開くだけのURL)が表示される',
       (tester) async {
-        final routes = <String?>[];
-        await tester.pumpWidget(
-          MaterialApp(
-            onGenerateRoute: (settings) {
-              routes.add(settings.name);
-              if (settings.name == '/') {
-                return MaterialPageRoute<void>(
-                  builder: (_) => ConfirmedConsolePage(
-                    initialEventId: 'evfixture0123456789',
-                    authClient: FakeAuthClient(signedIn: true),
-                    accessService: FakeAccessService([
-                      const AccessCheck.granted(AccessRole.admin),
-                    ]),
-                    eventSummaryService: FakeImportService(event: _summary),
-                  ),
-                  settings: settings,
-                );
-              }
-              return MaterialPageRoute<void>(
-                builder: (_) => const Scaffold(body: Text('NEXT')),
-                settings: settings,
-              );
-            },
-          ),
-        );
+        await tester.pumpWidget(_eventConsole());
         await tester.pumpAndSettle();
         await tester.ensureVisible(find.text('受付'));
         await tester.tap(find.text('受付'));
         await tester.pumpAndSettle();
-        expect(routes.last, '/console/scan?eventId=evfixture0123456789');
+        // PC自身のカメラ画面(scanner)へは行かない。QR表示画面だけが開く。
+        expect(find.byType(ConfirmedReceptionStaffQrPage), findsOneWidget);
+        expect(find.text('受付スタッフ用QRコード'), findsOneWidget);
+        expect(find.text('このPCではカメラを使用しません。'), findsOneWidget);
+        // QRの中身は、既存のスマホ受付スキャナのURL(このイベントのeventIdが引き継がれている)であり、
+        // participantId・publicIdは含まない(参加者QRではない)。QrImageViewはQR画像の中身を外部へ
+        // 公開する getter を持たないため、pass_page.dart と同じ方式で key に同じ文字列を持たせて確認する。
+        final key =
+            (tester.widget<QrImageView>(find.byType(QrImageView)).key
+                    as ValueKey<String>)
+                .value;
+        expect(key, contains('/console/scan'));
+        expect(key, contains('eventId=evfixture0123456789'));
+        expect(key.contains('participantId='), isFalse);
+        expect(key.contains('publicId='), isFalse);
       },
     );
 
