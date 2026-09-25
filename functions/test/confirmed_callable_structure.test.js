@@ -23,7 +23,9 @@ const LEGACY_API_ADMIN = ["listLegacyEvents", "getLegacyEventAdminView", "create
 // eventStaffOrLegacyStaff(従来のstaff/admin、または対象イベントのstaff以上)にした(下のテスト)。
 const LEGACY_API_STAFF = ["getLegacyReceptionView", "checkInLegacyParticipant", "updateLegacyAttendedCount"];
 // ログインなしで呼べる従来方式の公開入口(publicCapabilityCallable)。増やさない。参加者本人のcapability(participantId+publicId)か当日参加登録だけ。
-const PUBLIC_CAPABILITY_EXPORTS = ["registerWalkIn", "getLegacyParticipantPage", "confirmLegacyParticipation", "answerLegacyReconfirmation"];
+// 招待リンクを開いた本人向けの1本(招待tokenのcapability。Phase 4)も、このラッパーで公開する(App Check・rate limit)。
+const PUBLIC_INVITATION_EXPORTS = ["getEventInvitation"];
+const PUBLIC_CAPABILITY_EXPORTS = ["registerWalkIn", "getLegacyParticipantPage", "confirmLegacyParticipation", "answerLegacyReconfirmation", ...PUBLIC_INVITATION_EXPORTS];
 const ACCESS_LEVELS = ["admin", "staffOrAdmin", "authenticated", "systemAdmin"];
 // Phase 1B: イベント単位の認可(confirmedEventCallable)。resolverはevent_scope.jsのEVENT_SCOPESだけ。
 const EVENT_ACCESS_LEVELS = ["eventManager", "eventStaff", "eventStaffOrLegacyStaff"];
@@ -184,8 +186,9 @@ test("Phase 1A: getMyAccessRoleはauthenticated(ハンドラがaccessRoles・eve
   assert.match(found.rhs, /^confirmedCallable\("authenticated", getMyAccessRoleHandler\);$/);
   assert.match(index, /const getMyAccessRoleHandler = createGetMyAccessRoleHandler\(\{getDb: getFirestore\}\);/);
   // Phase 2: listMyEvents(本人の担当イベントだけを返す。権限が何も無ければpermission-denied)もauthenticated
+  // Phase 4: acceptEventInvitation(ログインした本人が招待を受ける。メールアドレスの一致はハンドラがAuthの正本で確認)もauthenticated
   const authenticatedOnes = exportsInIndex.filter((e) => /^confirmedCallable\("authenticated"/.test(e.rhs)).map((e) => e.name);
-  assert.deepEqual(authenticatedOnes, ["getMyAccessRole", "listMyEvents"]);
+  assert.deepEqual(authenticatedOnes, ["getMyAccessRole", "listMyEvents", "acceptEventInvitation"]);
   assert.match(exportsInIndex.find((e) => e.name === "listMyEvents").rhs, /^confirmedCallable\("authenticated", assignmentApi\.listMyEvents, /);
   const handler = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, "confirmed", "access_role.js"), "utf8"));
   assert.match(handler, /throw new ApiError\("permission-denied"/, "権限が何も無ければ拒否する");
@@ -249,6 +252,11 @@ const AUTHORIZATION_MAP_PHASE_1B = {
   removeEventRole: E_MANAGER,
   listEventAssignments: E_MANAGER,
   listMyEvents: "confirmedCallable:authenticated",
+  // Phase 4: 招待(未登録の人)。招待・取消は対象イベントのevent_manager以上、リンクを開く1本は公開(招待token)、受諾はログイン必須
+  inviteEventRole: E_MANAGER,
+  revokeEventInvitation: E_MANAGER,
+  getEventInvitation: "publicCapabilityCallable",
+  acceptEventInvitation: "confirmedCallable:authenticated",
 };
 // 従来のadmin / staffOrAdminのまま意図して残すもの(legacy業務・legacyのメール/削除。listLegacyEventsは全件一覧でsystem管理者専用)。
 const OLD_LEVEL_ALLOWLIST = [...LEGACY_ADMIN_EXPORTS, ...LEGACY_API_ADMIN, ...LEGACY_API_STAFF].sort();
@@ -263,7 +271,7 @@ const authorizationOf = (rhs) => {
 test("Phase 1B: 全exportの入口・認可レベル・対象イベントのresolverが正式マップと一致する(callableの追加・削除も無い)", () => {
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
-  assert.equal(exportsInIndex.length, 50);
+  assert.equal(exportsInIndex.length, 54);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {
@@ -301,7 +309,7 @@ test("Phase 1A/1B/2: イベント単位の権限helper(event_access.js)は読み
   ].filter((file) => !file.includes(`${path.sep}test${path.sep}`) && !file.includes(`${path.sep}test_support${path.sep}`));
   const users = sources.filter((file) => /require\("\.\.?\/(\.\.\/)?event_access"\)/.test(fs.readFileSync(file, "utf8")))
     .map((file) => path.relative(FUNCTIONS_DIR, file));
-  assert.deepEqual(users.sort(), ["auth.js", "event_scope.js", path.join("confirmed", "access_role.js"), path.join("confirmed", "assignment_api.js")].sort());
+  assert.deepEqual(users.sort(), ["auth.js", "event_scope.js", path.join("confirmed", "access_role.js"), path.join("confirmed", "assignment_api.js"), path.join("confirmed", "invitation_api.js")].sort());
 });
 
 function listJs(dir) {
@@ -350,11 +358,21 @@ test("functions/legacy/ にはcallable・Firebaseを持ち込まない(公開は
 
 // Phase 10D: ログインなしで呼べるcallableは、この5本だけ(増やす・減らす・入口の種類を変えると失敗する)。
 const FIXED_PUBLIC_FIVE = ["getConfirmedParticipantPass", "registerWalkIn", "getLegacyParticipantPage", "confirmLegacyParticipation", "answerLegacyReconfirmation"];
+// Phase 4: 招待リンクを開いた本人向けの1本を追加した(合計6本)。
+const FIXED_PUBLIC = [...FIXED_PUBLIC_FIVE, ...PUBLIC_INVITATION_EXPORTS];
 
-test("Phase 10D: ログイン不要のcallableは意図した5本だけ", () => {
+test("Phase 10D/4: ログイン不要のcallableは意図した6本だけ(従来の5本+招待リンクの1本)", () => {
   const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs)).map((e) => e.name);
-  assert.deepEqual(publicOnes.sort(), [...FIXED_PUBLIC_FIVE].sort());
-  assert.deepEqual(exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !/^onSchedule\(/.test(e.rhs)).map((e) => e.name).sort(), [...FIXED_PUBLIC_FIVE].sort());
+  assert.deepEqual(publicOnes.sort(), [...FIXED_PUBLIC].sort());
+  assert.deepEqual(exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !/^onSchedule\(/.test(e.rhs)).map((e) => e.name).sort(), [...FIXED_PUBLIC].sort());
+});
+
+test("Phase 4: 招待リンクの公開1本は、接続元IP・招待token単位のrate limitとrate limit用Secretを必ず通り、閲覧用の上限", () => {
+  assert.match(exportsInIndex.find((e) => e.name === "getEventInvitation").rhs,
+    /^publicCapabilityCallable\(limitedByInvitationToken\(VIEW_LIMITS, invitationApi\.getInvitation\), PUBLIC_SECRETS\);$/);
+  const limiter = index.slice(index.indexOf("function limitedByInvitationToken("), index.indexOf("exports.assignEventRole"));
+  assert.ok(limiter.indexOf("rateLimiter.check(limits.ip") > 0 && limiter.indexOf("rateLimiter.check(limits.target") > limiter.indexOf("rateLimiter.check(limits.ip"));
+  assert.ok(limiter.indexOf("rateLimiter.check(limits.target") < limiter.indexOf("return handler(context)"), "rate limitはハンドラより前");
 });
 
 test("Phase 10D: 公開5本は、参加者単位のrate limit(または当日参加登録専用のrate limit)とrate limit用Secretを必ず通る", () => {
@@ -401,14 +419,14 @@ test("Phase 10D: rate limitの上限値はpublic_limits.jsに集約され、他�
 });
 
 // Phase 11A: 新方式イベントの作成はadmin専用の1本(createConfirmedEvent)。公開callableは増やさない。Phase 1B: systemAdmin(=有効なadmin)。
-test("Phase 11A: createConfirmedEventはsystemAdmin専用で、legacyの作成(createLegacyEvent)とは別のcallable。公開callableは5本のまま", () => {
+test("Phase 11A: createConfirmedEventはsystemAdmin専用で、legacyの作成(createLegacyEvent)とは別のcallable。公開callableは固定の6本のまま", () => {
   const found = exportsInIndex.find((e) => e.name === "createConfirmedEvent");
   assert.ok(found, "createConfirmedEventが見つかりません");
   assert.match(found.rhs, /^confirmedCallable\("systemAdmin", eventCreateApi\.createEvent/);
   const legacy = exportsInIndex.find((e) => e.name === "createLegacyEvent");
   assert.notEqual(found.rhs, legacy.rhs);
   const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs));
-  assert.equal(publicOnes.length, 5);
+  assert.equal(publicOnes.length, FIXED_PUBLIC.length); // Phase 4: 6本(従来5本+招待リンク1本)
   const source = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, "confirmed", "event_create_api.js"), "utf8"));
   assert.doesNotMatch(source, /\b(tx|ref|db)\.(set|update|delete)\(|\bmerge\b/, "createのみ(set/update/merge/deleteで既存イベントを上書きしない)");
   assert.match(source, /tx\.create\(/);
@@ -418,12 +436,12 @@ test("Phase 11A: createConfirmedEventはsystemAdmin専用で、legacyの作成(c
 });
 
 // Phase 11B: 取込画面のイベント表示用に、admin専用の読み取りcallableを1本だけ追加した(既存のadmin APIにprogram一覧を返すものが無いため)。公開callableは増やさない。
-test("Phase 11B: getConfirmedEventSummaryは読み取りだけのcallable(Phase 1B: 対象イベントのevent_manager以上)。取込のpreview/commitは既存のまま。公開callableは5本のまま", () => {
+test("Phase 11B: getConfirmedEventSummaryは読み取りだけのcallable(Phase 1B: 対象イベントのevent_manager以上)。取込のpreview/commitは既存のまま。公開callableは固定の6本のまま", () => {
   const found = exportsInIndex.find((e) => e.name === "getConfirmedEventSummary");
   assert.ok(found, "getConfirmedEventSummaryが見つかりません");
   assert.match(found.rhs, /^confirmedEventCallable\("eventManager", EVENT_SCOPES\.dataEventId, eventCreateApi\.getSummary/);
   const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs));
-  assert.equal(publicOnes.length, 5);
+  assert.equal(publicOnes.length, FIXED_PUBLIC.length); // Phase 4: 6本(従来5本+招待リンク1本)
   assert.equal(exportsInIndex.some((e) => /^(previewConfirmedImport|commitConfirmedImport)$/.test(e.name) && !/^confirmedEventCallable\("eventManager", EVENT_SCOPES\.dataEventId, /.test(e.rhs)), false);
   const source = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, "confirmed", "event_create_api.js"), "utf8"));
   const body = source.slice(source.indexOf("async function getSummary"), source.indexOf("return {createEvent, getSummary}"));
@@ -442,9 +460,14 @@ test("Phase 2: 任命APIはassignmentDocIdでIDを作り、Authユーザーを�
   assert.doesNotMatch(source, /`\$\{[^}]*\}_\$\{[^}]*\}`/, "{eventId}_{uid}の連結でIDを作らない");
   assert.doesNotMatch(source, /\.delete\(|tx\.set\(|\bmerge\b/, "物理削除・上書き(set/merge)をしない");
   assert.match(source, /tx\.update\(ref, \{active: false, updatedAt: serverTimestamp\(\), updatedBy: identity\.uid\}\)/);
-  for (const file of ["index.js", path.join("confirmed", "assignment_api.js")]) {
+  for (const file of [path.join("confirmed", "assignment_api.js")]) {
     const text = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, file), "utf8"));
     assert.doesNotMatch(text, /\b(createUser|updateUser|deleteUser|setCustomUserClaims|importUsers)\(/, `${file}: Authユーザーを作成・変更しない`);
   }
+  // Phase 4: 本人のクライアントSDK登録だけ。FunctionsはAuthの変更やpasswordを扱わない。
+  const indexCode = strip(index);
+  assert.doesNotMatch(indexCode, /\b(updateUser|deleteUser|setCustomUserClaims|importUsers)\(/);
+  assert.deepEqual([...indexCode.matchAll(/getAuth\(\)\.createUser\(([^)]*)\)/g)].map((m) => m[1]), [], "Auth登録はクライアントだけ");
+  assert.doesNotMatch(indexCode, /password\s*:/i, "パスワードを設定しない");
   assert.match(index, /await getAuth\(\)\.getUserByEmail\(email\)/, "既存のAuthユーザーをメールアドレスで検索するだけ");
 });

@@ -244,7 +244,8 @@ describe("イベント単位の任命API・担当イベント(実際のindex.js 
       assert.deepEqual(result, {eventId: EV_A, assignments: [
         {assignmentId: idOf(EV_A, "u-mgr-a"), role: "event_manager", active: true, email: "manager.a@example.invalid", isSelf: true},
         {assignmentId: idOf(EV_A, "u-staff-1"), role: "staff", active: true, email: "staff.one@example.invalid", isSelf: false},
-      ]});
+      // Phase 4: 招待中の一覧も返す(この場面では招待なし)
+      ], invitations: []});
       const text = JSON.stringify(result);
       for (const leaked of ["manager.b@", "staff.two@", EV_B, "u-admin", "u-mgr-a\"", "assignedBy", "uid"]) assert.equal(text.includes(leaked), false, leaked);
       assert.equal(await call("listEventAssignments", "u-mgr-a", {eventId: EV_B}), "permission-denied");

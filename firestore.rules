@@ -54,6 +54,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // 招待(未登録の人をイベント管理者・スタッフとして招待する)の正本。招待tokenはhashだけを保存する。
+    // クライアントSDKからはread/writeとも一切許可しない(招待された本人・招待者も直接読めない)。読み書きはAdmin SDK(Functions)だけ。
+    match /eventInvitations/{invitationId} {
+      allow read, write: if false;
+    }
+
     // 新方式の当選者CSV取込の記録(取込回と、その全行の監査)。クライアントからのread/writeは一切許可しない。
     // 読み書きはAdmin SDK(admin専用callable)だけ。監査行には個人情報を持たない。
     match /importBatches/{batchId} {

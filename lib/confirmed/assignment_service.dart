@@ -73,6 +73,33 @@ class EventAssignmentEntry {
   final bool isSelf;
 }
 
+/// 招待中(未登録の人への招待。listEventAssignmentsのinvitations)。invitationIdは取消の内部値(表示しない)。
+class EventInvitationEntry {
+  const EventInvitationEntry({
+    required this.invitationId,
+    required this.role,
+    required this.email,
+    required this.expiresAt,
+    required this.expired,
+    required this.mailFailed,
+  });
+
+  final String invitationId;
+  final EventRole role;
+  final String email;
+  final DateTime? expiresAt;
+  final bool expired;
+
+  /// 招待メールを送れなかった(再度招待すれば送り直す)。
+  final bool mailFailed;
+
+  /// 画面に表示する状態。
+  String get statusLabel => expired ? '期限切れ' : (mailFailed ? '送信失敗' : '招待中');
+}
+
+/// 招待の結果。未登録なら招待メールを送った(invited)、登録済みなら即任命した(assigned)。
+enum InviteResult { invited, assigned }
+
 /// 画面へそのまま表示できるエラー(内部情報を含まない)。
 class AssignmentException implements Exception {
   const AssignmentException(this.message, {this.code});
@@ -93,6 +120,22 @@ abstract class AssignmentService {
     required EventRole role,
   });
   Future<void> remove({required String eventId, required String assignmentId});
+
+  /// Phase 4: 招待中の一覧(招待中・期限切れ)。
+  Future<List<EventInvitationEntry>> listInvitations(String eventId);
+
+  /// Phase 4: 招待(未登録なら招待メール、登録済みならサーバーが即任命する)。
+  Future<InviteResult> invite({
+    required String eventId,
+    required String email,
+    required EventRole role,
+  });
+
+  /// Phase 4: 招待の取消。
+  Future<void> revokeInvitation({
+    required String eventId,
+    required String invitationId,
+  });
 }
 
 /// サーバーの理由コード → 画面の文言。
@@ -112,7 +155,10 @@ String assignmentErrorMessage(String? status, String? code) {
     case 'event-not-confirmed':
       return 'このイベントでは設定できません。';
     case 'assignment-not-found':
+    case 'invitation-not-found':
       return '対象が見つかりません。画面を更新してください。';
+    case 'invitation-mail-failed':
+      return '招待メールを送信できませんでした。時間をおいて、もう一度招待してください。';
   }
   switch (status) {
     case 'PERMISSION_DENIED':
@@ -241,6 +287,62 @@ class CallableAssignmentService implements AssignmentService {
     await _call('removeEventRole', {
       'eventId': eventId,
       'assignmentId': assignmentId,
+    });
+  }
+
+  @override
+  Future<List<EventInvitationEntry>> listInvitations(String eventId) async {
+    final result = await _call('listEventAssignments', {'eventId': eventId});
+    final raw = result['invitations'] is List
+        ? result['invitations'] as List
+        : const [];
+    final entries = <EventInvitationEntry>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final role = EventRole.fromValue(item['role']);
+      final invitationId = item['invitationId'];
+      if (role == null || invitationId is! String) continue;
+      entries.add(
+        EventInvitationEntry(
+          invitationId: invitationId,
+          role: role,
+          email: item['email'] as String? ?? '',
+          expiresAt: DateTime.tryParse(
+            item['expiresAt'] as String? ?? '',
+          )?.toLocal(),
+          expired: item['status'] == 'expired',
+          mailFailed:
+              item['mailStatus'] == 'failed' || item['mailStatus'] == 'unknown',
+        ),
+      );
+    }
+    return entries;
+  }
+
+  @override
+  Future<InviteResult> invite({
+    required String eventId,
+    required String email,
+    required EventRole role,
+  }) async {
+    final result = await _call('inviteEventRole', {
+      'eventId': eventId,
+      'email': email.trim(),
+      'role': role.value,
+    });
+    return result['result'] == 'assigned'
+        ? InviteResult.assigned
+        : InviteResult.invited;
+  }
+
+  @override
+  Future<void> revokeInvitation({
+    required String eventId,
+    required String invitationId,
+  }) async {
+    await _call('revokeEventInvitation', {
+      'eventId': eventId,
+      'invitationId': invitationId,
     });
   }
 }

@@ -53,10 +53,10 @@ test("純粋関数のみ: Firebase・Firestore・ネットワークを使わな�
   }
 });
 
-test("取込ロジック(import_*)はまだcallableへ接続していない(index.jsがconfirmed/から読み込むのは、認可つきで公開するAPI(access_role・import_api・winner_mail_api・winner_send_api・pass_api・reminder_api・event_create_api(Phase 11A: 新方式イベントの作成。admin専用)・assignment_api(Phase 2: イベント単位の任命))だけ)", () => {
+test("取込ロジック(import_*)はまだcallableへ接続していない(index.jsがconfirmed/から読み込むのは、認可つきで公開するAPI(access_role・import_api・winner_mail_api・winner_send_api・pass_api・reminder_api・event_create_api(Phase 11A: 新方式イベントの作成。admin専用)・assignment_api(Phase 2: イベント単位の任命)・invitation_api(Phase 4: 招待))だけ)", () => {
   const index = fs.readFileSync(path.join(FUNCTIONS_DIR, "index.js"), "utf8");
   const required = [...index.matchAll(/require\("\.\/confirmed\/([^"]+)"\)/g)].map((m) => m[1]);
-  assert.deepEqual(required, ["access_role", "import_api", "event_create_api", "winner_mail_api", "winner_send_api", "pass_api", "reminder_api", "assignment_api"]);
+  assert.deepEqual(required, ["access_role", "import_api", "event_create_api", "winner_mail_api", "winner_send_api", "pass_api", "reminder_api", "assignment_api", "invitation_api"]);
   assert.doesNotMatch(index, /import_(mapping|rows|batch_plan)/);
 });
 

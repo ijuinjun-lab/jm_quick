@@ -2,18 +2,21 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 /// ログインに失敗したときの、画面へそのまま表示できる(内部情報を含まない)メッセージ。
 class AuthFailure implements Exception {
-  const AuthFailure(this.message);
+  const AuthFailure(this.message, {this.code});
+  final String? code;
   final String message;
   @override
   String toString() => message;
 }
 
 /// Firebase Authenticationへの薄い窓口。画面はこの抽象にだけ依存する(テストでは差し替える)。
-/// メールアドレスなど利用者の情報は外へ出さない(ログイン済みかどうかだけ)。
+/// 招待画面は現在のメールを招待先と照合する。パスワードはAuth SDK以外へ渡さない。
 abstract class AuthClient {
   /// ログイン状態の変化(true=ログイン済み)。購読開始時に現在の状態も流す。
   Stream<bool> signedInChanges();
 
+  String? get currentEmail;
+  Future<void> register(String email, String password);
   Future<void> signIn(String email, String password);
   Future<void> signOut();
 
@@ -43,6 +46,29 @@ class FirebaseAuthClient implements AuthClient {
       throw AuthFailure(messageForCode(error.code));
     } catch (_) {
       throw const AuthFailure('ログインできませんでした。通信状態を確認して、もう一度お試しください。');
+    }
+  }
+
+  @override
+  String? get currentEmail => auth.currentUser?.email;
+
+  @override
+  Future<void> register(String email, String password) async {
+    try {
+      // Firebase側の既存password policyに従う。Functionsへpasswordは送らない。
+      await auth.createUserWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+    } on FirebaseAuthException catch (error) {
+      throw AuthFailure(switch (error.code) {
+        'email-already-in-use' => '登録済みです。設定したパスワードでログインして招待を受けてください。',
+        'weak-password' || 'password-does-not-meet-requirements' =>
+          'パスワードが必要な条件を満たしていません。より長く、英大文字・小文字・数字・記号を含むパスワードを設定してください。',
+        _ => messageForCode(error.code),
+      }, code: error.code);
+    } catch (_) {
+      throw const AuthFailure('登録結果を確認できません。登録済みの場合はログインして再開してください。');
     }
   }
 

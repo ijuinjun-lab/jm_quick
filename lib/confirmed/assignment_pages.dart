@@ -200,6 +200,9 @@ class EventAssignmentPage extends StatefulWidget {
 class _EventAssignmentPageState extends State<EventAssignmentPage> {
   final _email = TextEditingController();
   List<EventAssignmentEntry>? entries;
+
+  /// Phase 4: 招待中(未登録の人への招待)。
+  List<EventInvitationEntry> invitations = const [];
   String? loadError;
   String? notice;
   String? error;
@@ -225,10 +228,14 @@ class _EventAssignmentPageState extends State<EventAssignmentPage> {
     setState(() => loadError = null);
     try {
       final all = await widget.service.listAssignments(widget.eventId);
+      final invited = await widget.service.listInvitations(widget.eventId);
       if (!mounted) return;
-      setState(
-        () => entries = all.where((e) => e.role == widget.targetRole).toList(),
-      );
+      setState(() {
+        entries = all.where((e) => e.role == widget.targetRole).toList();
+        invitations = invited
+            .where((e) => e.role == widget.targetRole)
+            .toList();
+      });
     } on AssignmentException catch (e) {
       if (mounted) setState(() => loadError = e.message);
     } catch (_) {
@@ -260,6 +267,106 @@ class _EventAssignmentPageState extends State<EventAssignmentPage> {
             ? '${widget.targetRole.label}を追加しました。'
             : 'すでに${widget.targetRole.label}として登録されています。',
       );
+      await _load();
+    } on AssignmentException catch (e) {
+      // Phase 4: 未登録のメールアドレスなら、確認のうえ招待メールを送る(登録済みならこれまでどおり即任命)
+      if (e.code == 'user-not-found' && mounted) {
+        setState(() => busy = false);
+        await _invite(email);
+        return;
+      }
+      if (mounted) setState(() => error = e.message);
+    } catch (_) {
+      if (mounted) setState(() => error = '処理に失敗しました。もう一度お試しください。');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _invite(String email) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('招待メールを送信しますか？'),
+        content: Text(
+          '$email\n\nこのメールアドレスはJM Quickに未登録です。\n'
+          '${widget.targetRole.label}として招待メールを送信します。',
+          key: const Key('invite-confirm-message'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            key: const Key('invite-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('招待メールを送信'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() {
+      busy = true;
+      error = null;
+      notice = null;
+    });
+    try {
+      final result = await widget.service.invite(
+        eventId: widget.eventId,
+        email: email,
+        role: widget.targetRole,
+      );
+      if (!mounted) return;
+      _email.clear();
+      setState(
+        () => notice = result == InviteResult.invited
+            ? '招待メールを送信しました。本人が初期設定を終えると${widget.targetRole.label}になります。'
+            : '${widget.targetRole.label}を追加しました。',
+      );
+      await _load();
+    } on AssignmentException catch (e) {
+      if (mounted) setState(() => error = e.message);
+    } catch (_) {
+      if (mounted) setState(() => error = '処理に失敗しました。もう一度お試しください。');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _revoke(EventInvitationEntry entry) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('招待を取り消しますか？'),
+        content: Text('${entry.email}\n招待メールのリンクは使えなくなります。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            key: const Key('invitation-revoke-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('取り消す'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() {
+      busy = true;
+      error = null;
+      notice = null;
+    });
+    try {
+      await widget.service.revokeInvitation(
+        eventId: widget.eventId,
+        invitationId: entry.invitationId,
+      );
+      if (!mounted) return;
+      setState(() => notice = '招待を取り消しました。');
       await _load();
     } on AssignmentException catch (e) {
       if (mounted) setState(() => error = e.message);
@@ -343,6 +450,44 @@ class _EventAssignmentPageState extends State<EventAssignmentPage> {
         ),
         const SizedBox(height: 8),
         _list(),
+        if (invitations.isNotEmpty) ...[
+          const SizedBox(height: 20),
+          const Text(
+            '招待中',
+            style: TextStyle(
+              color: _mutedText,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          _invitationList(),
+        ],
+      ],
+    ),
+  );
+
+  Widget _invitationList() => Card(
+    child: Column(
+      children: [
+        for (final entry in invitations)
+          ListTile(
+            key: ValueKey('invitation-entry:${entry.email}'),
+            title: Text(entry.email, overflow: TextOverflow.ellipsis),
+            subtitle: Text(
+              [
+                entry.role.label,
+                entry.statusLabel,
+                if (entry.expiresAt != null)
+                  '期限 ${formatDateTimeMinute(entry.expiresAt)}',
+              ].join(' / '),
+            ),
+            trailing: TextButton(
+              key: ValueKey('invitation-revoke:${entry.email}'),
+              onPressed: busy ? null : () => _revoke(entry),
+              child: const Text('取消'),
+            ),
+          ),
       ],
     ),
   );
@@ -371,7 +516,7 @@ class _EventAssignmentPageState extends State<EventAssignmentPage> {
           ),
           const SizedBox(height: 8),
           const Text(
-            '追加できるのは、JM Quickにアカウントが登録済みの利用者だけです。',
+            '登録済みの方はすぐに追加されます。未登録の方には、確認のうえ招待メールを送信します。',
             style: TextStyle(color: _mutedText, fontSize: 12),
           ),
         ],

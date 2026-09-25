@@ -14,7 +14,24 @@ import 'package:jm_quick/confirmed/login_page.dart';
 
 /// Firebaseへ接続しないAuthClient。ログイン状態は手動で操作する。
 class FakeAuthClient implements AuthClient {
-  FakeAuthClient({this.signedIn = false, this.token = 'test-token'});
+  FakeAuthClient({
+    this.signedIn = false,
+    this.token = 'test-token',
+    this.email = 'new.manager@example.invalid',
+  });
+  String email;
+  @override
+  String? get currentEmail => signedIn ? email : null;
+  AuthFailure? registerFailure;
+  final List<(String, String)> registerCalls = [];
+  @override
+  Future<void> register(String email, String password) async {
+    registerCalls.add((email, password));
+    if (registerFailure != null) throw registerFailure!;
+    this.email = email;
+    setSignedIn(true);
+  }
+
   bool signedIn;
   String? token;
   AuthFailure? signInFailure;
@@ -46,6 +63,7 @@ class FakeAuthClient implements AuthClient {
   @override
   Future<void> signIn(String email, String password) async {
     signInCalls.add((email, password));
+    this.email = email;
     if (signInFailure != null) throw signInFailure!;
     setSignedIn(true);
   }
@@ -574,10 +592,11 @@ void main() {
       final gate = File('lib/confirmed/auth_gate.dart').readAsStringSync();
       expect(gate, contains('fetchMyAccess'));
       expect(gate, isNot(contains('.email')));
-      expect(
-        File('lib/confirmed/auth_client.dart').readAsStringSync(),
-        isNot(contains('.email;')),
-      );
+      // 招待画面のメール照合は誤操作防止だけ。権限付与はサーバーのaccept APIで行う。
+      final invitation = File('lib/confirmed/invitation_page.dart').readAsStringSync();
+      expect(invitation, contains('service.accept(_token)'));
+      expect(invitation, isNot(contains('FirebaseFirestore')));
+      expect(invitation, isNot(contains('eventAssignments')));
     });
 
     // Phase 10C: 以前は「従来方式のルートはAuthGateで包まれていない」を検査していた。認証境界の導入で、

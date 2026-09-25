@@ -18,6 +18,7 @@ const {createWinnerSendApi} = require("./confirmed/winner_send_api");
 const {createPassApi} = require("./confirmed/pass_api");
 const {createReminderApi} = require("./confirmed/reminder_api");
 const {createAssignmentApi} = require("./confirmed/assignment_api");
+const {createInvitationApi} = require("./confirmed/invitation_api");
 const {generateQrPng} = require("./qr_png");
 const {createMailApiTransport} = require("./mail_transport");
 
@@ -855,10 +856,49 @@ async function findAuthUserByEmail(email) {
   }
 }
 const assignmentApi = createAssignmentApi({getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp(), findUserByEmail: findAuthUserByEmail});
+
+// 招待ではAuthの本人情報を読むだけ。登録とパスワードは本人のFirebase AuthクライアントSDKで扱う。
+const invitationAuthAdmin = {
+  findUserByEmail: findAuthUserByEmail,
+  async getUser(uid) {
+    const {getAuth} = require("firebase-admin/auth");
+    try {
+      const user = await getAuth().getUser(uid);
+      return {uid: user.uid, email: user.email || null, disabled: user.disabled === true};
+    } catch (error) {
+      if (error && error.code === "auth/user-not-found") return null;
+      throw error;
+    }
+  },
+
+};
+const invitationApi = createInvitationApi({
+  getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp(), authAdmin: invitationAuthAdmin, assignmentApi,
+  getTransport: () => createMailApiTransport({endpoint: mailApiUrl.value(), apiKey: mailApiKey.value()}),
+  getAppBaseUrl: () => appBaseUrl.value(),
+});
+// 招待リンク(ログイン不要)の入口は、接続元IPと招待token単位でrate limitする(公開入口のApp Checkはauth.jsが強制)。
+function limitedByInvitationToken(limits, handler) {
+  return async (context) => {
+    await rateLimiter.check(limits.ip, clientIpOf(context.request));
+    const data = context.data;
+    const token = data && typeof data === "object" && typeof data.token === "string" && data.token !== "" ? data.token.slice(0, 128) : null;
+    if (token) await rateLimiter.check(limits.target, token);
+    return handler(context);
+  };
+}
 exports.assignEventRole = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, assignmentApi.assign, {timeoutSeconds: 30});
 exports.removeEventRole = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, assignmentApi.remove, {timeoutSeconds: 30});
-exports.listEventAssignments = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, assignmentApi.list, {timeoutSeconds: 30});
+// 有効な任命に加えて、招待中(未登録の人への招待)の一覧も返す。
+exports.listEventAssignments = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, invitationApi.listAssignmentsWithInvitations, {timeoutSeconds: 30});
 exports.listMyEvents = confirmedCallable("authenticated", assignmentApi.listMyEvents, {timeoutSeconds: 30});
+// 招待: 未登録なら招待メール、登録済みなら即任命(assignEventRoleと同じ確認)。取消は招待中のものだけ。
+exports.inviteEventRole = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, invitationApi.invite, {secrets: [mailApiKey], timeoutSeconds: 60});
+exports.revokeEventInvitation = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, invitationApi.revoke, {timeoutSeconds: 30});
+// 招待リンクを開いた本人向け(ログイン不要。App Check・rate limit)。tokenを確認できた場合だけ登録に必要な情報を返す。
+exports.getEventInvitation = publicCapabilityCallable(limitedByInvitationToken(VIEW_LIMITS, invitationApi.getInvitation), PUBLIC_SECRETS);
+// 招待を受ける(ログイン必須)。ログインしたAuthユーザーのメールアドレスが招待と一致したときだけ任命を有効にする。
+exports.acceptEventInvitation = confirmedCallable("authenticated", invitationApi.accept, {timeoutSeconds: 30});
 
 // 当選者CSVの取込(Phase 1B: 対象イベントのevent_manager以上。adminは全イベント)。preview=dry-run(書込みなし) / commit=サーバー側で再検証して登録。メールは送らない。
 const importApi = createImportApi({getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp()});

@@ -7,6 +7,7 @@ import 'confirmed/confirmed_event_list_page.dart';
 import 'confirmed/console_page.dart';
 import 'confirmed/event_create_page.dart';
 import 'confirmed/import_page.dart';
+import 'confirmed/invitation_page.dart';
 import 'confirmed/pass_page.dart';
 import 'confirmed/pass_service.dart';
 import 'confirmed/qr_scanner_page.dart';
@@ -92,6 +93,8 @@ Widget resolveRoute(Uri uri) => switch (uri.path) {
   '/console/events' => ConfirmedEventListRoute(),
   // Phase 3: イベントごとのイベント管理者の追加・解除(システム管理者専用)。
   '/console/managers' => ConfirmedManagerSettingsRoute(),
+  // Phase 4: 招待リンク(招待された本人が初期設定・ログイン・招待の受諾を行う)。tokenを確認できた場合だけ内容を表示する。
+  '/invite' => InvitationAcceptPage(token: uri.queryParameters['token']),
   // 新方式のイベント作成(admin専用)
   '/console/events/new' => ConfirmedEventCreateRoute(),
   // 新方式の参加者CSV取込(admin専用)

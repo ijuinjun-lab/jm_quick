@@ -95,6 +95,44 @@ class FakeAssignmentService implements AssignmentService {
     removeCalls.add((eventId, assignmentId));
     assignments[eventId]?.removeWhere((e) => e.assignmentId == assignmentId);
   }
+
+  // Phase 4: 招待(未登録の人)。
+  final Map<String, List<EventInvitationEntry>> invitations = {};
+  final List<(String, String, EventRole)> inviteCalls = [];
+  final List<(String, String)> revokeCalls = [];
+
+  @override
+  Future<List<EventInvitationEntry>> listInvitations(String eventId) async =>
+      List.of(invitations[eventId] ?? const []);
+
+  @override
+  Future<InviteResult> invite({
+    required String eventId,
+    required String email,
+    required EventRole role,
+  }) async {
+    inviteCalls.add((eventId, email, role));
+    (invitations[eventId] ??= []).add(
+      EventInvitationEntry(
+        invitationId: 'ei${'c' * 64}',
+        role: role,
+        email: email.trim().toLowerCase(),
+        expiresAt: DateTime(2026, 12, 7, 10),
+        expired: false,
+        mailFailed: false,
+      ),
+    );
+    return InviteResult.invited;
+  }
+
+  @override
+  Future<void> revokeInvitation({
+    required String eventId,
+    required String invitationId,
+  }) async {
+    revokeCalls.add((eventId, invitationId));
+    invitations[eventId]?.removeWhere((e) => e.invitationId == invitationId);
+  }
 }
 
 const _managerA = EventAssignment(eventId: _evA, role: EventRole.eventManager);
@@ -290,7 +328,9 @@ void main() {
       },
     );
 
-    testWidgets('存在しない利用者のメールアドレスは、意味の分かる日本語で表示する', (tester) async {
+    testWidgets('存在しない利用者のメールアドレスは、意味の分かる日本語で確認する(Phase 4: 招待するかを確認)', (
+      tester,
+    ) async {
       final service = FakeAssignmentService(
         assignError: AssignmentException(
           assignmentErrorMessage('NOT_FOUND', 'user-not-found'),
@@ -314,11 +354,15 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('assignment-add-button')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('assignment-error')), findsOneWidget);
-      expect(find.textContaining('このメールアドレスの利用者が登録されていません。'), findsOneWidget);
-      // パスワード入力欄は無い(アカウント作成はしない)
+      // Phase 4: 未登録なら「登録されていません」で終わらず、招待メールを送るかを確認する(送信はキャンセルできる)
+      expect(find.textContaining('このメールアドレスはJM Quickに未登録です。'), findsOneWidget);
+      // パスワード入力欄は無い(管理者がアカウントやパスワードを作ることはしない)
       expect(find.textContaining('パスワード'), findsNothing);
       expect(find.byType(TextField), findsOneWidget);
+      await tester.tap(find.text('キャンセル'));
+      await tester.pumpAndSettle();
+      expect(service.inviteCalls, isEmpty);
+      expect(find.byKey(const Key('assignment-error')), findsNothing);
     });
   });
 
