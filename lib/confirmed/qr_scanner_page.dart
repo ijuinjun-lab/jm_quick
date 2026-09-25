@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 
 import '../pages/reception_page.dart' as legacy;
 import 'access_service.dart';
+import 'assignment_pages.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'qr_scanner.dart';
@@ -49,6 +50,22 @@ class ConfirmedScanReceptionRoute extends StatelessWidget {
         ConfirmedScanReceptionFlow(initialEventId: eventId),
     staffBuilder: (context, signOut) =>
         ConfirmedScanReceptionFlow(initialEventId: eventId),
+    // Phase 3: イベント管理者・スタッフは担当イベントの受付だけ(サーバーも担当外を拒否する)。
+    // eventIdが無く担当が1件なら、そのイベントへ固定する(担当が複数なら従来どおり最初に読み取ったQRのイベントへ固定)。
+    eventScopedBuilder: (context, signOut, assignments) {
+      final id = (eventId ?? '').trim();
+      if (id.isNotEmpty && !assignments.any((a) => a.eventId == id)) {
+        return EventScopeDenied(
+          title: '受付',
+          message: 'このイベントの受付を行う権限がありません。',
+          signOut: signOut,
+        );
+      }
+      final fixed = id.isNotEmpty
+          ? id
+          : (assignments.length == 1 ? assignments.single.eventId : null);
+      return ConfirmedScanReceptionFlow(initialEventId: fixed);
+    },
   );
 }
 

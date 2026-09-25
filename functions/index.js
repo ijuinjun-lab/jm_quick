@@ -5,17 +5,19 @@ const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {createHash, randomBytes} = require("crypto");
 const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
-const {confirmedCallable, confirmedPublicPassCallable, publicCapabilityCallable} = require("./auth");
+const {confirmedCallable, confirmedEventCallable, confirmedPublicPassCallable, publicCapabilityCallable} = require("./auth");
+const {EVENT_SCOPES} = require("./event_scope");
 const {createLegacyApi} = require("./legacy/legacy_api");
 const {createRateLimiter, clientIpOf} = require("./rate_limit");
 const {RATE_LIMIT_POLICIES, RATE_LIMIT_RETENTION_MS, WALK_IN_EVENT_LIMIT} = require("./public_limits");
-const {getMyAccessRoleHandler} = require("./confirmed/access_role");
+const {createGetMyAccessRoleHandler} = require("./confirmed/access_role");
 const {createImportApi} = require("./confirmed/import_api");
 const {createEventCreateApi} = require("./confirmed/event_create_api");
 const {createWinnerMailApi} = require("./confirmed/winner_mail_api");
 const {createWinnerSendApi} = require("./confirmed/winner_send_api");
 const {createPassApi} = require("./confirmed/pass_api");
 const {createReminderApi} = require("./confirmed/reminder_api");
+const {createAssignmentApi} = require("./confirmed/assignment_api");
 const {generateQrPng} = require("./qr_png");
 const {createMailApiTransport} = require("./mail_transport");
 
@@ -831,25 +833,51 @@ exports.deleteEvent = confirmedCallable("admin",
 // --- 新方式(flow=confirmed)の認証callable ---------------------------------------------
 // 新方式の管理系callableは必ず confirmedCallable(アクセスレベル, ハンドラ) で定義する(認可を通らないと実行されない)。
 // 従来方式のcallableもPhase 10Cで、admin/staffOrAdmin(認証+accessRoles)または参加者capability(publicId)に統一した(認証なしの管理系callableは残していない)。
-exports.getMyAccessRole = confirmedCallable("staffOrAdmin", getMyAccessRoleHandler);
+// Phase 1A: 自分の権限(全体role・systemAdmin・イベント単位の権限)を返す。イベント単位の権限だけのユーザーも呼べるよう、
+// 入口はログイン済みの確認だけ(authenticated)で、権限の有無はハンドラがFirestoreの正本(accessRoles・eventAssignments)で判定する。
+// 権限が何も無ければ従来どおりpermission-denied。読み取りのみ。
+const getMyAccessRoleHandler = createGetMyAccessRoleHandler({getDb: getFirestore});
+exports.getMyAccessRole = confirmedCallable("authenticated", getMyAccessRoleHandler);
 
-// 当選者CSVの取込(admin専用)。preview=dry-run(書込みなし) / commit=サーバー側で再検証して登録。メールは送らない。
+// Phase 2: イベント単位の任命(event_manager / staff)と、担当イベントの取得。
+// - assign / remove / list: 対象イベント(data.eventId)のevent_manager以上(adminは全イベント)。「managerはstaffだけ」「自分自身は不可」
+//   「対象がadminなら作らない」「confirmedイベントだけ」はハンドラが正本で確認する。
+// - listMyEvents: ログイン済みなら呼べる(イベント単位の権限だけのユーザーも)。返すのは本人が管理・受付できるconfirmedイベントだけ。
+// 対象ユーザーはメールアドレスからFirebase Auth(Admin SDK)の既存ユーザーへ解決する(ユーザーは作らない)。
+async function findAuthUserByEmail(email) {
+  const {getAuth} = require("firebase-admin/auth");
+  try {
+    const user = await getAuth().getUserByEmail(email);
+    return {uid: user.uid, email: user.email || null, disabled: user.disabled === true};
+  } catch (error) {
+    if (error && error.code === "auth/user-not-found") return null;
+    throw error;
+  }
+}
+const assignmentApi = createAssignmentApi({getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp(), findUserByEmail: findAuthUserByEmail});
+exports.assignEventRole = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, assignmentApi.assign, {timeoutSeconds: 30});
+exports.removeEventRole = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, assignmentApi.remove, {timeoutSeconds: 30});
+exports.listEventAssignments = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, assignmentApi.list, {timeoutSeconds: 30});
+exports.listMyEvents = confirmedCallable("authenticated", assignmentApi.listMyEvents, {timeoutSeconds: 30});
+
+// 当選者CSVの取込(Phase 1B: 対象イベントのevent_manager以上。adminは全イベント)。preview=dry-run(書込みなし) / commit=サーバー側で再検証して登録。メールは送らない。
 const importApi = createImportApi({getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp()});
-exports.previewConfirmedImport = confirmedCallable("admin", importApi.preview);
-exports.commitConfirmedImport = confirmedCallable("admin", importApi.commit, {timeoutSeconds: 300});
+exports.previewConfirmedImport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, importApi.preview);
+exports.commitConfirmedImport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, importApi.commit, {timeoutSeconds: 300});
 
-// 当選メール(confirmed): テンプレート設定・プレビュー・batch単位の送信ジョブ。すべてadmin専用。
+// 当選メール(confirmed): テンプレート設定・プレビュー・batch単位の送信ジョブ。Phase 1B: すべて対象イベントのevent_manager以上(adminは全イベント)。
+// jobIdで指定するAPIは、sendJobs/{jobId}.eventId(正本)を対象イベントとして認可する(クライアントが名乗るeventIdは使わない)。
 // - テンプレートの更新は必ずこのcallable経由(Rulesでクライアントからの直接書込みは拒否)
 // - プレビューと実送信は同じレンダラー(renderWinnerMail)を使う
 // - ジョブの作成では1通も送らない。送信は管理者が processConfirmedWinnerMailJob を明示的に実行したときだけ
 //   (前日リマインド等のSchedulerによる自動送信は、このPhaseでは作らない)
 const serverTimestamp = () => FieldValue.serverTimestamp();
-// 新方式イベントの作成(admin専用)。Phase 11A。flowはサーバーが"confirmed"に固定し、メールは一切動かさない(reminderEnabled=false、テンプレート・ジョブなし)。
-// 作成後の取込・当選メール設定・リマインド設定は、既存のadmin専用callableを使う。legacyのcreateLegacyEventとは別(意味を拡張しない)。
+// 新方式イベントの作成(Phase 1B: systemAdminのみ=accessRolesの有効なadmin)。Phase 11A。flowはサーバーが"confirmed"に固定し、メールは一切動かさない(reminderEnabled=false、テンプレート・ジョブなし)。
+// 作成後の取込・当選メール設定・リマインド設定は、イベント単位の認可つきcallableを使う。legacyのcreateLegacyEventとは別(意味を拡張しない)。
 const eventCreateApi = createEventCreateApi({getDb: getFirestore, serverTimestamp});
-exports.createConfirmedEvent = confirmedCallable("admin", eventCreateApi.createEvent, {timeoutSeconds: 30});
-// 新方式イベントの基本情報とprogramの読み取り(admin専用。CSV取込画面の「どのイベントへ取り込むか」の表示用。Phase 11B)
-exports.getConfirmedEventSummary = confirmedCallable("admin", eventCreateApi.getSummary, {timeoutSeconds: 30});
+exports.createConfirmedEvent = confirmedCallable("systemAdmin", eventCreateApi.createEvent, {timeoutSeconds: 30});
+// 新方式イベントの基本情報とprogramの読み取り(Phase 1B: 対象イベントのevent_manager以上。CSV取込画面の「どのイベントへ取り込むか」の表示用。Phase 11B)
+exports.getConfirmedEventSummary = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, eventCreateApi.getSummary, {timeoutSeconds: 30});
 const winnerMailApi = createWinnerMailApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
 });
@@ -857,26 +885,26 @@ const winnerSendApi = createWinnerSendApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
   getTransport: () => createMailApiTransport({endpoint: mailApiUrl.value(), apiKey: mailApiKey.value()}),
 });
-exports.getConfirmedWinnerMailSettings = confirmedCallable("admin", winnerMailApi.getSettings);
-exports.updateConfirmedWinnerMailTemplate = confirmedCallable("admin", winnerMailApi.updateTemplate);
-exports.previewConfirmedWinnerMail = confirmedCallable("admin", winnerMailApi.preview, {timeoutSeconds: 60});
-exports.createConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.createJob, {timeoutSeconds: 300});
-exports.processConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.processJob, {secrets: [mailApiKey], timeoutSeconds: 300});
-exports.retryFailedConfirmedWinnerMails = confirmedCallable("admin", winnerSendApi.retryFailed, {timeoutSeconds: 120});
+exports.getConfirmedWinnerMailSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, winnerMailApi.getSettings);
+exports.updateConfirmedWinnerMailTemplate = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, winnerMailApi.updateTemplate);
+exports.previewConfirmedWinnerMail = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, winnerMailApi.preview, {timeoutSeconds: 60});
+exports.createConfirmedWinnerMailJob = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, winnerSendApi.createJob, {timeoutSeconds: 300});
+exports.processConfirmedWinnerMailJob = confirmedEventCallable("eventManager", EVENT_SCOPES.sendJobEventId, winnerSendApi.processJob, {secrets: [mailApiKey], timeoutSeconds: 300});
+exports.retryFailedConfirmedWinnerMails = confirmedEventCallable("eventManager", EVENT_SCOPES.sendJobEventId, winnerSendApi.retryFailed, {timeoutSeconds: 120});
 // サーバー側の継続処理(Phase 9A)。管理者の「送信開始」は、希望(dispatchActive)をsendJobsに記録するだけ。
 // 実際の配送は、下の定期実行が、ブラウザとは無関係に最後まで進める。配送の状態・claim・leaseは従来のsendJobs/mailDeliveriesが正本。
-exports.startConfirmedWinnerMailDelivery = confirmedCallable("admin", winnerSendApi.startDelivery, {timeoutSeconds: 60});
+exports.startConfirmedWinnerMailDelivery = confirmedEventCallable("eventManager", EVENT_SCOPES.sendJobEventId, winnerSendApi.startDelivery, {timeoutSeconds: 60});
 // 前日リマインド(Phase 9B)。イベント全体の全active participantが対象(取込回は問わない)。当選メールとは別のtype・別のjob・別の配送記録・別のテンプレート。
-// 配送エンジンとサーバー側の継続処理(下のsweep)は当選メールと共通。設定・プレビュー・手動開始・状態・失敗分の再送はすべてadmin専用。
+// 配送エンジンとサーバー側の継続処理(下のsweep)は当選メールと共通。設定・プレビュー・手動開始・状態・失敗分の再送はすべて対象イベントのevent_manager以上(Phase 1B)。
 const reminderApi = createReminderApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(), winnerSendApi,
 });
-exports.getConfirmedReminderSettings = confirmedCallable("admin", reminderApi.getSettings, {timeoutSeconds: 120});
-exports.updateConfirmedReminderSettings = confirmedCallable("admin", reminderApi.updateSettings, {timeoutSeconds: 60});
-exports.previewConfirmedReminderMail = confirmedCallable("admin", reminderApi.preview, {timeoutSeconds: 60});
-exports.startConfirmedReminderDelivery = confirmedCallable("admin", reminderApi.startDelivery, {timeoutSeconds: 300});
-exports.getConfirmedReminderJob = confirmedCallable("admin", reminderApi.getJob, {timeoutSeconds: 60});
-exports.retryFailedConfirmedReminderMails = confirmedCallable("admin", reminderApi.retryFailed, {timeoutSeconds: 120});
+exports.getConfirmedReminderSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, reminderApi.getSettings, {timeoutSeconds: 120});
+exports.updateConfirmedReminderSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, reminderApi.updateSettings, {timeoutSeconds: 60});
+exports.previewConfirmedReminderMail = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, reminderApi.preview, {timeoutSeconds: 60});
+exports.startConfirmedReminderDelivery = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, reminderApi.startDelivery, {timeoutSeconds: 300});
+exports.getConfirmedReminderJob = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, reminderApi.getJob, {timeoutSeconds: 60});
+exports.retryFailedConfirmedReminderMails = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, reminderApi.retryFailed, {timeoutSeconds: 120});
 // 内部の定期実行(ブラウザ・callableからは起動できない)。旧mailJobsのSchedulerとは別のconfirmed専用。mail-apiのSecretは従来の注入方式のまま。
 // 1) 前日リマインドの送信時刻に達したイベントのジョブを作成して引き渡す(同じイベントのジョブは1つ) 2) 引き渡されたジョブの配送を進める。
 // maxInstances: 1 で同時実行を1つに抑える(at-least-onceでも二重に動かさない。最終防御はitem単位のclaim)。
@@ -893,21 +921,22 @@ exports.sweepConfirmedMailDelivery = onSchedule(
     console.log("confirmed mail delivery sweep", {jobs: results.length, remindersCreated: reminders, processed: results.reduce((n, r) => n + (r.processed || 0), 0)});
   },
 );
-// 送信管理画面用の読み取り専用API(admin専用)。Flutterはsendjobs/items/mailDeliveriesをFirestoreから直接読まず、必ずこれ経由で状態を取得する。
-exports.listConfirmedWinnerMailBatches = confirmedCallable("admin", winnerSendApi.listBatches, {timeoutSeconds: 120});
-exports.getConfirmedWinnerMailJob = confirmedCallable("admin", winnerSendApi.getJob, {timeoutSeconds: 60});
+// 送信管理画面用の読み取り専用API(Phase 1B: 対象イベントのevent_manager以上。getConfirmedWinnerMailJobはsendJobsのeventIdで認可)。Flutterはsendjobs/items/mailDeliveriesをFirestoreから直接読まず、必ずこれ経由で状態を取得する。
+exports.listConfirmedWinnerMailBatches = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, winnerSendApi.listBatches, {timeoutSeconds: 120});
+exports.getConfirmedWinnerMailJob = confirmedEventCallable("eventManager", EVENT_SCOPES.sendJobEventId, winnerSendApi.getJob, {timeoutSeconds: 60});
 
 // Web参加証とprogram別受付(confirmed)。
 // - getConfirmedParticipantPass: 参加者本人がログインなしで自分の参加証を閲覧(読み取り専用)。participantId+publicIdの組だけで閲覧でき、
 //   受付・変更はできない。Phase 10でApp Check強制とrate limitを有効にする(auth.jsのPUBLIC_PASS_CALLABLE_OPTIONS / createPassApiのcheckRateLimit)
-// - getConfirmedReceptionView / checkInConfirmedProgram: 受付はstaff/adminのみ(Firebase Auth + accessRoles)。programAttendancesが受付の正本
+// - getConfirmedReceptionView / checkInConfirmedProgram: 受付は対象イベントのstaff以上(Phase 1B。Firebase Auth + eventAssignments/accessRoles)。
+//   participant・attendanceが対象イベントに属することはハンドラが正本で照合する(event-mismatchは拒否)。programAttendancesが受付の正本
 const passApi = createPassApi({getDb: getFirestore, serverTimestamp, getAppBaseUrl: () => appBaseUrl.value()});
 exports.getConfirmedParticipantPass = confirmedPublicPassCallable(limitedByParticipant(VIEW_LIMITS, passApi.getPass), PUBLIC_SECRETS);
-exports.getConfirmedReceptionView = confirmedCallable("staffOrAdmin", passApi.getReceptionView);
-exports.checkInConfirmedProgram = confirmedCallable("staffOrAdmin", passApi.checkIn);
-// 受付後の訂正・取消はadminだけ(staffは初回受付のみ)。受付状態の正本はprogramAttendancesのまま。実変更ごとにhistoryを1件追記する。
-exports.correctConfirmedProgramAttendance = confirmedCallable("admin", passApi.correct);
-exports.cancelConfirmedProgramCheckIn = confirmedCallable("admin", passApi.cancel);
+exports.getConfirmedReceptionView = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.getReceptionView);
+exports.checkInConfirmedProgram = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.checkIn);
+// 受付後の訂正・取消(Phase 1B: 対象イベントのstaff以上に開放。他イベントは不可)。受付状態の正本はprogramAttendancesのまま。実変更ごとにhistoryを1件追記する。
+exports.correctConfirmedProgramAttendance = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.correct);
+exports.cancelConfirmedProgramCheckIn = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.cancel);
 
 // 従来方式(legacy)の管理・受付・参加者本人API(Phase 10C)。旧画面がFirestoreを直接読み書きしていた経路の置き換え。
 // admin: イベント一覧・詳細(参加者・受付・一括メール進捗)・作成・設定更新・参加者の手動登録
@@ -918,8 +947,8 @@ exports.getLegacyEventAdminView = confirmedCallable("admin", legacyApi.getEventA
 exports.createLegacyEvent = confirmedCallable("admin", legacyApi.createEvent, {timeoutSeconds: 30});
 exports.updateLegacyEventSettings = confirmedCallable("admin", legacyApi.updateEventSettings, {timeoutSeconds: 30});
 exports.createLegacyParticipant = confirmedCallable("admin", legacyApi.createParticipant, {timeoutSeconds: 30});
-// 受付QRの入口の振り分け(staff/adminだけ)。返すのは kind("legacy"/"confirmed")のみ。未認証ではイベントを問い合わせられない。
-exports.getEventKind = confirmedCallable("staffOrAdmin", legacyApi.getEventKind, {timeoutSeconds: 30});
+// 受付QRの入口の振り分け(Phase 1B: 従来のstaff/admin、または対象イベントのstaff以上。legacyの受付入口は従来どおり)。返すのは kind("legacy"/"confirmed")のみ。未認証ではイベントを問い合わせられない。
+exports.getEventKind = confirmedEventCallable("eventStaffOrLegacyStaff", EVENT_SCOPES.dataEventId, legacyApi.getEventKind, {timeoutSeconds: 30});
 exports.getLegacyReceptionView = confirmedCallable("staffOrAdmin", legacyApi.getReceptionView, {timeoutSeconds: 30});
 exports.checkInLegacyParticipant = confirmedCallable("staffOrAdmin", legacyApi.checkInParticipant, {timeoutSeconds: 30});
 exports.updateLegacyAttendedCount = confirmedCallable("staffOrAdmin", legacyApi.updateAttendedCount, {timeoutSeconds: 30});

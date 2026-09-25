@@ -117,7 +117,8 @@ void main() {
         ),
       );
       await _settle(tester);
-      expect(find.text('ログイン中：管理者'), findsOneWidget);
+      // Phase 3: 表示名はシステム管理者(DBの値はadminのまま)
+      expect(find.text('ログイン中：システム管理者'), findsOneWidget);
       expect(_featureTitles(tester), consoleTopFeatureLabels);
     });
 
@@ -420,6 +421,78 @@ void main() {
         AccessOutcome.denied,
       );
       expect(interpret({}).outcome, AccessOutcome.error);
+    });
+
+    // Phase 1A: getMyAccessRoleの応答にsystemAdmin・assignmentsが加わっても、既存のクライアントの判定は変わらない
+    // (新しい情報はまだ使わない)。イベント単位の権限だけのユーザー(role=null)は、従来どおり権限なしの表示。
+    test('Phase 1A: 拡張された応答(systemAdmin・assignments)でも、admin/staffの判定は従来どおり', () {
+      AccessCheck interpret(Object body) =>
+          CallableAccessService.interpret(200, jsonEncode(body));
+      final admin = interpret({
+        'result': {
+          'authenticated': true,
+          'role': 'admin',
+          'systemAdmin': true,
+          'assignments': [],
+        },
+      });
+      expect(admin.outcome, AccessOutcome.granted);
+      expect(admin.role, AccessRole.admin);
+      final staff = interpret({
+        'result': {
+          'authenticated': true,
+          'role': 'staff',
+          'systemAdmin': false,
+          'assignments': [],
+        },
+      });
+      expect(staff.outcome, AccessOutcome.granted);
+      expect(staff.role, AccessRole.staff);
+      for (final role in ['event_manager', 'staff']) {
+        final assignmentOnly = interpret({
+          'result': {
+            'authenticated': true,
+            'role': null,
+            'systemAdmin': false,
+            'assignments': [
+              {'eventId': 'evFixtureA0123456789', 'role': role},
+            ],
+          },
+        });
+        // Phase 3: 担当イベントだけのユーザー(イベント管理者・スタッフ)は、全体roleなしのイベント単位の権限として扱う
+        expect(assignmentOnly.outcome, AccessOutcome.granted, reason: role);
+        expect(assignmentOnly.role, isNull, reason: role);
+        expect(assignmentOnly.isSystemAdmin, isFalse, reason: role);
+        expect(assignmentOnly.assignments.single.eventId, 'evFixtureA0123456789');
+        expect(assignmentOnly.assignments.single.role.value, role);
+      }
+      // 未知のroleの担当・eventIdの欠けた担当は無視する(それしか無ければ権限なし)
+      expect(
+        interpret({
+          'result': {
+            'authenticated': true,
+            'role': null,
+            'assignments': [
+              {'eventId': 'evFixtureA0123456789', 'role': 'admin'},
+              {'eventId': 'evFixtureA0123456789', 'role': 'system_admin'},
+              {'role': 'event_manager'},
+            ],
+          },
+        }).outcome,
+        AccessOutcome.denied,
+      );
+      // systemAdmin=trueを名乗っても、roleがadminでなければ管理機能は出さない(クライアントはroleだけで判定)
+      expect(
+        interpret({
+          'result': {
+            'authenticated': true,
+            'role': null,
+            'systemAdmin': true,
+            'assignments': [],
+          },
+        }).outcome,
+        AccessOutcome.denied,
+      );
     });
   });
 

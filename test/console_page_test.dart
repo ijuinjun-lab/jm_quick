@@ -67,43 +67,54 @@ Widget _eventConsole({
 
 void main() {
   group('管理トップ(/console。eventId未指定)', () {
-    testWidgets('イベント一覧・イベント作成・スタッフ管理だけが表示される(イベント固有機能は一切出ない)', (
+    // Phase 3: 「スタッフ管理(準備中)」を「イベント管理者設定」(システム管理者専用)へ変更。受付スタッフはイベントの中で管理する。
+    testWidgets('イベント一覧・イベント作成・イベント管理者設定だけが表示される(イベント固有機能は一切出ない)', (
       tester,
     ) async {
       await tester.pumpWidget(_consoleTop());
       await tester.pumpAndSettle();
       expect(find.text('イベント一覧'), findsOneWidget);
       expect(find.text('イベント作成'), findsOneWidget);
-      expect(find.text('スタッフ管理'), findsOneWidget);
+      expect(find.text('イベント管理者設定'), findsOneWidget);
+      expect(find.text('イベントごとの管理者を設定'), findsOneWidget);
       for (final label in eventConsoleFeatureLabels) {
         expect(find.text(label), findsNothing, reason: label);
       }
     });
 
-    testWidgets('スタッフ管理は準備中(全イベント共通の管理機能のため、勝手にイベント配下へ移動しない)', (
+    testWidgets('イベント管理者設定は押せる機能(準備中ではない)で、/console/managersへ進む', (
       tester,
     ) async {
-      await tester.pumpWidget(_consoleTop());
+      final routes = <String?>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConfirmedConsolePage(
+            authClient: FakeAuthClient(signedIn: true),
+            accessService: FakeAccessService([
+              const AccessCheck.granted(AccessRole.admin),
+            ]),
+          ),
+          onGenerateRoute: (settings) {
+            routes.add(settings.name);
+            return MaterialPageRoute<void>(
+              builder: (_) => const Scaffold(body: Text('遷移先')),
+              settings: settings,
+            );
+          },
+        ),
+      );
       await tester.pumpAndSettle();
       final tileFinder = find.ancestor(
-        of: find.text('スタッフ管理'),
+        of: find.text('イベント管理者設定'),
         matching: find.byType(ListTile),
       );
-      expect(tester.widget<ListTile>(tileFinder).onTap, isNull);
-      // 「準備中」はカード内のbadgeとして表示される(押せる機能ではない)。
-      expect(
-        find.descendant(
-          of: tileFinder,
-          matching: find.byKey(const Key('pending-badge')),
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(of: tileFinder, matching: find.text('準備中')),
-        findsOneWidget,
-      );
-      // 実装済みの機能には「準備中」を出さない。
-      expect(find.text('準備中'), findsOneWidget);
+      expect(tester.widget<ListTile>(tileFinder).onTap, isNotNull);
+      // 管理トップに準備中の機能は残っていない
+      expect(find.byKey(const Key('pending-badge')), findsNothing);
+      expect(find.text('準備中'), findsNothing);
+      await tester.tap(find.text('イベント管理者設定'));
+      await tester.pumpAndSettle();
+      expect(routes, ['/console/managers']);
     });
 
     testWidgets('390px幅でoverflowなし', (tester) async {

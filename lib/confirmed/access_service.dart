@@ -67,9 +67,27 @@ class CallableAccessService implements AccessService {
       return const AccessCheck.error();
     }
     final role = AccessRole.fromValue(result['role']);
-    // 200でも、admin/staff以外の値は権限なしとして扱う(未知の値を許可しない)。
-    return role == null
+    // Phase 3: 有効な担当イベント(イベント管理者・スタッフ)。未知のroleや不正な項目は無視する。
+    final assignments = <EventAssignment>[];
+    final rawAssignments = result['assignments'];
+    if (rawAssignments is List) {
+      for (final raw in rawAssignments) {
+        if (raw is! Map) continue;
+        final eventId = raw['eventId'];
+        final eventRole = EventRole.fromValue(raw['role']);
+        if (eventId is! String || eventId.isEmpty || eventRole == null) {
+          continue;
+        }
+        assignments.add(EventAssignment(eventId: eventId, role: eventRole));
+      }
+    }
+    // 200でも、admin/staff以外の値で担当イベントも無ければ権限なしとして扱う(未知の値を許可しない)。
+    // systemAdminはroleがadminのときだけ(systemAdmin=trueの主張だけでは管理機能を出さない)。
+    if (role != null) {
+      return AccessCheck.granted(role, assignments: assignments);
+    }
+    return assignments.isEmpty
         ? const AccessCheck.denied()
-        : AccessCheck.granted(role);
+        : AccessCheck.eventScoped(assignments);
   }
 }

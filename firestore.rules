@@ -47,6 +47,13 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Phase 1A: イベント単位の権限(event_manager / staff)の正本。1イベント・1ユーザーにつき1ドキュメント。
+    // accessRolesと同じく、クライアントSDKからはread/writeとも一切許可しない(本人も自分の任命を読めず、書き換えられない)。
+    // 読み書きはAdmin SDK(Functions)だけ。権限の確認はcallable(getMyAccessRole)経由。ここに allow を追加してはならない。
+    match /eventAssignments/{assignmentId} {
+      allow read, write: if false;
+    }
+
     // 新方式の当選者CSV取込の記録(取込回と、その全行の監査)。クライアントからのread/writeは一切許可しない。
     // 読み書きはAdmin SDK(admin専用callable)だけ。監査行には個人情報を持たない。
     match /importBatches/{batchId} {

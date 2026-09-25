@@ -11,11 +11,20 @@ import 'login_page.dart';
 typedef RoleBuilder =
     Widget Function(BuildContext context, Future<void> Function() signOut);
 
+/// Phase 3: イベント単位の権限(イベント管理者・スタッフ)のユーザー向け。担当イベントはサーバーが確認したものだけ。
+typedef EventScopedBuilder =
+    Widget Function(
+      BuildContext context,
+      Future<void> Function() signOut,
+      List<EventAssignment> assignments,
+    );
+
 /// 新方式の管理画面の入口。
 ///   未ログイン                         → ログイン画面
 ///   ログイン済み・権限なし(未登録/無効/未知のrole) → 権限なし
-///   admin                              → adminBuilder(管理機能)
-///   staff                              → staffBuilder(受付系だけ)
+///   admin(システム管理者)               → adminBuilder(管理機能)
+///   担当イベントあり(イベント管理者・スタッフ) → eventScopedBuilder(指定した画面だけ。未指定の画面は権限なし)
+///   staff(従来の全体staff。legacy互換)  → staffBuilder(受付系だけ)
 /// 権限はクライアントで判断せず、必ずサーバー(getMyAccessRole)の確認結果に従う。
 class AuthGate extends StatefulWidget {
   const AuthGate({
@@ -24,6 +33,7 @@ class AuthGate extends StatefulWidget {
     required this.accessService,
     required this.adminBuilder,
     required this.staffBuilder,
+    this.eventScopedBuilder,
     this.signedOutBanner,
   });
 
@@ -31,6 +41,10 @@ class AuthGate extends StatefulWidget {
   final AccessService accessService;
   final RoleBuilder adminBuilder;
   final RoleBuilder staffBuilder;
+
+  /// イベント単位の権限だけで使える画面だけが指定する。未指定(イベント作成・全イベント一覧・従来の管理画面等)では、
+  /// 担当イベントを持つだけのユーザーには「権限がありません」を表示する(fail-closed)。
+  final EventScopedBuilder? eventScopedBuilder;
 
   /// 未ログイン時のログイン画面の上に表示する、任意の案内(既定はnull=これまでと同じログイン画面のまま)。
   /// 管理系の各画面(イベント一覧・CSV取込・scanner等)はこれを渡さず、動作は変わらない。
@@ -95,6 +109,12 @@ class _AuthGateState extends State<AuthGate> {
 
   Future<void> _signOut() => widget.authClient.signOut();
 
+  Widget _denied() => _Message(
+    title: '権限がありません',
+    body: 'このアカウントには、この画面を利用する権限がありません。管理者へお問い合わせください。',
+    actions: [FilledButton(onPressed: _signOut, child: const Text('ログアウト'))],
+  );
+
   @override
   Widget build(BuildContext context) {
     switch (_phase) {
@@ -111,17 +131,19 @@ class _AuthGateState extends State<AuthGate> {
         final check = _check!;
         switch (check.outcome) {
           case AccessOutcome.granted:
-            return check.role!.isAdmin
-                ? widget.adminBuilder(context, _signOut)
-                : widget.staffBuilder(context, _signOut);
+            if (check.isSystemAdmin) {
+              return widget.adminBuilder(context, _signOut);
+            }
+            final scoped = widget.eventScopedBuilder;
+            if (check.assignments.isNotEmpty && scoped != null) {
+              return scoped(context, _signOut, check.assignments);
+            }
+            if (check.role == AccessRole.staff) {
+              return widget.staffBuilder(context, _signOut);
+            }
+            return _denied();
           case AccessOutcome.denied:
-            return _Message(
-              title: '権限がありません',
-              body: 'このアカウントには、この画面を利用する権限がありません。管理者へお問い合わせください。',
-              actions: [
-                FilledButton(onPressed: _signOut, child: const Text('ログアウト')),
-              ],
-            );
+            return _denied();
           case AccessOutcome.error:
           case AccessOutcome.unauthenticated:
             return _Message(

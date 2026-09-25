@@ -4,7 +4,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../widgets/common.dart';
+import 'access_role.dart';
 import 'access_service.dart';
+import 'assignment_pages.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'import_models.dart';
@@ -28,8 +30,9 @@ Future<PickedCsv?> pickCsvWithFilePicker() async {
   return (name: file.name, bytes: file.bytes!);
 }
 
-/// 新方式イベントへの参加者CSV取込の入口(`/console/import?eventId=…`)。管理者(admin)としてログインした場合だけ表示される。
-/// 受付スタッフ・権限なし・未ログインでは表示されない(サーバー側もadmin専用)。
+/// 新方式イベントへの参加者CSV取込の入口(`/console/import?eventId=…`)。システム管理者、または
+/// Phase 3からそのイベントのイベント管理者としてログインした場合だけ表示される。
+/// スタッフ・担当外・権限なし・未ログインでは表示されない(サーバー側も対象イベントのイベント管理者以上に限る)。
 class ConfirmedImportRoute extends StatelessWidget {
   ConfirmedImportRoute({
     super.key,
@@ -56,6 +59,24 @@ class ConfirmedImportRoute extends StatelessWidget {
       service: service ?? CallableImportService(authClient: authClient),
       picker: picker ?? pickCsvWithFilePicker,
     ),
+    eventScopedBuilder: (context, signOut, assignments) {
+      final id = (eventId ?? '').trim();
+      final isManager = assignments.any(
+        (a) => a.eventId == id && a.role == EventRole.eventManager,
+      );
+      if (!isManager) {
+        return EventScopeDenied(
+          title: '参加者CSVの取込',
+          message: 'このイベントのCSV取込を行う権限がありません。',
+          signOut: signOut,
+        );
+      }
+      return ConfirmedImportPage(
+        eventId: id,
+        service: service ?? CallableImportService(authClient: authClient),
+        picker: picker ?? pickCsvWithFilePicker,
+      );
+    },
     staffBuilder: (context, signOut) => PageFrame(
       title: '参加者CSVの取込',
       child: Card(

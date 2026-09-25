@@ -58,9 +58,9 @@ describe("認可(admin専用。以前は作成経路自体が無かった)", () 
     }
     assert.equal(db.writes.length, 0);
   });
-  test("公開callableは増えていない(createConfirmedEventはadmin専用の1本だけの追加)", () => {
+  test("公開callableは増えていない(createConfirmedEventはsystemAdmin専用の1本だけの追加。Phase 1B: systemAdmin=accessRolesの有効なadmin)", () => {
     const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
-    assert.match(source, /exports\.createConfirmedEvent = confirmedCallable\("admin", eventCreateApi\.createEvent/);
+    assert.match(source, /exports\.createConfirmedEvent = confirmedCallable\("systemAdmin", eventCreateApi\.createEvent/);
   });
 });
 

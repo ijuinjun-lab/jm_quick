@@ -6,6 +6,7 @@ const {afterEach, describe, test} = require("node:test");
 const {FakeFirestore} = require("../test_support/fake_firestore");
 const {loadIndex, stubFetch} = require("../test_support/load_index");
 const {requireAuthenticated, requireAdmin, requireStaffOrAdmin, confirmedCallable, ACCESS_LEVELS} = require("../auth");
+const {assignmentDocId} = require("../event_access");
 
 const silent = {warn: () => {}};
 const roles = (seed) => new FakeFirestore(Object.fromEntries(
@@ -159,7 +160,11 @@ describe("confirmedCallable(認可を通らないハンドラは実行されな�
       assert.throws(() => confirmedCallable(bad, () => ({})), /invalid access level/, String(bad));
     }
     assert.throws(() => confirmedCallable("admin", undefined), /handler required/);
-    assert.deepEqual(Object.values(ACCESS_LEVELS).sort(), ["admin", "authenticated", "staffOrAdmin"]);
+    assert.deepEqual(Object.values(ACCESS_LEVELS).sort(), ["admin", "authenticated", "staffOrAdmin", "systemAdmin"]);
+    // Phase 1B: イベント単位のレベルは、対象eventIdのresolverを必須とするconfirmedEventCallableでしか使えない
+    for (const level of ["eventManager", "eventStaff", "eventStaffOrLegacyStaff"]) {
+      assert.throws(() => confirmedCallable(level, () => ({})), /requires confirmedEventCallable/, level);
+    }
   });
 
   test("拒否されたときハンドラは一度も実行されない", async () => {
@@ -189,36 +194,80 @@ describe("confirmedCallable(認可を通らないハンドラは実行されな�
   });
 });
 
-describe("getMyAccessRole(最初の認証callable)", () => {
+describe("getMyAccessRole(認証callable。Phase 1Aでイベント単位の権限を追加)", () => {
   let net;
   afterEach(() => net?.restore());
-  const load = (seed) => {
-    const db = roles(seed);
+  // seed: accessRolesの{uid: data}。assignments: eventAssignmentsの[{eventId, uid, role, active, ...}](IDは正式な方式で決める)
+  const load = (seed, assignments = []) => {
+    const db = new FakeFirestore({
+      ...Object.fromEntries(Object.entries(seed).map(([uid, data]) => [`accessRoles/${uid}`, data])),
+      ...Object.fromEntries(assignments.map((a) => [`eventAssignments/${assignmentDocId(a.eventId, a.uid)}`, a])),
+    });
     net = stubFetch();
     return {db, index: loadIndex(db)};
   };
+  const assignment = (eventId, uid, role, active = true) => ({
+    eventId, uid, role, active, email: `${uid}@example.invalid`, assignedBy: "adminUser", assignedAt: "t", updatedAt: "t",
+  });
 
-  test("adminはrole=adminだけを返す(返却は authenticated と role のみ・副作用なし)", async () => {
+  test("adminは従来のrole=adminに加え、systemAdmin=true・assignments=[]を返す(副作用なし・メールアドレス等は返さない)", async () => {
     const {db, index} = load({adminUser: {role: "admin", active: true, email: "admin@example.invalid", displayName: "架空管理者"}});
     const result = await index.getMyAccessRole.run(as("adminUser"));
-    assert.deepEqual(result, {authenticated: true, role: "admin"});
-    assert.deepEqual(Object.keys(result).sort(), ["authenticated", "role"]);
+    assert.deepEqual(result, {authenticated: true, role: "admin", systemAdmin: true, assignments: []});
     assert.equal(db.writes.length, 0, "書込みなし");
     assert.equal(net.calls.length, 0, "外部通信なし");
     assert.ok(!JSON.stringify(result).includes("example.invalid"), "メールアドレスは返さない");
   });
 
-  test("staffはrole=staffを返す。本文でadminを主張しても結果は変わらない", async () => {
+  test("従来のstaff(accessRoles)はrole=staff・systemAdmin=false。本文でadminを主張しても結果は変わらない", async () => {
     const {index} = load({staffUser: {role: "staff", active: true}});
-    assert.deepEqual(await index.getMyAccessRole.run(as("staffUser", {data: {role: "admin", uid: "adminUser"}})),
-      {authenticated: true, role: "staff"});
+    assert.deepEqual(await index.getMyAccessRole.run(as("staffUser", {data: {role: "admin", uid: "adminUser", systemAdmin: true}})),
+      {authenticated: true, role: "staff", systemAdmin: false, assignments: []});
   });
 
-  test("未認証は unauthenticated、accessRolesなし・active=false・未知roleは permission-denied", async () => {
-    const {index} = load({inactive: {role: "admin", active: false}, weird: {role: "root", active: true}});
+  test("未認証は unauthenticated、accessRolesなし・active=false・未知role(有効なassignmentも無い)は permission-denied", async () => {
+    const {index} = load({inactive: {role: "admin", active: false}, weird: {role: "root", active: true}},
+      [assignment("ev-a", "inactive", "staff", false), assignment("ev-a", "weird", "owner")]);
     await rejectsWith(index.getMyAccessRole.run({}), "unauthenticated");
-    for (const uid of ["ghost", "inactive", "weird"]) {
-      await assert.rejects(index.getMyAccessRole.run(as(uid)), (e) => code(e) === "permission-denied");
+    for (const uid of ["ghost", "inactive", "weird", "bad/uid"]) {
+      await assert.rejects(index.getMyAccessRole.run(as(uid)), (e) => code(e) === "permission-denied", uid);
     }
+  });
+
+  test("event_managerのassignmentだけのユーザー: role=null・systemAdmin=false・担当イベントだけ", async () => {
+    const {index} = load({}, [assignment("ev-a", "manager1", "event_manager"), assignment("ev-b", "other", "event_manager")]);
+    assert.deepEqual(await index.getMyAccessRole.run(as("manager1")),
+      {authenticated: true, role: null, systemAdmin: false, assignments: [{eventId: "ev-a", role: "event_manager"}]});
+  });
+
+  test("staffのassignmentだけのユーザー: 担当イベントだけ", async () => {
+    const {index} = load({}, [assignment("ev-b", "staff1", "staff"), assignment("ev-a", "manager1", "event_manager")]);
+    assert.deepEqual(await index.getMyAccessRole.run(as("staff1")),
+      {authenticated: true, role: null, systemAdmin: false, assignments: [{eventId: "ev-b", role: "staff"}]});
+  });
+
+  test("複数イベントのassignmentはすべて返る(eventId順)。無効(active=false)・他人の分は返さない", async () => {
+    const {index} = load({}, [
+      assignment("ev-c", "multi", "staff"),
+      assignment("ev-a", "multi", "event_manager"),
+      assignment("ev-b", "multi", "staff", false),
+      assignment("ev-d", "someoneElse", "event_manager"),
+    ]);
+    const result = await index.getMyAccessRole.run(as("multi"));
+    assert.deepEqual(result.assignments, [{eventId: "ev-a", role: "event_manager"}, {eventId: "ev-c", role: "staff"}]);
+    assert.ok(!JSON.stringify(result).includes("example.invalid") && !JSON.stringify(result).includes("adminUser"), "email・assignedByは返さない");
+  });
+
+  test("IDとフィールドが食い違うassignment・保存できないrole(admin)のassignmentは無視される", async () => {
+    const db = new FakeFirestore({
+      // 正式なIDだがフィールドのuidが別人
+      [`eventAssignments/${assignmentDocId("ev-a", "victim")}`]: assignment("ev-a", "attacker", "event_manager"),
+      // 正式なIDでないドキュメント
+      "eventAssignments/ev-a_attacker": assignment("ev-a", "attacker", "event_manager"),
+      [`eventAssignments/${assignmentDocId("ev-b", "attacker")}`]: assignment("ev-b", "attacker", "admin"),
+    });
+    net = stubFetch();
+    const index = loadIndex(db);
+    await assert.rejects(index.getMyAccessRole.run(as("attacker")), (e) => code(e) === "permission-denied");
   });
 });

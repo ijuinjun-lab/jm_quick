@@ -147,11 +147,13 @@ describe("受付の訂正・取消・再受付(admin専用 / Emulator + 実Admin
       assert.equal((await att(p, "alpha")).attendedCount, 2);
     });
 
-    test("実際の公開設定(index.js)でも、訂正・取消はadmin専用(初回受付はstaffOrAdmin)", () => {
+    // Phase 1B: 実際の公開設定では、初回受付・訂正・取消のすべてが「対象イベントのstaff以上」(adminは全イベント)。
+    // このファイルの他のテストは、ハンドラ単体の挙動(admin相当のラッパー)を検証している。イベント単位の認可はevent_scoped_callables.emulator.test.js。
+    test("実際の公開設定(index.js)では、初回受付・訂正・取消は対象イベントのstaff以上(Phase 1B)", () => {
       const index = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
-      assert.match(index, /^exports\.correctConfirmedProgramAttendance = confirmedCallable\("admin", passApi\.correct\)/m);
-      assert.match(index, /^exports\.cancelConfirmedProgramCheckIn = confirmedCallable\("admin", passApi\.cancel\)/m);
-      assert.match(index, /^exports\.checkInConfirmedProgram = confirmedCallable\("staffOrAdmin", passApi\.checkIn\)/m);
+      assert.match(index, /^exports\.correctConfirmedProgramAttendance = confirmedEventCallable\("eventStaff", EVENT_SCOPES\.dataEventId, passApi\.correct\)/m);
+      assert.match(index, /^exports\.cancelConfirmedProgramCheckIn = confirmedEventCallable\("eventStaff", EVENT_SCOPES\.dataEventId, passApi\.cancel\)/m);
+      assert.match(index, /^exports\.checkInConfirmedProgram = confirmedEventCallable\("eventStaff", EVENT_SCOPES\.dataEventId, passApi\.checkIn\)/m);
     });
 
     test("publicIdだけを知る第三者(参加証の閲覧者)は、訂正・取消も初回受付もできない(公開のcallableに操作の入口がない)", async () => {

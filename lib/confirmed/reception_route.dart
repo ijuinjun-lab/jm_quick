@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/event_kind_service.dart';
 import '../services/legacy_api.dart';
 import 'access_service.dart';
+import 'assignment_pages.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'reception_page.dart';
@@ -100,6 +101,23 @@ class _ReceptionRoutePageState extends State<ReceptionRoutePage> {
         signOut: signOut,
         isAdmin: false,
       ),
+      // Phase 3: 担当イベントのイベント管理者・スタッフ。受付・人数訂正・受付取消ができる(サーバーも対象イベントの
+      // スタッフ以上に許可する)。担当外のイベントのQRは受付画面を出さない(サーバーも拒否する)。
+      eventScopedBuilder: (context, signOut, assignments) {
+        if (!assignments.any((a) => a.eventId == widget.eventId)) {
+          return EventScopeDenied(
+            title: '受付',
+            message: 'このイベントの受付を行う権限がありません。',
+            signOut: signOut,
+          );
+        }
+        return _KindResolver(
+          route: widget,
+          authClient: authClient,
+          signOut: signOut,
+          isAdmin: true,
+        );
+      },
     );
   }
 }
@@ -175,7 +193,8 @@ class _KindResolverState extends State<_KindResolver> {
       final service =
           route._receptionService ??
           CallableReceptionService(authClient: widget.authClient);
-      // 受付後の訂正・取消は、adminとして確認できた場合だけ画面に出す(staffには渡さない。サーバーもadmin専用)。
+      // 受付後の訂正・取消は、システム管理者、または担当イベントのイベント管理者・スタッフとして確認できた場合だけ画面に出す
+      // (isAdmin=訂正・取消を表示する。従来の全体staffには渡さない。サーバーも対象イベントのスタッフ以上に限る)。
       return ConfirmedReceptionPage(
         service: service,
         eventId: route.eventId!,

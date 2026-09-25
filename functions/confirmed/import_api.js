@@ -93,7 +93,10 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       issueCounts: summary.issueCounts,
       // 参考情報(人物の重複判定ではない): 同じファイル(ハッシュ)が既に取り込まれていれば知らせる。取込は止めない。
       sameFileBatches: sameFile.docs.map((doc) => ({batchId: doc.id, sequence: doc.data().sequence, status: doc.data().status})),
-      existingBatch: existing.exists ? {status: existing.data().status, sequence: existing.data().sequence} : null,
+      // Phase 1B: 同じbatchId(clientRequestId)が別イベントの取込回なら、そのstatus・sequenceは返さない(他イベントの情報を出さない)。
+      // その場合commitは既存どおり batch-content-mismatch で拒否される。
+      existingBatch: existing.exists && existing.data().eventId === request.eventId ?
+        {status: existing.data().status, sequence: existing.data().sequence} : null,
       mappingWarnings: validateImportMapping(request.mapping).warnings,
       // 行の突合は sourceRowNumber(元CSVのレコード番号)で行う。個人情報は含めない。
       rows: records.map((record) => ({

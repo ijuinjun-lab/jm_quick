@@ -34,15 +34,71 @@ enum AccessOutcome {
   error,
 }
 
+/// Phase 3: イベント単位の権限(eventAssignments)。正本はサーバーで、クライアントはgetMyAccessRoleの結果を受け取るだけ。
+/// 上位は下位を包含する: システム管理者(accessRolesのadmin) > イベント管理者 > スタッフ。
+enum EventRole {
+  eventManager('event_manager', 'イベント管理者'),
+  staff('staff', 'スタッフ');
+
+  const EventRole(this.value, this.label);
+
+  /// サーバーの値(画面には表示しない)。
+  final String value;
+
+  /// 画面に表示する名前。
+  final String label;
+
+  /// 'event_manager'/'staff'以外(未知の値)はnull=権限として扱わない。
+  static EventRole? fromValue(Object? value) {
+    for (final role in values) {
+      if (role.value == value) return role;
+    }
+    return null;
+  }
+
+  bool get isManager => this == eventManager;
+}
+
+/// 画面に表示するシステム管理者の名前(accessRolesのadmin。DBの値は"admin"のまま)。
+const String systemAdminLabel = 'システム管理者';
+
+/// 担当イベントとそのrole(getMyAccessRoleのassignments)。
+class EventAssignment {
+  const EventAssignment({required this.eventId, required this.role});
+  final String eventId;
+  final EventRole role;
+}
+
 class AccessCheck {
-  const AccessCheck._(this.outcome, this.role);
-  const AccessCheck.granted(AccessRole role)
-    : this._(AccessOutcome.granted, role);
+  const AccessCheck._(this.outcome, this.role, [this.assignments = const []]);
+  const AccessCheck.granted(
+    AccessRole role, {
+    List<EventAssignment> assignments = const [],
+  }) : this._(AccessOutcome.granted, role, assignments);
+
+  /// 全体のroleは無く、イベント単位の権限(担当イベント)だけを持つ(イベント管理者・スタッフ)。
+  const AccessCheck.eventScoped(List<EventAssignment> assignments)
+    : this._(AccessOutcome.granted, null, assignments);
   const AccessCheck.denied() : this._(AccessOutcome.denied, null);
   const AccessCheck.unauthenticated()
     : this._(AccessOutcome.unauthenticated, null);
   const AccessCheck.error() : this._(AccessOutcome.error, null);
 
   final AccessOutcome outcome;
+
+  /// 全体のrole(accessRoles)。admin=システム管理者。イベント単位の権限だけのユーザーはnull。
   final AccessRole? role;
+
+  /// 有効な担当イベント(サーバーが確認したものだけ)。
+  final List<EventAssignment> assignments;
+
+  bool get isSystemAdmin => role == AccessRole.admin;
+
+  /// イベントごとのrole(無ければnull)。システム管理者はここに含まれない(全イベントを扱える)。
+  EventRole? roleFor(String eventId) {
+    for (final assignment in assignments) {
+      if (assignment.eventId == eventId) return assignment.role;
+    }
+    return null;
+  }
 }

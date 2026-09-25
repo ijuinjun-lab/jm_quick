@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../widgets/common.dart';
+import 'access_role.dart';
 import 'access_service.dart';
+import 'assignment_pages.dart';
+import 'assignment_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'import_models.dart';
@@ -17,7 +20,8 @@ import 'winner_send_service.dart';
 /// 管理トップ(イベント未選択, `/console`)に表示する機能。原則これだけ(Phase 11D)。
 /// CSV取込・メール・リマインド・受付等はすべて特定イベントに属する機能のため、ここには出さない
 /// (イベントを選んだ後の `/console?eventId=…` にだけ表示する)。
-const List<String> consoleTopFeatureLabels = ['イベント一覧', 'イベント作成', 'スタッフ管理'];
+/// Phase 3: 「スタッフ管理(準備中)」を「イベント管理者設定」(システム管理者専用)に変更。受付スタッフはイベントの中で管理する。
+const List<String> consoleTopFeatureLabels = ['イベント一覧', 'イベント作成', 'イベント管理者設定'];
 
 /// イベント選択後(`/console?eventId=…`)に表示する、そのイベントに属する機能。
 const List<String> eventConsoleFeatureLabels = [
@@ -27,6 +31,7 @@ const List<String> eventConsoleFeatureLabels = [
   '当選メール送信',
   'リマインド',
   '参加者管理',
+  'スタッフ管理',
   '受付',
   '受付訂正',
 ];
@@ -54,13 +59,15 @@ class ConfirmedConsolePage extends StatelessWidget {
     WinnerMailService? winnerMailService,
     WinnerSendService? winnerSendService,
     ReminderService? reminderService,
+    AssignmentService? assignmentService,
     this.initialEventId,
   }) : authClient = authClient ?? FirebaseAuthClient(),
        _accessService = accessService,
        _eventSummaryService = eventSummaryService,
        _winnerMailService = winnerMailService,
        _winnerSendService = winnerSendService,
-       _reminderService = reminderService;
+       _reminderService = reminderService,
+       _assignmentService = assignmentService;
 
   final AuthClient authClient;
   final AccessService? _accessService;
@@ -73,10 +80,36 @@ class ConfirmedConsolePage extends StatelessWidget {
   final WinnerSendService? _winnerSendService;
   final ReminderService? _reminderService;
 
+  // Phase 3: 担当イベント(listMyEvents)・スタッフ管理(任命API)。
+  final AssignmentService? _assignmentService;
+
   /// URLの`?eventId=…`(イベント一覧からの選択・イベント作成直後に渡される)。利用者が入力する欄は無い。
   final String? initialEventId;
 
   String get _eventId => (initialEventId ?? '').trim();
+
+  AssignmentService get _assignments =>
+      _assignmentService ?? CallableAssignmentService(authClient: authClient);
+
+  /// イベント管理画面(システム管理者・イベント管理者で共通。表示するroleの名前だけが違う)。
+  Widget _eventConsole(
+    String eventId,
+    Future<void> Function() signOut,
+    String viewerLabel,
+  ) => _EventConsole(
+    eventId: eventId,
+    signOut: signOut,
+    viewerLabel: viewerLabel,
+    service:
+        _eventSummaryService ?? CallableImportService(authClient: authClient),
+    winnerMailService:
+        _winnerMailService ?? CallableWinnerMailService(authClient: authClient),
+    winnerSendService:
+        _winnerSendService ?? CallableWinnerSendService(authClient: authClient),
+    reminderService:
+        _reminderService ?? CallableReminderService(authClient: authClient),
+    assignmentService: _assignments,
+  );
 
   @override
   Widget build(BuildContext context) => AuthGate(
@@ -85,23 +118,16 @@ class ConfirmedConsolePage extends StatelessWidget {
         _accessService ?? CallableAccessService(authClient: authClient),
     adminBuilder: (context, signOut) => _eventId.isEmpty
         ? _ConsoleTop(signOut: signOut)
-        : _EventConsole(
-            eventId: _eventId,
-            signOut: signOut,
-            service:
-                _eventSummaryService ??
-                CallableImportService(authClient: authClient),
-            winnerMailService:
-                _winnerMailService ??
-                CallableWinnerMailService(authClient: authClient),
-            winnerSendService:
-                _winnerSendService ??
-                CallableWinnerSendService(authClient: authClient),
-            reminderService:
-                _reminderService ??
-                CallableReminderService(authClient: authClient),
-          ),
-    // staffの導線は変えない(権限を広げない。詳細はクラス doc参照)。
+        : _eventConsole(_eventId, signOut, systemAdminLabel),
+    // Phase 3: イベント管理者・スタッフ(担当イベントだけ)。担当はサーバー(listMyEvents)が返したものだけを表示する。
+    eventScopedBuilder: (context, signOut, assignments) => _ScopedHome(
+      eventId: _eventId,
+      signOut: signOut,
+      service: _assignments,
+      managerConsole: (eventId) =>
+          _eventConsole(eventId, signOut, EventRole.eventManager.label),
+    ),
+    // 従来の全体staff(legacy互換)。導線は変えない(QRカメラで読み取った受付QRのイベントへ固定する)。
     staffBuilder: (context, signOut) => _StaffHome(signOut: signOut),
   );
 }
@@ -109,13 +135,13 @@ class ConfirmedConsolePage extends StatelessWidget {
 /// 管理トップの機能の区分け(見出し → 機能)。並びを連結するとconsoleTopFeatureLabelsと同じ順になる。
 const List<(String, List<String>)> _consoleTopSections = [
   ('イベント', ['イベント一覧', 'イベント作成']),
-  ('スタッフ・権限', ['スタッフ管理']),
+  ('権限', ['イベント管理者設定']),
 ];
 
 const Map<String, IconData> _consoleTopIcons = {
   'イベント一覧': Icons.event_note_outlined,
   'イベント作成': Icons.add_circle_outline,
-  'スタッフ管理': Icons.manage_accounts_outlined,
+  'イベント管理者設定': Icons.manage_accounts_outlined,
 };
 
 const Color _mutedText = Color(0xff5c6670);
@@ -132,18 +158,20 @@ class _ConsoleTop extends StatelessWidget {
       'イベント一覧': () => Navigator.of(context).pushNamed('/console/events'),
       // 新方式イベントの作成(admin専用)。作成後も /console?eventId=… へ進む。
       'イベント作成': () => Navigator.of(context).pushNamed('/console/events/new'),
+      // イベントごとのイベント管理者の追加・解除(システム管理者専用)。
+      'イベント管理者設定': () => Navigator.of(context).pushNamed('/console/managers'),
     };
     const descriptions = {
       'イベント一覧': '作成済みのイベントを管理',
       'イベント作成': '新しいイベントを作成',
-      'スタッフ管理': 'スタッフと権限を管理',
+      'イベント管理者設定': 'イベントごとの管理者を設定',
     };
     return PageFrame(
       title: '管理トップ',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _AccountBar(signOut: signOut),
+          _AccountBar(signOut: signOut, roleLabel: systemAdminLabel),
           const SizedBox(height: 4),
           const _ConsoleTopFlow(),
           for (final (heading, features) in _consoleTopSections) ...[
@@ -167,18 +195,21 @@ class _ConsoleTop extends StatelessWidget {
 
 /// ログイン中のロールとログアウト(1行にまとめ、主機能より目立たせない)。
 class _AccountBar extends StatelessWidget {
-  const _AccountBar({required this.signOut});
+  const _AccountBar({required this.signOut, required this.roleLabel});
   final Future<void> Function() signOut;
+
+  /// 画面に表示するroleの名前(システム管理者・イベント管理者・スタッフ)。
+  final String roleLabel;
 
   @override
   Widget build(BuildContext context) => Row(
     children: [
       const Icon(Icons.account_circle_outlined, size: 18, color: _mutedText),
       const SizedBox(width: 6),
-      const Expanded(
+      Expanded(
         child: Text(
-          'ログイン中：管理者',
-          style: TextStyle(color: _mutedText, fontSize: 13),
+          'ログイン中：$roleLabel',
+          style: const TextStyle(color: _mutedText, fontSize: 13),
         ),
       ),
       TextButton.icon(
@@ -313,6 +344,8 @@ class _EventConsole extends StatefulWidget {
     required this.winnerMailService,
     required this.winnerSendService,
     required this.reminderService,
+    required this.assignmentService,
+    required this.viewerLabel,
   });
   final String eventId;
   final Future<void> Function() signOut;
@@ -320,6 +353,10 @@ class _EventConsole extends StatefulWidget {
   final WinnerMailService winnerMailService;
   final WinnerSendService winnerSendService;
   final ReminderService reminderService;
+  final AssignmentService assignmentService;
+
+  /// ログイン中のroleの名前(システム管理者・イベント管理者)。
+  final String viewerLabel;
 
   @override
   State<_EventConsole> createState() => _EventConsoleState();
@@ -370,10 +407,21 @@ class _EventConsoleState extends State<_EventConsole> {
           ),
           if (event != null)
             _FeatureCard(
-              roleLabel: '管理者',
+              roleLabel: widget.viewerLabel,
               features: eventConsoleFeatureLabels,
               signOut: widget.signOut,
               actions: {
+                // Phase 3: このイベントの受付スタッフの追加・解除(システム管理者・このイベントのイベント管理者)。
+                'スタッフ管理': () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => EventAssignmentPage(
+                      eventId: id,
+                      eventName: event!.eventName,
+                      targetRole: EventRole.staff,
+                      service: widget.assignmentService,
+                    ),
+                  ),
+                ),
                 // CSVファイル選択画面へ直行する(このイベント固定。再びイベントを選ばせない)。
                 'CSV取込': () => Navigator.of(context).pushNamed(
                   '/console/import?eventId=${Uri.encodeQueryComponent(id)}',
@@ -420,6 +468,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 '当選メール送信': '取込回ごとの送信・進行状況・失敗分の再送',
                 '当選メール設定': '件名・本文の設定とプレビュー',
                 'リマインド': '前日リマインドの設定・プレビュー・送信状況',
+                'スタッフ管理': 'このイベントの受付スタッフを追加・解除する',
                 '受付': '受付スタッフ用QRを表示する(受付スタッフがスマホで読み取って受付する)',
               },
             ),
@@ -486,6 +535,267 @@ class _EventHeaderCard extends StatelessWidget {
           ],
         ],
       ),
+    ),
+  );
+}
+
+/// Phase 3: イベント管理者・スタッフのホーム(`/console`・`/console?eventId=…`)。
+/// 表示するのはサーバー(listMyEvents)が返した担当イベントだけ(他イベント・legacyイベントは返らない)。
+///   - eventId指定: 担当イベントならその画面、担当外なら権限なし(サーバーも拒否する)
+///   - 担当イベントが1件: そのイベントの画面へ直接入る
+///   - 複数: 「担当イベント」の一覧 → 選ぶと `/console?eventId=…`
+/// イベント画面は、イベント管理者なら既存のイベント管理画面(_EventConsole)、スタッフなら受付の入口(_StaffEventHome)。
+class _ScopedHome extends StatefulWidget {
+  const _ScopedHome({
+    required this.eventId,
+    required this.signOut,
+    required this.service,
+    required this.managerConsole,
+  });
+
+  /// URLの`?eventId=…`(未指定は空文字)。
+  final String eventId;
+  final Future<void> Function() signOut;
+  final AssignmentService service;
+  final Widget Function(String eventId) managerConsole;
+
+  @override
+  State<_ScopedHome> createState() => _ScopedHomeState();
+}
+
+class _ScopedHomeState extends State<_ScopedHome> {
+  late Future<List<MyEvent>> events = widget.service.listMyEvents();
+
+  Widget _eventView(MyEvent event, {required bool hasOthers}) => event.canManage
+      ? widget.managerConsole(event.eventId)
+      : _StaffEventHome(
+          event: event,
+          signOut: widget.signOut,
+          hasOthers: hasOthers,
+        );
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<List<MyEvent>>(
+    future: events,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState != ConnectionState.done) {
+        return const PageFrame(
+          title: '担当イベント',
+          child: Padding(
+            padding: EdgeInsets.all(32),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        );
+      }
+      if (snapshot.hasError) {
+        return _ScopedMessage(
+          message: snapshot.error is AssignmentException
+              ? '${snapshot.error}'
+              : '担当イベントを取得できませんでした。',
+          signOut: widget.signOut,
+          onRetry: () => setState(() => events = widget.service.listMyEvents()),
+        );
+      }
+      final list = (snapshot.data ?? const <MyEvent>[])
+          .where((e) => !e.isSystemAdmin)
+          .toList();
+      if (widget.eventId.isNotEmpty) {
+        final match = list.where((e) => e.eventId == widget.eventId);
+        if (match.isEmpty) {
+          return _ScopedMessage(
+            message: 'このイベントを利用する権限がありません。',
+            signOut: widget.signOut,
+            backToHome: true,
+          );
+        }
+        return _eventView(match.first, hasOthers: list.length > 1);
+      }
+      if (list.isEmpty) {
+        return _ScopedMessage(
+          message: '担当しているイベントはありません。',
+          signOut: widget.signOut,
+        );
+      }
+      if (list.length == 1) return _eventView(list.first, hasOthers: false);
+      final roleLabel = list.any((e) => e.canManage)
+          ? EventRole.eventManager.label
+          : EventRole.staff.label;
+      return PageFrame(
+        title: '担当イベント',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _AccountBar(signOut: widget.signOut, roleLabel: roleLabel),
+            const SizedBox(height: 4),
+            const Text(
+              '担当しているイベントを選んでください。',
+              style: TextStyle(color: _mutedText, fontSize: 12),
+            ),
+            const SizedBox(height: 20),
+            const _SectionHeading('担当イベント'),
+            const SizedBox(height: 8),
+            MyEventList(
+              events: list,
+              onTap: (event) => Navigator.of(context).pushNamed(
+                '/console?eventId=${Uri.encodeQueryComponent(event.eventId)}',
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+/// 担当イベントが無い・担当外・取得失敗のときの案内。
+class _ScopedMessage extends StatelessWidget {
+  const _ScopedMessage({
+    required this.message,
+    required this.signOut,
+    this.onRetry,
+    this.backToHome = false,
+  });
+  final String message;
+  final Future<void> Function() signOut;
+  final VoidCallback? onRetry;
+  final bool backToHome;
+
+  @override
+  Widget build(BuildContext context) => PageFrame(
+    title: '担当イベント',
+    child: Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(message, key: const Key('scoped-message')),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                if (onRetry != null)
+                  FilledButton(onPressed: onRetry, child: const Text('再試行')),
+                if (backToHome)
+                  OutlinedButton(
+                    onPressed: () => Navigator.of(
+                      context,
+                    ).pushNamedAndRemoveUntil('/console', (_) => false),
+                    child: const Text('担当イベントへ戻る'),
+                  ),
+                OutlinedButton(onPressed: signOut, child: const Text('ログアウト')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Phase 3: スタッフの担当イベントの画面。受付の入口だけ(CSV・メール・リマインド・スタッフ管理は出さない)。
+/// PCのカメラは起動しない(既存の二段階受付: このPCに「受付スタッフ用QR」を表示し、スマートフォンで読み取る)。
+/// イベント名・開催日時・会場は listMyEvents の値を使う(スタッフはイベント概要APIを呼ばない)。
+class _StaffEventHome extends StatelessWidget {
+  const _StaffEventHome({
+    required this.event,
+    required this.signOut,
+    required this.hasOthers,
+  });
+  final MyEvent event;
+  final Future<void> Function() signOut;
+
+  /// 他にも担当イベントがある(一覧へ戻る導線を出す)。
+  final bool hasOthers;
+
+  @override
+  Widget build(BuildContext context) => PageFrame(
+    title: '受付',
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _AccountBar(signOut: signOut, roleLabel: EventRole.staff.label),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  event.eventName,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _WrappingInfoRow('開催日時', formatDateTimeMinute(event.startAt)),
+                _WrappingInfoRow(
+                  '会場',
+                  event.venue.isEmpty ? '未設定' : event.venue,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        const _SectionHeading('受付'),
+        const SizedBox(height: 8),
+        _MenuCard(
+          label: '受付',
+          icon: Icons.qr_code_2,
+          description: '受付スタッフ用QRを表示する',
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ConfirmedReceptionStaffQrPage(
+                eventId: event.eventId,
+                eventName: event.eventName,
+              ),
+            ),
+          ),
+        ),
+        if (hasOthers) ...[
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: () => Navigator.of(
+                context,
+              ).pushNamedAndRemoveUntil('/console', (_) => false),
+              child: const Text('担当イベント一覧へ'),
+            ),
+          ),
+        ],
+      ],
+    ),
+  );
+}
+
+/// 項目名と値(値が長くても折り返す。スマートフォン幅で会場名等がはみ出さない)。
+class _WrappingInfoRow extends StatelessWidget {
+  const _WrappingInfoRow(this.label, this.value);
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 7),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(label, style: const TextStyle(color: _mutedText)),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
     ),
   );
 }

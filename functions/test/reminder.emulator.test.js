@@ -771,7 +771,8 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       }
       const index = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
       for (const name of ["getConfirmedReminderSettings", "updateConfirmedReminderSettings", "previewConfirmedReminderMail", "startConfirmedReminderDelivery", "getConfirmedReminderJob", "retryFailedConfirmedReminderMails"]) {
-        assert.match(index, new RegExp(`^exports\\.${name} = confirmedCallable\\("admin", `, "m"), name);
+        // Phase 1B: 実際の公開設定は、対象イベント(data.eventId)のevent_manager以上(adminは全イベント)
+        assert.match(index, new RegExp(`^exports\\.${name} = confirmedEventCallable\\("eventManager", EVENT_SCOPES\\.dataEventId, `, "m"), name);
       }
     });
 

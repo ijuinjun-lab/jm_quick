@@ -2,6 +2,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
+import 'confirmed/assignment_pages.dart';
 import 'confirmed/confirmed_event_list_page.dart';
 import 'confirmed/console_page.dart';
 import 'confirmed/event_create_page.dart';
@@ -89,6 +90,8 @@ Widget resolveRoute(Uri uri) => switch (uri.path) {
   ),
   // 作成済みのconfirmedイベントを選ぶ入口(admin専用)。eventIdを失った後にここから管理画面へ戻れる。
   '/console/events' => ConfirmedEventListRoute(),
+  // Phase 3: イベントごとのイベント管理者の追加・解除(システム管理者専用)。
+  '/console/managers' => ConfirmedManagerSettingsRoute(),
   // 新方式のイベント作成(admin専用)
   '/console/events/new' => ConfirmedEventCreateRoute(),
   // 新方式の参加者CSV取込(admin専用)

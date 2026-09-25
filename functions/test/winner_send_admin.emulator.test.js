@@ -104,11 +104,16 @@ describe("当選メール送信管理API(Emulator + 実Admin SDK + 偽transport)
       assert.equal((await api.job(asAdmin({jobId: "winner-batchA"}))).job.targetCount, 3);
     });
 
-    test("実際の公開設定(index.js)でも、5つの送信管理callableはすべて admin 専用", () => {
+    // Phase 1B: 実際の公開設定では、対象イベントのevent_manager以上(adminは全イベント)。
+    // eventIdで指定するものはdata.eventId、jobIdで指定するものはsendJobs/{jobId}.eventId(正本)を対象イベントにする。
+    test("実際の公開設定(index.js)では、5つの送信管理callableは対象イベントのevent_manager以上(jobId系はsendJobsのeventIdで認可)", () => {
       const fs = require("node:fs");
       const index = fs.readFileSync(require("node:path").join(__dirname, "..", "index.js"), "utf8");
-      for (const name of ["listConfirmedWinnerMailBatches", "getConfirmedWinnerMailJob", "createConfirmedWinnerMailJob", "processConfirmedWinnerMailJob", "retryFailedConfirmedWinnerMails"]) {
-        assert.match(index, new RegExp(`^exports\\.${name} = confirmedCallable\\("admin", `, "m"), name);
+      for (const name of ["listConfirmedWinnerMailBatches", "createConfirmedWinnerMailJob"]) {
+        assert.match(index, new RegExp(`^exports\\.${name} = confirmedEventCallable\\("eventManager", EVENT_SCOPES\\.dataEventId, `, "m"), name);
+      }
+      for (const name of ["getConfirmedWinnerMailJob", "processConfirmedWinnerMailJob", "retryFailedConfirmedWinnerMails"]) {
+        assert.match(index, new RegExp(`^exports\\.${name} = confirmedEventCallable\\("eventManager", EVENT_SCOPES\\.sendJobEventId, `, "m"), name);
       }
     });
 

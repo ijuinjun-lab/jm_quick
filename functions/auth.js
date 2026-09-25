@@ -25,7 +25,25 @@ const ACCESS_LEVELS = Object.freeze({
   authenticated: "authenticated",
   staffOrAdmin: "staffOrAdmin",
   admin: "admin",
+  // Phase 1B: 3階層の認可(confirmed業務)。systemAdmin = accessRolesの有効なadmin(従来のadminと同じ判定。概念上のsystem_admin)
+  systemAdmin: "systemAdmin",
 });
+// Phase 1B: イベント単位の認可レベル。confirmedEventCallable(対象eventIdのresolverが必須)だけで使える。
+//   eventManager: admin または 対象イベントのevent_manager
+//   eventStaff:   admin または 対象イベントのevent_manager / staff
+//   eventStaffOrLegacyStaff: eventStaffに加え、従来のaccessRolesのstaff(全体)も通す。legacyとconfirmedの両方を扱う
+//     getEventKind(方式の判定だけ。kindのみ返す)専用で、従来のlegacy受付の入口を壊さないため。
+const EVENT_ACCESS_LEVELS = Object.freeze({
+  eventManager: "eventManager",
+  eventStaff: "eventStaff",
+  eventStaffOrLegacyStaff: "eventStaffOrLegacyStaff",
+});
+const EVENT_LEVEL_MINIMUM_ROLE = Object.freeze({
+  eventManager: "event_manager",
+  eventStaff: "staff",
+  eventStaffOrLegacyStaff: "staff",
+});
+const INVALID_INPUT_MESSAGE = "リクエストが不正です。";
 // Firebase UIDは英数字が基本。文書パスを壊す文字(/ など)を含むUIDでは、Firestoreを読む前に拒否する。
 const UID_PATTERN = /^[A-Za-z0-9:_.-]{1,128}$/;
 const DENIED_MESSAGE = "この操作を行う権限がありません。";
@@ -75,11 +93,52 @@ async function requireAdmin(request, options) {
   return identity;
 }
 
+// Phase 1B: システム管理者(accessRolesの有効なadmin)。判定は従来のrequireAdminと同じ。
+async function requireSystemAdmin(request, options) {
+  const identity = await requireAdmin(request, options);
+  return {...identity, systemAdmin: true};
+}
+
 const GUARDS = {
   [ACCESS_LEVELS.authenticated]: async (request) => requireAuthenticated(request),
   [ACCESS_LEVELS.staffOrAdmin]: requireStaffOrAdmin,
   [ACCESS_LEVELS.admin]: requireAdmin,
+  [ACCESS_LEVELS.systemAdmin]: requireSystemAdmin,
 };
+
+// event_access.js・event_scope.jsはauth.jsの定数を使うため、循環を避けて必要になった時点で読み込む。
+const eventAccess = () => require("./event_access");
+const eventScopes = () => require("./event_scope").EVENT_SCOPES;
+
+// Phase 1B: イベント単位の認可(ハンドラより前に実行)。
+//   1. ログイン済み(UIDはrequest.authからのみ)
+//   2. accessRolesの有効なadmin → 全イベントで通す(eventAssignments不要。入力の検証はハンドラが従来どおり行う)
+//   3. それ以外は、resolverがサーバー側で確定した対象eventIdについて、eventAssignments(正本)のrankが必要rank以上か
+// resolverが対象を確定できない場合: 入力の形式が不正ならinvalid-argument、正本が見つからない(jobが存在しない等)なら
+// 権限なしと同じpermission-denied(他イベントのjobの有無を推測させない)。拒否の理由はサーバーログにだけ残す。
+function eventGuard(level, resolver) {
+  const minimumRole = EVENT_LEVEL_MINIMUM_ROLE[level];
+  return async (request, {db, logger} = {}) => {
+    const {uid} = requireAuthenticated(request);
+    if (!UID_PATTERN.test(uid)) throw denied(logger, uid, "invalid-uid-format");
+    const database = db || defaultDb();
+    const {loadGlobalRole, getEventAccess, rankOf} = eventAccess();
+    const globalRole = await loadGlobalRole(database, uid);
+    if (globalRole === ROLE_ADMIN) return {uid, role: ROLE_ADMIN, systemAdmin: true, eventId: null};
+    if (level === EVENT_ACCESS_LEVELS.eventStaffOrLegacyStaff && globalRole === ROLE_STAFF) {
+      return {uid, role: ROLE_STAFF, systemAdmin: false, eventId: null};
+    }
+    const scope = await resolver({data: request.data, db: database});
+    if (scope.kind === "invalid") {
+      (logger || console).warn("access denied", {uid, reason: "event-scope-invalid-input"});
+      throw new HttpsError("invalid-argument", INVALID_INPUT_MESSAGE, {code: "invalid-input"});
+    }
+    if (scope.kind !== "event") throw denied(logger, uid, "event-scope-unresolved");
+    const access = await getEventAccess(database, uid, scope.eventId);
+    if (access.rank < rankOf(minimumRole)) throw denied(logger, uid, `${minimumRole}-required`);
+    return {uid, role: access.role, systemAdmin: false, eventId: scope.eventId};
+  };
+}
 
 // 新方式のcallableを定義する入口は、この defineCallable(=onCall)ただ1か所。
 // 公開の入口は2種類だけ: confirmedCallable(認可つき) と confirmedPublicPassCallable(参加証の閲覧専用)。
@@ -103,10 +162,27 @@ function defineCallable(guard, handler, options) {
 //   handler({identity, data, request}): identityは認可を通過した「サーバー側で確定したuid/role」。
 //     dataは信用できないクライアント入力(検証はハンドラの責務)。認可はdataの内容に一切依存しない。
 function confirmedCallable(access, handler, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(EVENT_ACCESS_LEVELS, access)) {
+    throw new Error(`confirmedCallable: ${access} requires confirmedEventCallable (event scope resolver)`);
+  }
   const guard = Object.prototype.hasOwnProperty.call(GUARDS, access) ? GUARDS[access] : null;
   if (!guard) throw new Error(`confirmedCallable: invalid access level: ${String(access)}`);
   if (typeof handler !== "function") throw new Error("confirmedCallable: handler required");
   return defineCallable(guard, handler, options);
+}
+
+// Phase 1B: イベント単位の認可つきcallableを定義する入口。
+//   access:   'eventManager' | 'eventStaff' | 'eventStaffOrLegacyStaff'(必須)
+//   resolver: event_scope.jsのEVENT_SCOPESのいずれか(必須。それ以外の関数は定義時に例外)
+//   handler({identity, data, request}): identityは {uid, role, systemAdmin, eventId}(サーバーで確定した値)。
+//     participant・batch・attendance・jobが対象イベントに属することの照合はハンドラの責務(既存のチェック)。
+function confirmedEventCallable(access, resolver, handler, options = {}) {
+  if (!Object.prototype.hasOwnProperty.call(EVENT_ACCESS_LEVELS, access)) {
+    throw new Error(`confirmedEventCallable: invalid access level: ${String(access)}`);
+  }
+  if (!Object.values(eventScopes()).includes(resolver)) throw new Error("confirmedEventCallable: an event scope resolver from event_scope.js is required");
+  if (typeof handler !== "function") throw new Error("confirmedEventCallable: handler required");
+  return defineCallable(eventGuard(access, resolver), handler, options);
 }
 
 // ---- 公開callable(ログイン不要の5本)の入口 --------------------------------------------------------------
@@ -165,11 +241,14 @@ module.exports = {
   ROLE_STAFF,
   ACCESS_ROLES_COLLECTION,
   ACCESS_LEVELS,
+  EVENT_ACCESS_LEVELS,
   UID_PATTERN,
   requireAuthenticated,
   requireStaffOrAdmin,
   requireAdmin,
+  requireSystemAdmin,
   confirmedCallable,
+  confirmedEventCallable,
   confirmedPublicPassCallable,
   publicCapabilityCallable,
   requireAppCheck,
