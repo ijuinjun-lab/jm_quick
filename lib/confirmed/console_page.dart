@@ -106,29 +106,200 @@ class ConfirmedConsolePage extends StatelessWidget {
   );
 }
 
-/// 管理トップ(`/console`。eventId未指定)。
+/// 管理トップの機能の区分け(見出し → 機能)。並びを連結するとconsoleTopFeatureLabelsと同じ順になる。
+const List<(String, List<String>)> _consoleTopSections = [
+  ('イベント', ['イベント一覧', 'イベント作成']),
+  ('スタッフ・権限', ['スタッフ管理']),
+];
+
+const Map<String, IconData> _consoleTopIcons = {
+  'イベント一覧': Icons.event_note_outlined,
+  'イベント作成': Icons.add_circle_outline,
+  'スタッフ管理': Icons.manage_accounts_outlined,
+};
+
+const Color _mutedText = Color(0xff5c6670);
+
+/// 管理トップ(`/console`。eventId未指定)。ログイン状態・操作の流れ(補助説明)・区分けした機能メニュー。
 class _ConsoleTop extends StatelessWidget {
   const _ConsoleTop({required this.signOut});
   final Future<void> Function() signOut;
 
   @override
-  Widget build(BuildContext context) => PageFrame(
-    title: '管理機能',
-    child: _FeatureCard(
-      roleLabel: '管理者',
-      features: consoleTopFeatureLabels,
-      signOut: signOut,
-      actions: {
-        // 作成済みイベントの一覧から選ぶ入口(admin専用)。選ぶと /console?eventId=… へ進む。
-        'イベント一覧': () => Navigator.of(context).pushNamed('/console/events'),
-        // 新方式イベントの作成(admin専用)。作成後も /console?eventId=… へ進む。
-        'イベント作成': () => Navigator.of(context).pushNamed('/console/events/new'),
-      },
-      descriptions: const {
-        'イベント一覧': '作成済みのイベントから選んで管理する',
-        'イベント作成': '新方式のイベントの新規作成(メールは送信されません)',
-      },
+  Widget build(BuildContext context) {
+    final actions = <String, VoidCallback>{
+      // 作成済みイベントの一覧から選ぶ入口(admin専用)。選ぶと /console?eventId=… へ進む。
+      'イベント一覧': () => Navigator.of(context).pushNamed('/console/events'),
+      // 新方式イベントの作成(admin専用)。作成後も /console?eventId=… へ進む。
+      'イベント作成': () => Navigator.of(context).pushNamed('/console/events/new'),
+    };
+    const descriptions = {
+      'イベント一覧': '作成済みのイベントを管理',
+      'イベント作成': '新しいイベントを作成',
+      'スタッフ管理': 'スタッフと権限を管理',
+    };
+    return PageFrame(
+      title: '管理トップ',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _AccountBar(signOut: signOut),
+          const SizedBox(height: 4),
+          const _ConsoleTopFlow(),
+          for (final (heading, features) in _consoleTopSections) ...[
+            const SizedBox(height: 20),
+            _SectionHeading(heading),
+            for (final feature in features) ...[
+              const SizedBox(height: 8),
+              _MenuCard(
+                label: feature,
+                icon: _consoleTopIcons[feature] ?? Icons.apps_outlined,
+                description: descriptions[feature] ?? '',
+                onTap: actions[feature],
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// ログイン中のロールとログアウト(1行にまとめ、主機能より目立たせない)。
+class _AccountBar extends StatelessWidget {
+  const _AccountBar({required this.signOut});
+  final Future<void> Function() signOut;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      const Icon(Icons.account_circle_outlined, size: 18, color: _mutedText),
+      const SizedBox(width: 6),
+      const Expanded(
+        child: Text(
+          'ログイン中：管理者',
+          style: TextStyle(color: _mutedText, fontSize: 13),
+        ),
+      ),
+      TextButton.icon(
+        onPressed: signOut,
+        icon: const Icon(Icons.logout, size: 16),
+        label: const Text('ログアウト'),
+        style: TextButton.styleFrom(
+          foregroundColor: _mutedText,
+          textStyle: const TextStyle(fontSize: 13),
+          visualDensity: VisualDensity.compact,
+        ),
+      ),
+    ],
+  );
+}
+
+/// 管理の流れ(作成 → 選択 → イベントごとの機能)。操作は持たない小さな補助説明。
+/// 幅が狭いときは矢印を出さず、手順の区切りでだけ折り返す(行末に矢印が残らない)。
+class _ConsoleTopFlow extends StatelessWidget {
+  const _ConsoleTopFlow();
+
+  static const _steps = ['① イベントを作成', '② イベント一覧から選択', '③ CSV取込・メール・受付'];
+  static const _style = TextStyle(color: _mutedText, fontSize: 12);
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final arrows = constraints.maxWidth >= 520;
+      return Wrap(
+        spacing: arrows ? 6 : 14,
+        runSpacing: 2,
+        children: [
+          for (var i = 0; i < _steps.length; i++) ...[
+            if (arrows && i > 0) const Text('→', style: _style),
+            Text(_steps[i], style: _style),
+          ],
+        ],
+      );
+    },
+  );
+}
+
+class _SectionHeading extends StatelessWidget {
+  const _SectionHeading(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    text,
+    style: const TextStyle(
+      color: _mutedText,
+      fontSize: 13,
+      fontWeight: FontWeight.bold,
     ),
+  );
+}
+
+/// 管理トップの機能1件。onTapが無い機能は「準備中」badge付きの押せない表示にする。
+class _MenuCard extends StatelessWidget {
+  const _MenuCard({
+    required this.label,
+    required this.icon,
+    required this.description,
+    this.onTap,
+  });
+  final String label;
+  final IconData icon;
+  final String description;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final accent = Theme.of(context).colorScheme.primary;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      color: enabled ? Colors.white : const Color(0xfff3f4f6),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        leading: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: enabled ? const Color(0xffe8eef5) : const Color(0xffe5e7eb),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            icon,
+            size: 22,
+            color: enabled ? accent : const Color(0xff9aa3ad),
+          ),
+        ),
+        title: Text(
+          label,
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: enabled ? null : _mutedText,
+          ),
+        ),
+        subtitle: Text(description),
+        trailing: enabled
+            ? const Icon(Icons.chevron_right)
+            : const _PendingBadge(),
+        onTap: onTap,
+      ),
+    );
+  }
+}
+
+class _PendingBadge extends StatelessWidget {
+  const _PendingBadge();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    key: const Key('pending-badge'),
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+    decoration: BoxDecoration(
+      color: const Color(0xffe5e7eb),
+      borderRadius: BorderRadius.circular(999),
+    ),
+    child: const Text('準備中', style: TextStyle(color: _mutedText, fontSize: 12)),
   );
 }
 

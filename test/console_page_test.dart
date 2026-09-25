@@ -85,14 +85,25 @@ void main() {
     ) async {
       await tester.pumpWidget(_consoleTop());
       await tester.pumpAndSettle();
-      final tile = tester.widget<ListTile>(
-        find.ancestor(
-          of: find.text('スタッフ管理'),
-          matching: find.byType(ListTile),
-        ),
+      final tileFinder = find.ancestor(
+        of: find.text('スタッフ管理'),
+        matching: find.byType(ListTile),
       );
-      expect(tile.onTap, isNull);
-      expect((tile.subtitle as Text).data, '準備中');
+      expect(tester.widget<ListTile>(tileFinder).onTap, isNull);
+      // 「準備中」はカード内のbadgeとして表示される(押せる機能ではない)。
+      expect(
+        find.descendant(
+          of: tileFinder,
+          matching: find.byKey(const Key('pending-badge')),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: tileFinder, matching: find.text('準備中')),
+        findsOneWidget,
+      );
+      // 実装済みの機能には「準備中」を出さない。
+      expect(find.text('準備中'), findsOneWidget);
     });
 
     testWidgets('390px幅でoverflowなし', (tester) async {
