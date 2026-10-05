@@ -66,7 +66,7 @@ function createReminderApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl
       sendAt: iso(event.reminderSendAt),
       template: template ? {
         subject: template.subject || "", introBody: template.introBody || "", closingBody: template.closingBody || "",
-        notesBody: template.notesBody || "", version: Number.isInteger(template.version) ? template.version : 0,
+        notesBody: template.notesBody || "", adoptionNotesBody: template.adoptionNotesBody || "", version: Number.isInteger(template.version) ? template.version : 0,
       } : null,
       ready: built.ok,
       problems: built.ok ? [] : built.problems,
@@ -112,7 +112,8 @@ function createReminderApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl
       // テンプレート: 内容が変わるときだけversionを進める(同じ内容の再送では進めない)。当選メールのテンプレートには触れない。
       let nextTemplate = current;
       if (template) {
-        const same = current && current.subject === template.value.subject && current.introBody === template.value.introBody &&
+        if (request.template.adoptionNotesBody === undefined && current?.adoptionNotesBody) template.value.adoptionNotesBody = current.adoptionNotesBody;
+        const same = current && (current.adoptionNotesBody || null) === (template.value.adoptionNotesBody || null) && current.subject === template.value.subject && current.introBody === template.value.introBody &&
           current.closingBody === template.value.closingBody && (current.notesBody || null) === template.value.notesBody;
         if (!same) {
           const version = (current && Number.isInteger(current.version) ? current.version : 0) + 1;

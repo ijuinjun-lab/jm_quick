@@ -61,12 +61,15 @@ test("取込ロジック(import_*)はまだcallableへ接続していない(inde
 });
 
 test("テスト・fixtureに実CSV由来のデータが入っていない(実在の氏名・メールの形跡がない)", () => {
-  // メールアドレスは予約TLD(.invalid: RFC 2606。実在しない)のみ。それ以外のドメインを含むメール形式の文字列を許さない。
+  // fixtureは予約TLD(.invalid: RFC 2606)のみ。本番文案の承認済み公開問い合わせ先だけを個別許可する。
   const emailLike = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/g;
   for (const file of files) {
     const matches = fs.readFileSync(file, "utf8").match(emailLike) || [];
     for (const match of matches) {
-      assert.ok(/\.invalid$/i.test(match), `${rel(file)} に想定外のメール形式: ${match}`);
+      // User-approved public contact in the production preset and its exact-wording test; no exception for fixtures.
+      const approvedContact = ["confirmed/sippo_mail_preset.js", "confirmed/test/participation_types.test.js"].includes(rel(file)) &&
+        match === "sippo-support@info-event-jimukyoku.jp";
+      assert.ok(approvedContact || /\.invalid$/i.test(match), `${rel(file)} に想定外のメール形式: ${match}`);
     }
   }
   assert.ok(!files.some((f) => /\.csv$/i.test(f)), "confirmed/ にCSVファイルがあります");

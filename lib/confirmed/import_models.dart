@@ -360,11 +360,13 @@ class PreviewRow {
     required this.classification,
     required this.issueCodes,
     required this.programIds,
+    this.participationType,
   });
   final int sourceRowNumber;
   final RowClass classification;
   final List<String> issueCodes;
   final List<String> programIds;
+  final String? participationType;
 }
 
 /// previewConfirmedImport の応答(サーバーが返す項目だけ。氏名・メール・publicId・人数は含まれない)。
@@ -384,6 +386,7 @@ class ImportPreview {
     required this.existingStatus,
     required this.existingSequence,
     required this.warningColumns,
+    this.participationTypes = const [],
     required this.rows,
   });
 
@@ -405,6 +408,7 @@ class ImportPreview {
           }
         : <String, int>{};
     return ImportPreview(
+      participationTypes: maps(json['participationTypes']),
       batchId: json['batchId'] as String? ?? '',
       totalRecords: number('totalRecords'),
       totalRows: number('totalRows'),
@@ -432,6 +436,7 @@ class ImportPreview {
         for (final r in maps(json['rows']))
           PreviewRow(
             sourceRowNumber: (r['sourceRowNumber'] as num?)?.toInt() ?? 0,
+            participationType: r['participationType'] as String?,
             classification: RowClass.fromValue(r['classification']),
             issueCodes: [
               for (final c
@@ -468,6 +473,7 @@ class ImportPreview {
   final String? existingStatus;
   final int? existingSequence;
   final List<String> warningColumns;
+  final List<Map<String, dynamic>> participationTypes;
   final List<PreviewRow> rows;
 }
 

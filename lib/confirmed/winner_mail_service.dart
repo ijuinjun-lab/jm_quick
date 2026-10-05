@@ -12,7 +12,7 @@ class WinnerMailException implements Exception {
   String toString() => message;
 }
 
-/// 保存済みの設定(サーバーが返す値)。個人情報は含まない。
+/// 管理者向けの保存済み設定と、このイベントのプレビュー候補(氏名・ID・タイプ)。
 class WinnerMailSettings {
   const WinnerMailSettings({
     required this.eventId,
@@ -28,6 +28,13 @@ class WinnerMailSettings {
     required this.problems,
     required this.missingOptional,
     this.previewParticipantId,
+    this.adoptionNotesBody = '',
+    this.mailSettings = const {},
+    this.previewParticipants = const [],
+    this.participationTypes = const [],
+    this.suggestedTemplate = const {},
+    this.programs = const [],
+    this.participationMapping = const {},
   });
 
   factory WinnerMailSettings.fromJson(Map<String, dynamic> json) {
@@ -43,6 +50,13 @@ class WinnerMailSettings {
     List<String> strings(Object? value) =>
         value is List ? value.whereType<String>().toList() : const [];
     return WinnerMailSettings(
+      programs: [for (final p in json['programs'] as List? ?? []) Map<String, dynamic>.from(p as Map)],
+      participationMapping: Map<String, String>.from(json['participationMapping'] as Map? ?? {}),
+      adoptionNotesBody: template['adoptionNotesBody'] as String? ?? '',
+      mailSettings: Map<String, dynamic>.from(json['mailSettings'] as Map? ?? {}),
+      suggestedTemplate: Map<String, dynamic>.from(json['suggestedTemplate'] as Map? ?? {}),
+      previewParticipants: [for (final item in json['previewParticipants'] as List? ?? []) Map<String, dynamic>.from(item as Map)],
+      participationTypes: [for (final item in json['participationTypes'] as List? ?? []) Map<String, dynamic>.from(item as Map)],
       eventId: json['eventId'] as String? ?? '',
       eventName: event['eventName'] as String? ?? '',
       subject: template['subject'] as String? ?? '',
@@ -59,6 +73,8 @@ class WinnerMailSettings {
     );
   }
 
+  final List<Map<String, dynamic>> programs;
+  final Map<String, String> participationMapping;
   final String eventId;
   final String eventName;
   final String subject;
@@ -76,6 +92,11 @@ class WinnerMailSettings {
   /// 安定した既存の並び順で選ばれる)。取込済みparticipantが0件ならnull。利用者はこの値を見ない・入力しない
   /// (画面には表示しない。内部的にプレビュー要求へそのまま使うだけ)。
   final String? previewParticipantId;
+  final String adoptionNotesBody;
+  final Map<String, dynamic> mailSettings;
+  final Map<String, dynamic> suggestedTemplate;
+  final List<Map<String, dynamic>> previewParticipants;
+  final List<Map<String, dynamic>> participationTypes;
 }
 
 /// プレビュー結果。ready=falseのときはproblems(理由コード)だけ。
@@ -131,6 +152,9 @@ abstract class WinnerMailService {
     required String notesBody,
     required String address,
     required String access,
+    String? adoptionNotesBody,
+    Map<String, String>? mailSettings,
+    Map<String, String>? participationMapping,
   });
 
   Future<WinnerMailPreview> preview({
@@ -170,6 +194,9 @@ class CallableWinnerMailService implements WinnerMailService {
     required String notesBody,
     required String address,
     required String access,
+    String? adoptionNotesBody,
+    Map<String, String>? mailSettings,
+    Map<String, String>? participationMapping,
   }) async {
     final result = await _call('updateConfirmedWinnerMailTemplate', {
       'eventId': eventId,
@@ -178,8 +205,11 @@ class CallableWinnerMailService implements WinnerMailService {
         'introBody': introBody,
         'closingBody': closingBody,
         'notesBody': notesBody,
+        if (adoptionNotesBody != null) 'adoptionNotesBody': adoptionNotesBody,
       },
       'venueInfo': {'address': address, 'access': access},
+      if (mailSettings != null) 'mailSettings': mailSettings,
+      if (participationMapping != null) 'participationMapping': participationMapping.isEmpty ? null : participationMapping,
     });
     return (result['version'] as num?)?.toInt() ?? 0;
   }
@@ -254,6 +284,12 @@ class CallableWinnerMailService implements WinnerMailService {
     final details = error['details'] is Map
         ? Map<String, dynamic>.from(error['details'] as Map)
         : const <String, dynamic>{};
+    const mappingErrors = {
+      'invalid-participation-mapping': '猫・犬・トークのprogram設定を確認してください。',
+      'duplicate-participation-program': '猫・犬・トークに異なるprogramを選択してください。',
+      'participation-program-not-in-event': '選択したprogramがイベントに存在しません。再読み込みしてください。',
+    };
+    if (mappingErrors.containsKey(details['code'])) return mappingErrors[details['code']]!;
     final errors = details['errors'];
     if (errors is List && errors.isNotEmpty) {
       return errors

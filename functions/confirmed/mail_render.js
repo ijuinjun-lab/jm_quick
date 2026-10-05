@@ -36,17 +36,22 @@ function buildText(vm, template, {showEventName = false} = {}) {
   lines.push("当日は、受付用QRコードを受付でご提示ください。");
   lines.push("QRコードは、メールのHTML表示で画像として表示されます。");
   lines.push("", "受付用QRコードが表示できない場合はこちら", vm.webPassUrl, "", RULE);
-  lines.push("【ご参加内容】");
+  const eventLines = ["", RULE, "【開催情報】", `開催日時：${vm.dateTimeText}`, `会場：${vm.venue}`];
+  if (vm.address) eventLines.push(`住所：${vm.address}`);
+  if (vm.access) eventLines.push(`アクセス：${vm.access}`);
+  if (vm.participationLayout) {
+    lines.push(...vm.programs.map((p) => `■${p.name}`), ...eventLines, "");
+  }
+  lines.push(vm.participationLayout ? "＜お申し込み内容＞" : "【ご参加内容】");
   for (const program of vm.programs) {
     lines.push("", `■ ${program.name}`);
-    if (program.timeText) lines.push(`参加時間：${program.timeText}`);
+    if (program.timeText) lines.push(`${program.role === "talk" ? "開催時間" : "参加時間"}：${program.timeText}`);
     lines.push(`参加人数：${program.plannedCount}名`);
   }
-  lines.push("", RULE, "【開催情報】", `開催日時：${vm.dateTimeText}`, `会場：${vm.venue}`);
-  if (vm.address) lines.push(`住所：${vm.address}`);
-  if (vm.access) lines.push(`アクセス：${vm.access}`);
-  lines.push("", RULE, "", template.closingBody);
+  if (!vm.participationLayout) lines.push(...eventLines);
+  if (!vm.participationLayout) lines.push("", RULE, "", template.closingBody);
   if (vm.notes) lines.push("", "【注意事項】", vm.notes);
+  if (vm.participationLayout) lines.push("", RULE, "", template.closingBody);
   if (vm.contact) lines.push("", "【お問い合わせ先】", vm.contact);
   return `${lines.join("\n")}\n`;
 }
@@ -65,23 +70,27 @@ function buildHtml(vm, template, subject, {showEventName = false} = {}) {
   parts.push(`<p style="${P}text-align:center;"><img src="cid:${QR_CONTENT_ID}" alt="受付用QRコード" width="240" height="240" style="width:240px;height:240px;border:0;"></p>`);
   parts.push(`<p style="${P}">QRコードが表示されない場合は<a href="${escapeHtml(vm.webPassUrl)}">こちら</a></p>`);
   parts.push(`<p style="${P}font-size:12px;word-break:break-all;">${escapeHtml(vm.webPassUrl)}</p>`);
-  parts.push(`<h2 style="${H2}">ご参加内容</h2>`);
+  const info = [`開催日時：${escapeHtml(vm.dateTimeText)}`, `会場：${linesHtml(vm.venue)}`];
+  if (vm.address) info.push(`住所：${linesHtml(vm.address)}`);
+  if (vm.access) info.push(`アクセス：${linesHtml(vm.access)}`);
+  const eventHtml = `<h2 style="${H2}">開催情報</h2><p style="${P}">${info.join("<br>")}</p>`;
+  if (vm.participationLayout) {
+    parts.push(...vm.programs.map((p) => `<h3 style="${H3}">■${escapeHtml(p.name)}</h3>`), eventHtml);
+  }
+  parts.push(`<h2 style="${H2}">${vm.participationLayout ? "＜お申し込み内容＞" : "ご参加内容"}</h2>`);
   for (const program of vm.programs) {
     const rows = [];
-    if (program.timeText) rows.push(`参加時間：${escapeHtml(program.timeText)}`);
+    if (program.timeText) rows.push(`${program.role === "talk" ? "開催時間" : "参加時間"}：${escapeHtml(program.timeText)}`);
     rows.push(`参加人数：${program.plannedCount}名`);
     parts.push(`<h3 style="${H3}">■ ${escapeHtml(program.name)}</h3>`);
     parts.push(`<p style="${P}">${rows.join("<br>")}</p>`);
   }
-  parts.push(`<h2 style="${H2}">開催情報</h2>`);
-  const info = [`開催日時：${escapeHtml(vm.dateTimeText)}`, `会場：${linesHtml(vm.venue)}`];
-  if (vm.address) info.push(`住所：${linesHtml(vm.address)}`);
-  if (vm.access) info.push(`アクセス：${linesHtml(vm.access)}`);
-  parts.push(`<p style="${P}">${info.join("<br>")}</p>`);
-  parts.push(`<div style="margin-top:20px;">${paragraphsHtml(template.closingBody, P)}</div>`);
+  if (!vm.participationLayout) parts.push(eventHtml);
+  if (!vm.participationLayout) parts.push(`<div style="margin-top:20px;">${paragraphsHtml(template.closingBody, P)}</div>`);
   if (vm.notes) {
     parts.push(`<h2 style="${H2}">注意事項</h2>`, paragraphsHtml(vm.notes, P));
   }
+  if (vm.participationLayout) parts.push(`<div style="margin-top:20px;">${paragraphsHtml(template.closingBody, P)}</div>`);
   if (vm.contact) {
     parts.push(`<h2 style="${H2}">お問い合わせ先</h2>`, paragraphsHtml(vm.contact, P));
   }

@@ -12,6 +12,8 @@ const {isValidPlannedCount} = require("../programs");
 const {templateProblems} = require("./winner_mail_template");
 const {receptionQrPayload, webPassUrl} = require("./pass_urls");
 
+const {rolesFor, mappingFor, NAMES, participationType} = require("./participation_types");
+
 const JST_OFFSET_MS = 9 * 3600 * 1000;
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -110,17 +112,22 @@ function buildMailSnapshot(eventId, event, {templateField = "winnerMailTemplate"
   if (!optionalText(event && event.venue)) problems.push("event-venue-missing");
   if (problems.length > 0) return {ok: false, problems};
   const venueInfo = event.venueInfo || {};
-  const programs = normalizePrograms(event.programs);
+  const roles = rolesFor(eventId, event);
+  const programs = normalizePrograms(event.programs).map((p) => roles && roles[p.programId]
+    ? {...p, name: NAMES[roles[p.programId]], role: roles[p.programId]} : p);
   return {
     ok: true,
     snapshot: {
       template: {
         subject: template.subject.trim(), introBody: template.introBody, closingBody: template.closingBody,
         notesBody: optionalText(template.notesBody), version: template.version,
+        adoptionNotesBody: optionalText(template.adoptionNotesBody),
       },
       event: {
+        participationMapping: mappingFor(eventId, event),
         eventId, eventName: event.eventName.trim(), senderName: optionalText(event.senderName) || event.eventName.trim(),
         startAt: start.toISOString(), endAt: toIso(event.endAt), venue: event.venue.trim(),
+        talkTimeText: optionalText(event.confirmedMailSettings && event.confirmedMailSettings.talkTimeText),
         contact: optionalText(event.contact), address: optionalText(venueInfo.address), access: optionalText(venueInfo.access),
       },
       programs,
@@ -148,6 +155,16 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
   const built = buildProgramItems({programs: snapshot.programs, attendances, eventId: event.eventId, participantId: participant && participant.participantId});
   problems.push(...built.problems);
   const items = built.items;
+  const roles = rolesFor(event.eventId, {...event, programs: snapshot.programs});
+  if (roles) {
+    if (!participationType(event.eventId, attendances, {...event, programs: snapshot.programs})) problems.push("participation-type-invalid");
+    for (const item of items) {
+      const role = roles[item.programId];
+      if (!role) problems.push("attendance-program-role-unknown");
+      if (!item.timeText && role === "talk") item.timeText = event.talkTimeText || null;
+      if (!item.timeText) problems.push("attendance-time-missing");
+    }
+  }
 
   let qrPayload = null;
   let passUrl = null;
@@ -171,8 +188,13 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
       address: event.address,
       access: event.access,
       contact: event.contact,
-      notes: snapshot.template.notesBody,
-      programs: items.map((i) => ({programId: i.programId, name: i.name, timeText: i.timeText, plannedCount: i.plannedCount})),
+      notes: [
+        ...(roles && items.some((i) => ["dog", "cat"].includes(roles[i.programId]))
+          ? [snapshot.template.adoptionNotesBody] : []),
+        snapshot.template.notesBody,
+      ].filter(Boolean).join("\n") || null,
+      ...(roles ? {participationType: participationType(event.eventId, attendances, {...event, programs: snapshot.programs}), participationLayout: true} : {}),
+      programs: items.map((i) => ({programId: i.programId, name: i.name, timeText: i.timeText, plannedCount: i.plannedCount, ...(roles ? {role: roles[i.programId]} : {})})),
       qrPayload,
       webPassUrl: passUrl,
     },

@@ -39,13 +39,15 @@ function validateTemplateInput(input) {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return {ok: false, errors: [{code: "invalid-type", path: "template"}]};
   }
-  checkKeys(input, ["subject", "introBody", "closingBody", "notesBody"], "template", errors);
+  checkKeys(input, ["subject", "introBody", "closingBody", "notesBody", "adoptionNotesBody"], "template", errors);
   const value = {
     subject: textField(input.subject, {name: "subject", max: LIMITS.subject, required: true, singleLine: true}, errors),
     introBody: textField(input.introBody, {name: "introBody", max: LIMITS.introBody, required: true}, errors),
     closingBody: textField(input.closingBody, {name: "closingBody", max: LIMITS.closingBody, required: true}, errors),
     notesBody: textField(input.notesBody, {name: "notesBody", max: LIMITS.notesBody, required: false}, errors),
   };
+  if (input.adoptionNotesBody !== undefined) value.adoptionNotesBody = textField(input.adoptionNotesBody,
+    {name: "adoptionNotesBody", max: LIMITS.notesBody, required: false}, errors);
   return {ok: errors.length === 0, value, errors};
 }
 

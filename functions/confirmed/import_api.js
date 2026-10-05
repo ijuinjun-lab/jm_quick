@@ -16,6 +16,8 @@ const {parseImportRequest, toPlanRows} = require("./import_request");
 const {planImportBatchFromRows, importRecordId} = require("./import_batch_plan");
 const {createImportCommitter} = require("./import_commit");
 
+const {rolesFor, participationType, typeSummary} = require("./participation_types");
+
 const JST_OFFSET_MS = 9 * 3600 * 1000;
 const SAME_FILE_LIMIT = 5;
 
@@ -42,7 +44,8 @@ async function loadConfirmedEvent(db, eventId, normalizedMapping) {
     // 日付はイベントの開始日時(日本時間)から決める。クライアントが送る日付は使わない。
     eventDate = new Date(start.getTime() + JST_OFFSET_MS).toISOString().slice(0, 10);
   }
-  return {eventProgramIds, eventDate};
+  rolesFor(eventId, event);
+  return {eventProgramIds, eventDate, event};
 }
 
 function buildPlan(request, {eventProgramIds, eventDate}) {
@@ -81,6 +84,7 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       batchId: request.batchId,
       eventId: request.eventId,
       mappingVersion: batch.mappingVersion,
+      ...(rolesFor(request.eventId, context.event) ? {participationTypes: typeSummary(request.eventId, records, context.event)} : {}),
       totalRecords: batch.totalRecords,
       totalRows: batch.totalRows,
       readyCount: batch.readyCount,
@@ -103,6 +107,7 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
         sourceRowNumber: record.sourceRowNumber,
         importRecordId: record.importRecordId,
         classification: record.status,
+        ...(rolesFor(request.eventId, context.event) ? {participationType: record.status === "ready" ? participationType(request.eventId, record.attendances, context.event) : null} : {}),
         issueCodes: [...new Set(record.issues.map((issue) => issue.code))],
         programIds: record.attendances.map((a) => a.programId),
       })),

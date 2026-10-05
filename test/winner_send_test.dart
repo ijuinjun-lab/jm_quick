@@ -287,6 +287,9 @@ class FakeMailService implements WinnerMailService {
     required String notesBody,
     required String address,
     required String access,
+    String? adoptionNotesBody,
+    Map<String, String>? mailSettings,
+    Map<String, String>? participationMapping,
   }) => throw UnimplementedError();
   @override
   Future<WinnerMailPreview> preview({

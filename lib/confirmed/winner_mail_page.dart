@@ -7,8 +7,8 @@ import 'winner_mail_service.dart';
 
 /// 当選メールの設定とプレビュー(adminのみ)。新方式(confirmed)のイベント専用。従来方式の設定画面には触れない。
 ///
-/// 管理者が編集するのは「件名・冒頭本文・締め本文・注意事項」と会場の住所・アクセス(すべてプレーンテキスト)。
-/// 宛名・受付QR・Web参加証URL・program名・参加時間・参加人数・開催日時・会場・問い合わせ先は、
+/// 共通本文・注意事項・送信者名・問い合わせ先・住所・アクセス・未設定のトーク開催時間を管理する。
+/// 宛名・受付QR・Web参加証URL・program名・参加時間・参加人数・開催日時・会場は、
 /// サーバーが正確なデータから自動生成するため、ここでは編集できない。
 ///
 /// ■ Phase 11D: [initialEventId](イベント管理画面から内部的に渡される)を正本として使う。利用者が
@@ -36,6 +36,9 @@ String problemLabel(String code) => switch (code) {
   'event-name-missing' => 'イベント名が未設定です。',
   'event-start-missing' => '開催日時が未設定です。',
   'event-venue-missing' => '会場が未設定です。',
+  'attendance-time-missing' => '参加時間が未設定です。トークの開催時間はメール設定から設定できます。',
+  'participation-type-invalid' => '参加programまたは人数を確認してください。参加タイプを確定できません。',
+  'attendance-program-role-unknown' => '犬・猫・トークとの対応が未設定のprogramがあります。',
   'no-attendance' => 'この参加者には参加するprogramがありません。',
   'participant-name-missing' => 'この参加者の氏名がありません。',
   _ => 'メールを作成できません($code)。',
@@ -51,6 +54,16 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   final notes = TextEditingController();
   final address = TextEditingController();
   final access = TextEditingController();
+  final adoptionNotes = TextEditingController();
+  bool mappingEnabled = false;
+  Map<String, String> participationMapping = {};
+  final talkTime = TextEditingController();
+  final senderName = TextEditingController();
+  final contact = TextEditingController();
+  String? selectedType;
+  String? selectedParticipant;
+  List<Map<String, dynamic>> get availableParticipants => settings!.previewParticipants
+      .where((p) => selectedType == null || p['participationType'] == selectedType).toList();
   bool busy = false;
   bool loaded = false;
   String? message;
@@ -75,7 +88,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       closing,
       notes,
       address,
-      access,
+      access, adoptionNotes, talkTime, senderName, contact,
     ]) {
       c.dispose();
     }
@@ -105,6 +118,8 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     if (!mounted) return;
     setState(() {
       settings = result;
+      participationMapping = Map.of(result.participationMapping);
+      mappingEnabled = participationMapping.isNotEmpty;
       loaded = true;
       preview = null;
       subject.text = result.subject;
@@ -113,10 +128,17 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       notes.text = result.notesBody;
       address.text = result.address;
       access.text = result.access;
+      adoptionNotes.text = result.adoptionNotesBody;
+      talkTime.text = result.mailSettings['talkTimeText'] as String? ?? '';
+      senderName.text = result.mailSettings['senderName'] as String? ?? '';
+      contact.text = result.mailSettings['contact'] as String? ?? '';
+      selectedType = null;
+      selectedParticipant = null;
     });
   });
 
   String? _validate() {
+    if (mappingEnabled && (participationMapping.length != 3 || participationMapping.values.toSet().length != 3)) return '猫・犬・トークに異なるprogramを選択してください。';
     if (subject.text.trim().isEmpty) return '件名を入力してください。';
     if (subject.text.contains('\n')) return '件名は1行で入力してください。';
     if (subject.text.trim().length > _maxSubject) {
@@ -124,7 +146,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     }
     if (intro.text.trim().isEmpty) return '冒頭本文を入力してください。';
     if (closing.text.trim().isEmpty) return '締め本文を入力してください。';
-    for (final c in [intro, closing, notes]) {
+    for (final c in [intro, closing, notes, adoptionNotes]) {
       if (c.text.trim().length > _maxBody) return '本文は$_maxBody文字以内で入力してください。';
     }
     return null;
@@ -141,6 +163,9 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       notesBody: notes.text,
       address: address.text,
       access: access.text,
+      adoptionNotesBody: adoptionNotes.text,
+      participationMapping: mappingEnabled ? participationMapping : {},
+      mailSettings: {'senderName': senderName.text, 'contact': contact.text, 'talkTimeText': talkTime.text},
     );
     final refreshed = await widget.service.getSettings(_eventId);
     if (!mounted) return;
@@ -151,11 +176,12 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     });
   });
 
-  /// プレビュー対象の参加者は、利用者が入力するのではなく、サーバー([WinnerMailSettings.previewParticipantId])
-  /// が選んだ「このイベントの有効(active)かつ取込(committed)済み」の参加者から自動的に決まる
-  /// (取込回=第1回・第2回…は問わない。0件ならこのメソッドは呼ばれない=ボタン自体を表示しない)。
+  /// 対象イベントではタイプで絞って参加者を選ぶ。他イベントは既存の代表参加者を使う。
+  /// 本文・QRはどちらも実送信と同じサーバー処理で生成する。
   Future<void> showPreview() => _run(() async {
-    final id = settings?.previewParticipantId;
+    final id = settings!.participationTypes.isNotEmpty
+        ? selectedParticipant ?? (availableParticipants.firstOrNull?['participantId'] as String?)
+        : settings?.previewParticipantId;
     if (id == null || id.isEmpty) return; // ボタンを表示していないので通常到達しない
     final result = await widget.service.preview(
       eventId: _eventId,
@@ -253,11 +279,51 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
               ),
           const SizedBox(height: 12),
           const Text(
-            '宛名・受付QR・Web参加証URL・programと参加時間・参加人数・開催日時・会場・問い合わせ先は、'
+            '宛名・受付QR・Web参加証URL・programと参加時間・参加人数・開催日時・会場は、'
             'システムが正確なデータから自動で挿入します(ここでは編集できません)。',
             style: TextStyle(color: Color(0xff5c6670)),
           ),
           const SizedBox(height: 14),
+          if (mappingEnabled && settings!.suggestedTemplate.isNotEmpty)
+            OutlinedButton(
+              onPressed: busy ? null : () => setState(() {
+                final preset = settings!.suggestedTemplate;
+                subject.text = preset['subject'] as String;
+                intro.text = preset['introBody'] as String;
+                closing.text = preset['closingBody'] as String;
+                notes.text = preset['notesBody'] as String;
+                adoptionNotes.text = preset['adoptionNotesBody'] as String;
+                senderName.text = preset['senderName'] as String;
+                contact.text = preset['contact'] as String;
+                preview = null;
+                message = '基準文案を入力しました。内容を確認し、保存すると反映されます。';
+              }),
+              child: const Text('HEBEL HAUS×sippo 基準文案を入力'),
+            ),
+          SwitchListTile(
+            title: const Text('犬・猫・トークの7タイプ機能を有効にする'),
+            value: mappingEnabled,
+            onChanged: busy ? null : (value) => setState(() { mappingEnabled = value; }),
+          ),
+          if (mappingEnabled) ...[
+            for (final role in const {'cat': '猫', 'dog': '犬', 'talk': 'トーク'}.entries)
+              DropdownButtonFormField<String>(
+                key: ValueKey('mapping-${role.key}'),
+                initialValue: participationMapping['${role.key}ProgramId'],
+                decoration: InputDecoration(labelText: '${role.value}に対応するprogram'),
+                items: [for (final program in settings!.programs)
+                  DropdownMenuItem(value: program['programId'] as String, child: Text('${program['name']} (${program['programId']})'))],
+                onChanged: busy ? null : (value) => setState(() { if (value != null) participationMapping['${role.key}ProgramId'] = value; }),
+              ),
+            const Text('下の「保存」で本文と一緒に保存します。CSV取込前に設定してください。'),
+          ],
+          _field(senderName, '送信者名'),
+          const Text('送信元メールアドレスは既存メール配信基盤の設定を使用します。'),
+          _field(contact, 'お問い合わせ先', lines: 3),
+          if (mappingEnabled) ...[
+            _field(talkTime, 'トーク開催時間', helper: 'programに開催時間がある場合はそちらを優先します。未設定の時だけ使用します。'),
+            _field(adoptionNotes, '譲渡会参加者向け注意事項', lines: 3, helper: '犬または猫の譲渡会に参加する方だけに表示します。'),
+          ],
           _field(subject, '件名', helper: '1行・$_maxSubject文字以内。差し込み機能はありません。'),
           _field(intro, '冒頭本文', lines: 4, helper: 'プレーンテキスト。空行で段落になります。'),
           _field(closing, '締め本文', lines: 4),
@@ -321,9 +387,38 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
             style: TextStyle(color: Color(0xff5c6670)),
           ),
           const SizedBox(height: 10),
-          // 参加者ID・publicId・eventIdなど、内部IDを利用者が入力する欄は置かない。
-          // プレビュー対象は、このイベントの取込済み参加者からシステムが自動的に選ぶ。
-          if (settings?.previewParticipantId != null)
+          // 内部IDの手入力ではなく、サーバーが返す有効・取込済み参加者を氏名で選ぶ。
+          const Text('プレビューには保存済みの設定が使われます。編集後は保存してください。'),
+          if (settings!.participationTypes.isNotEmpty) ...[
+            DropdownButtonFormField<String>(
+              key: const Key('mail-type-filter'),
+              initialValue: selectedType ?? '',
+              decoration: const InputDecoration(labelText: '参加タイプ'),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('全タイプ')),
+                for (final type in settings!.participationTypes)
+                  DropdownMenuItem(value: type['value'] as String, child: Text(type['label'] as String)),
+              ],
+              onChanged: busy ? null : (value) => setState(() {
+                selectedType = value == '' ? null : value;
+                selectedParticipant = null;
+                preview = null;
+              }),
+            ),
+            if (availableParticipants.isNotEmpty)
+              DropdownButtonFormField<String>(
+                key: ValueKey('mail-participant-${selectedType ?? 'all'}'),
+                initialValue: selectedParticipant ?? availableParticipants.first['participantId'] as String,
+                decoration: const InputDecoration(labelText: 'プレビューする参加者'),
+                items: [for (var i = 0; i < availableParticipants.length; i++)
+                  DropdownMenuItem(value: availableParticipants[i]['participantId'] as String,
+                    child: Text('${i + 1}. ${availableParticipants[i]['name']}'))],
+                onChanged: busy ? null : (value) => setState(() { selectedParticipant = value; preview = null; }),
+              )
+            else
+              const Text('このタイプの取込済み参加者はいません。'),
+          ],
+          if (settings!.participationTypes.isNotEmpty ? availableParticipants.isNotEmpty : settings?.previewParticipantId != null)
             Align(
               alignment: Alignment.centerLeft,
               child: OutlinedButton(
@@ -331,7 +426,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
                 child: const Text('プレビューを表示'),
               ),
             )
-          else
+          else if (settings?.previewParticipantId == null)
             const Text(
               '取込済みの参加者がありません。先にCSV取込を行ってください。',
               style: TextStyle(color: Color(0xff5c6670)),

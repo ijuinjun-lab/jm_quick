@@ -206,6 +206,35 @@ Future<void> _commitDialog(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('参加タイプ7集計と各行の結果を既存集計と併記する', (tester) async {
+    const values = ['dog', 'cat', 'dog_cat', 'talk', 'dog_talk', 'cat_talk', 'dog_cat_talk'];
+    const labels = ['① 犬のみ', '② 猫のみ', '③ 犬＋猫', '④ トークショーのみ', '⑤ 犬＋トークショー', '⑥ 猫＋トークショー', '⑦ 犬＋猫＋トークショー'];
+    final service = FakeImportService(previewHandler: (_) async => ImportPreview.fromJson({
+      'batchId': 'b1', 'totalRecords': 7, 'totalRows': 7, 'readyCount': 7,
+      'participationTypes': [for (var i = 0; i < 7; i++) {'value': values[i], 'label': labels[i], 'count': 1}],
+      'rows': [for (var i = 0; i < 7; i++) {
+        'sourceRowNumber': i + 2, 'classification': 'ready', 'participationType': values[i],
+        'programIds': [
+          if (values[i].contains('cat')) 'program-1',
+          if (values[i].contains('dog')) 'program-2',
+          if (values[i].contains('talk')) 'program-3',
+        ],
+      }],
+    }));
+    await _open(tester, service, pick: () => _csv('${_headers.join(',')}\n${List.generate(7, (i) => _row(i + 1)).join('\n')}\n'));
+    await _preview_(tester);
+    await tester.ensureVisible(find.byKey(const Key('ready-rows')));
+    await tester.tap(find.text('取込対象の行(7件)'));
+    await tester.pumpAndSettle();
+    for (final label in labels) {
+      expect(find.text(label), findsOneWidget);
+      expect(find.textContaining('参加タイプ: $label'), findsOneWidget);
+    }
+    for (final label in ['CSV総行数', '空の行', '確認が必要', 'program別予定', 'タイプ未確定']) {
+      expect(find.text(label), findsWidgets);
+    }
+  });
+
   group('入口(認可)', () {
     testWidgets('未ログインではログイン画面だけ。権限なし・staffでは取込画面が出ない。adminだけ表示される', (
       tester,

@@ -525,7 +525,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     final programs = r.programIds.isEmpty
         ? ''
         : ' / ${r.programIds.map(_programName).join('、')}';
-    return '${r.classification.label}${issues.isEmpty ? '' : ' — $issues'}$programs';
+    final typeLabel = preview?.participationTypes.where((t) => t['value'] == r.participationType).firstOrNull?['label'];
+    final typeText = preview?.participationTypes.isNotEmpty == true ? ' / 参加タイプ: ${typeLabel ?? '未確定'}' : '';
+    return '${r.classification.label}${issues.isEmpty ? '' : ' — $issues'}$programs$typeText';
   }
 
   /// 確認が必要な行の、利用者向けの具体的な説明。内部の判定コード(slot-zero-length等)や
@@ -620,6 +622,12 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       InfoRow('確認が必要', '${p.reviewCount}件'),
       InfoRow('エラー', '${p.errorCount}件(取り込まれません)'),
       const SizedBox(height: 6),
+      if (p.participationTypes.isNotEmpty) ...[
+        const Text('参加タイプ別（取込対象の申込者件数・同伴者を除く）', style: TextStyle(fontWeight: FontWeight.bold)),
+        for (final type in p.participationTypes)
+          InfoRow('${type['label']}', '${type['count']}件'),
+        InfoRow('タイプ未確定', '${p.rows.where((r) => r.participationType == null).length}件'),
+      ],
       const Text('program別予定', style: TextStyle(fontWeight: FontWeight.bold)),
       const Text(
         '「確定できる予定」は今すぐ取り込める件数、「確認が必要」は下の行を承認しないと取り込まれない件数です。'
@@ -694,6 +702,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
             subtitle: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (p.participationTypes.isNotEmpty)
+                  const Text('参加タイプ: 未確定'),
                 for (final (i, msg) in _reviewMessages(r).indexed)
                   Text(
                     msg,

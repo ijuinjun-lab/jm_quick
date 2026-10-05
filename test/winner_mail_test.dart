@@ -23,6 +23,7 @@ class FakeWinnerMailService implements WinnerMailService {
   WinnerMailPreview? previewResult;
   WinnerMailException? settingsError;
   WinnerMailException? updateError;
+  Map<String, String>? savedParticipationMapping;
   final List<String> calls = [];
   final List<Map<String, String>> updates = [];
 
@@ -42,7 +43,11 @@ class FakeWinnerMailService implements WinnerMailService {
     required String notesBody,
     required String address,
     required String access,
+    String? adoptionNotesBody,
+    Map<String, String>? mailSettings,
+    Map<String, String>? participationMapping,
   }) async {
+    savedParticipationMapping = participationMapping;
     calls.add('update:$eventId');
     if (updateError != null) throw updateError!;
     updates.add({
@@ -508,6 +513,24 @@ void main() {
       expect(data.keys.toSet(), {'eventId', 'template', 'venueInfo'});
       expect(seen.body.contains('uid'), isFalse);
       expect(seen.body.contains('role'), isFalse);
+    });
+
+    test('mappingを正式APIへ送信し、無効化はnull、省略は従来互換', () async {
+      final requests = <Map>[];
+      final s = service(MockClient((request) async {
+        requests.add((jsonDecode(request.body) as Map)['data'] as Map);
+        return http.Response(jsonEncode({'result': {'version': 1}}), 200);
+      }));
+      for (final mapping in <Map<String, String>?>[
+        {'catProgramId': 'a', 'dogProgramId': 'b', 'talkProgramId': 'c'}, {}, null,
+      ]) {
+        await s.updateTemplate(eventId: 'e1', subject: 's', introBody: 'i', closingBody: 'c',
+          notesBody: '', address: '', access: '', participationMapping: mapping);
+      }
+      expect(requests[0]['participationMapping'], {'catProgramId': 'a', 'dogProgramId': 'b', 'talkProgramId': 'c'});
+      expect(requests[1].containsKey('participationMapping'), isTrue);
+      expect(requests[1]['participationMapping'], isNull);
+      expect(requests[2].containsKey('participationMapping'), isFalse);
     });
 
     test('ログインしていなければ通信しない', () async {

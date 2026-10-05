@@ -16,6 +16,9 @@ const {composeWinnerMailFor} = require("./winner_mail_message");
 // で集める既存関数を再利用する(前日リマインドのプレビュー対象選択と同じもの。新しいFunctionsは追加しない)。
 const {collectReminderTargets} = require("./reminder_targets");
 
+const {rolesFor, mappingFor, participationType, TYPES} = require("./participation_types");
+const sippoPreset = require("./sippo_mail_preset");
+
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const invalid = (code, extra) => new ApiError("invalid-argument", `リクエストが不正です: ${code}`, {code, ...extra});
 
@@ -38,7 +41,8 @@ async function loadConfirmedEvent(db, eventId) {
 const iso = (value) => { const d = toDate(value); return d ? d.toISOString() : null; };
 
 function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl}) {
-  // 現在のテンプレート・会場情報・不足している項目(送信できるか)を返す。個人情報は含まない。
+  // 管理者専用。設定と、対象イベントのプレビュー選択用氏名・ID・導出タイプを返す。
+  // 宛先メールアドレス・publicIdは一覧へ含めない。
   async function getSettings({data}) {
     const {eventId} = parseKeys(data, ["eventId"]);
     const db = getDb();
@@ -49,11 +53,33 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     // 取込回(第1回・第2回…)は問わない(前日リマインドの対象選択と同じ既存ロジック・同じ安定した並び順)。
     // 0件ならnull(クライアントは「取込済みの参加者がありません」という案内だけを表示し、IDの入力は求めない)。
     const targets = await collectReminderTargets(db, eventId);
+    let previewParticipants = [];
+    if (rolesFor(eventId, event) && targets.targets.length) {
+      const allowed = new Set(targets.targets);
+      const [people, attendanceDocs] = await Promise.all([
+        db.collection("participants").where("eventId", "==", eventId).get(),
+        db.collection("programAttendances").where("eventId", "==", eventId).get(),
+      ]);
+      const byParticipant = new Map();
+      for (const doc of attendanceDocs.docs) {
+        const a = doc.data();
+        if (!byParticipant.has(a.participantId)) byParticipant.set(a.participantId, []);
+        byParticipant.get(a.participantId).push(a);
+      }
+      previewParticipants = people.docs.filter((doc) => allowed.has(doc.id) && typeof doc.data().importBatchId === "string")
+        .map((doc) => ({participantId: doc.id, name: doc.data().name || "", participationType: participationType(eventId, byParticipant.get(doc.id), event)}))
+        .sort((a, b) => a.participantId.localeCompare(b.participantId));
+    }
     return {
       eventId,
+      suggestedTemplate: sippoPreset,
+      participationMapping: mappingFor(eventId, event),
+      programs: (event.programs || []).map((p) => ({programId: p.programId, name: p.name || p.programId})),
+      ...(rolesFor(eventId, event) ? {participationTypes: TYPES, previewParticipants} : {}),
+      mailSettings: {senderName: event.senderName || "", contact: event.contact || "", talkTimeText: event.confirmedMailSettings?.talkTimeText || ""},
       template: template ? {
         subject: template.subject || "", introBody: template.introBody || "", closingBody: template.closingBody || "",
-        notesBody: template.notesBody || "", version: Number.isInteger(template.version) ? template.version : 0,
+        notesBody: template.notesBody || "", adoptionNotesBody: template.adoptionNotesBody || "", version: Number.isInteger(template.version) ? template.version : 0,
         updatedBy: template.updatedBy || null, updatedAt: iso(template.updatedAt),
       } : null,
       venueInfo: {address: (event.venueInfo && event.venueInfo.address) || "", access: (event.venueInfo && event.venueInfo.access) || ""},
@@ -66,13 +92,24 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
   }
 
   async function updateTemplate({identity, data}) {
-    const request = parseKeys(data, ["eventId", "template", "venueInfo"]);
+    const request = parseKeys(data, ["eventId", "template", "venueInfo", "mailSettings", "participationMapping"]);
     const template = validateTemplateInput(request.template);
     if (!template.ok) throw invalid("invalid-template", {errors: template.errors});
     let venue = null;
     if (request.venueInfo !== undefined) {
       venue = validateVenueInfo(request.venueInfo);
       if (!venue.ok) throw invalid("invalid-venue-info", {errors: venue.errors});
+    }
+    let mailSettings = null;
+    if (request.mailSettings !== undefined) {
+      const input = request.mailSettings;
+      if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((k) => !["senderName", "contact", "talkTimeText"].includes(k))) throw invalid("invalid-mail-settings");
+      mailSettings = {};
+      for (const [key, max] of Object.entries({senderName: 100, contact: 500, talkTimeText: 100})) {
+        const value = input[key];
+        if (typeof value !== "string" || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value) || (key !== "contact" && /[\r\n]/.test(value))) throw invalid("invalid-mail-settings", {path: key});
+        mailSettings[key] = value.trim();
+      }
     }
     const db = getDb();
     const ref = db.collection("events").doc(request.eventId);
@@ -81,18 +118,30 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       if (!snapshot.exists) throw new ApiError("not-found", "イベントが見つかりません。");
       const event = snapshot.data();
       if (!isConfirmedFlow(event)) throw new ApiError("failed-precondition", "このイベントは新方式(confirmed)ではありません。");
+      const hasMapping = request.participationMapping !== undefined;
+      if (hasMapping) rolesFor(request.eventId, {...event, participationMapping: request.participationMapping});
+      const sameMapping = !hasMapping || (event.participationMapping !== undefined && JSON.stringify(mappingFor(request.eventId, event)) ===
+        JSON.stringify(mappingFor(request.eventId, {...event, participationMapping: request.participationMapping})));
       const current = event.winnerMailTemplate || null;
       const currentVenue = event.venueInfo || {};
       const nextVenue = venue ? venue.value : {address: currentVenue.address || null, access: currentVenue.access || null};
-      const same = current && current.subject === template.value.subject && current.introBody === template.value.introBody &&
+      const sameMailSettings = !mailSettings || (mailSettings.senderName === (event.senderName || "") &&
+        mailSettings.contact === (event.contact || "") && mailSettings.talkTimeText === (event.confirmedMailSettings?.talkTimeText || ""));
+      // Older clients omit the optional section; preserve it on their edits.
+      if (request.template.adoptionNotesBody === undefined && current?.adoptionNotesBody) template.value.adoptionNotesBody = current.adoptionNotesBody;
+      const same = sameMapping && sameMailSettings && current &&
+        (current.adoptionNotesBody || null) === (template.value.adoptionNotesBody || null) && current.subject === template.value.subject && current.introBody === template.value.introBody &&
         current.closingBody === template.value.closingBody && (current.notesBody || null) === template.value.notesBody &&
         (currentVenue.address || null) === nextVenue.address && (currentVenue.access || null) === nextVenue.access;
       // 同じ内容の再送(ネットワーク再試行)ではversionを進めない。
       if (same) return {eventId: request.eventId, version: current.version, changed: false};
       const version = (current && Number.isInteger(current.version) ? current.version : 0) + 1;
       tx.update(ref, {
+        ...(hasMapping ? {participationMapping: request.participationMapping} : {}),
         winnerMailTemplate: {...template.value, version, updatedAt: serverTimestamp(), updatedBy: identity.uid},
         venueInfo: nextVenue,
+        ...(mailSettings ? {senderName: mailSettings.senderName, contact: mailSettings.contact,
+          confirmedMailSettings: {...(event.confirmedMailSettings || {}), talkTimeText: mailSettings.talkTimeText}} : {}),
       });
       return {eventId: request.eventId, version, changed: true};
     });
