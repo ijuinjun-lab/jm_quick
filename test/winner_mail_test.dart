@@ -651,4 +651,67 @@ void main() {
       },
     );
   });
+
+  group('HEBEL HAUS×sippo 基準文案ボタン', () {
+    const presetSubject = '【ご参加予約確定のお知らせ】 HEBEL HAUS×sippo 保護犬猫譲渡会・トークセッション';
+    const sendOnly = 'このメールは送信専用アドレスから配信されています。';
+    const contactSentence = 'お問い合わせの際は事務局メールアドレス（sippo-support@info-event-jimukyoku.jp）までお願いいたします。';
+    // getConfirmedWinnerMailSettings の応答形(新規confirmed event・テンプレート未保存=version 0・mapping未設定)。
+    Map<String, dynamic> newEventResponse() => {
+      'eventId': 'event-a',
+      'event': {'eventName': 'E2Eテスト譲渡会'},
+      'template': null,
+      'venueInfo': {'address': '', 'access': ''},
+      'participationMapping': null,
+      'programs': [
+        {'programId': 'program-1', 'name': '午前'},
+        {'programId': 'program-2', 'name': '午後'},
+        {'programId': 'program-3', 'name': 'トーク'},
+      ],
+      'mailSettings': {'senderName': '', 'contact': '', 'talkTimeText': ''},
+      'suggestedTemplate': {
+        'subject': presetSubject,
+        'introBody': '冒頭の挨拶\n\n$sendOnly$contactSentence',
+        'adoptionNotesBody': '※譲渡会の注意',
+        'notesBody': '※受付の注意',
+        'closingBody': '共催：HEBEL HAUS／朝日新聞社sippo編集部',
+        'senderName': 'HEBEL HAUS×sippo 保護犬猫譲渡会',
+        'contact': 'sippo保護犬猫譲渡会事務局\nMail：sippo-support@info-event-jimukyoku.jp',
+      },
+      'ready': false,
+      'problems': ['template-subject-invalid'],
+      'missingOptional': [],
+      'previewParticipantId': null,
+    };
+    String fieldText(WidgetTester tester, String label) =>
+        tester.widget<TextField>(find.widgetWithText(TextField, label)).controller!.text;
+
+    testWidgets('新規event(version 0)で7タイプをONにして押すと、保存せずにフォームへ基準文案が入る', (tester) async {
+      final service = FakeWinnerMailService(settings: WinnerMailSettings.fromJson(newEventResponse()));
+      await tester.pumpWidget(_page(service));
+      await _load(tester);
+      expect(find.textContaining('テンプレートversion 0'), findsOneWidget);
+      expect(find.text('HEBEL HAUS×sippo 基準文案を入力'), findsNothing);
+      await tester.tap(find.text('犬・猫・トークの7タイプ機能を有効にする'));
+      await tester.pumpAndSettle();
+      final button = find.text('HEBEL HAUS×sippo 基準文案を入力');
+      expect(button, findsOneWidget);
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(fieldText(tester, '件名'), presetSubject);
+      expect(fieldText(tester, '冒頭本文'), contains(sendOnly));
+      expect(fieldText(tester, '冒頭本文'), contains(contactSentence));
+      expect(fieldText(tester, '締め本文'), '共催：HEBEL HAUS／朝日新聞社sippo編集部');
+      expect(fieldText(tester, '注意事項(任意)'), '※受付の注意');
+      expect(fieldText(tester, '譲渡会参加者向け注意事項'), '※譲渡会の注意');
+      expect(fieldText(tester, '送信者名'), 'HEBEL HAUS×sippo 保護犬猫譲渡会');
+      expect(fieldText(tester, 'お問い合わせ先'), contains('sippo-support@info-event-jimukyoku.jp'));
+      expect(find.textContaining('基準文案を入力しました'), findsOneWidget);
+      // 入力だけ。保存APIは呼ばない。
+      expect(service.calls.where((c) => c.startsWith('update:')), isEmpty);
+      expect(service.updates, isEmpty);
+    });
+  });
 }
