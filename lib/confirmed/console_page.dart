@@ -9,6 +9,7 @@ import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'import_models.dart';
 import 'import_service.dart';
+import 'reception_staff_key_service.dart';
 import 'reception_staff_qr_page.dart';
 import 'reminder_page.dart';
 import 'reminder_service.dart';
@@ -60,8 +61,10 @@ class ConfirmedConsolePage extends StatelessWidget {
     WinnerSendService? winnerSendService,
     ReminderService? reminderService,
     AssignmentService? assignmentService,
+    ReceptionStaffKeyIssuer? receptionStaffKeyIssuer,
     this.initialEventId,
   }) : authClient = authClient ?? FirebaseAuthClient(),
+       _receptionStaffKeyIssuer = receptionStaffKeyIssuer,
        _accessService = accessService,
        _eventSummaryService = eventSummaryService,
        _winnerMailService = winnerMailService,
@@ -83,6 +86,9 @@ class ConfirmedConsolePage extends StatelessWidget {
   // Phase 3: 担当イベント(listMyEvents)・スタッフ管理(任命API)。
   final AssignmentService? _assignmentService;
 
+  // 受付スタッフ用QRの受付キー(issueReceptionStaffKey)。
+  final ReceptionStaffKeyIssuer? _receptionStaffKeyIssuer;
+
   /// URLの`?eventId=…`(イベント一覧からの選択・イベント作成直後に渡される)。利用者が入力する欄は無い。
   final String? initialEventId;
 
@@ -90,6 +96,10 @@ class ConfirmedConsolePage extends StatelessWidget {
 
   AssignmentService get _assignments =>
       _assignmentService ?? CallableAssignmentService(authClient: authClient);
+
+  ReceptionStaffKeyIssuer get _keyIssuer =>
+      _receptionStaffKeyIssuer ??
+      CallableReceptionStaffKeyIssuer(authClient: authClient);
 
   /// イベント管理画面(システム管理者・イベント管理者で共通。表示するroleの名前だけが違う)。
   Widget _eventConsole(
@@ -109,6 +119,7 @@ class ConfirmedConsolePage extends StatelessWidget {
     reminderService:
         _reminderService ?? CallableReminderService(authClient: authClient),
     assignmentService: _assignments,
+    receptionStaffKeyIssuer: _keyIssuer,
   );
 
   @override
@@ -124,6 +135,7 @@ class ConfirmedConsolePage extends StatelessWidget {
       eventId: _eventId,
       signOut: signOut,
       service: _assignments,
+      receptionStaffKeyIssuer: _keyIssuer,
       managerConsole: (eventId) =>
           _eventConsole(eventId, signOut, EventRole.eventManager.label),
     ),
@@ -345,6 +357,7 @@ class _EventConsole extends StatefulWidget {
     required this.winnerSendService,
     required this.reminderService,
     required this.assignmentService,
+    required this.receptionStaffKeyIssuer,
     required this.viewerLabel,
   });
   final String eventId;
@@ -354,6 +367,7 @@ class _EventConsole extends StatefulWidget {
   final WinnerSendService winnerSendService;
   final ReminderService reminderService;
   final AssignmentService assignmentService;
+  final ReceptionStaffKeyIssuer receptionStaffKeyIssuer;
 
   /// ログイン中のroleの名前(システム管理者・イベント管理者)。
   final String viewerLabel;
@@ -427,13 +441,14 @@ class _EventConsoleState extends State<_EventConsole> {
                   '/console/import?eventId=${Uri.encodeQueryComponent(id)}',
                 ),
                 // Phase 11L: PC(このイベント管理画面)自身のカメラは起動しない。「受付スタッフ用QR」
-                // (このイベントに固定されたスマホ受付スキャナ`/console/scan?eventId=…`を開くだけのURL。
+                // (アカウント不要の受付端末の入口`/reception/staff?eventId=…&key=…`。このイベント専用の受付キーつき。
                 // participantId/publicIdは含まない)を表示する画面へ遷移する(カメラはスマホ側だけで使う)。
                 '受付': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => ConfirmedReceptionStaffQrPage(
                       eventId: id,
                       eventName: event!.eventName,
+                      issuer: widget.receptionStaffKeyIssuer,
                     ),
                   ),
                 ),
@@ -550,6 +565,7 @@ class _ScopedHome extends StatefulWidget {
     required this.eventId,
     required this.signOut,
     required this.service,
+    required this.receptionStaffKeyIssuer,
     required this.managerConsole,
   });
 
@@ -557,6 +573,7 @@ class _ScopedHome extends StatefulWidget {
   final String eventId;
   final Future<void> Function() signOut;
   final AssignmentService service;
+  final ReceptionStaffKeyIssuer receptionStaffKeyIssuer;
   final Widget Function(String eventId) managerConsole;
 
   @override
@@ -572,6 +589,7 @@ class _ScopedHomeState extends State<_ScopedHome> {
           event: event,
           signOut: widget.signOut,
           hasOthers: hasOthers,
+          receptionStaffKeyIssuer: widget.receptionStaffKeyIssuer,
         );
 
   @override
@@ -702,8 +720,10 @@ class _StaffEventHome extends StatelessWidget {
     required this.event,
     required this.signOut,
     required this.hasOthers,
+    required this.receptionStaffKeyIssuer,
   });
   final MyEvent event;
+  final ReceptionStaffKeyIssuer receptionStaffKeyIssuer;
   final Future<void> Function() signOut;
 
   /// 他にも担当イベントがある(一覧へ戻る導線を出す)。
@@ -752,6 +772,7 @@ class _StaffEventHome extends StatelessWidget {
               builder: (_) => ConfirmedReceptionStaffQrPage(
                 eventId: event.eventId,
                 eventName: event.eventName,
+                issuer: receptionStaffKeyIssuer,
               ),
             ),
           ),

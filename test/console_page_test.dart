@@ -18,6 +18,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'import_page_test.dart' show FakeImportService;
+import 'reception_staff_key_fake.dart';
 import 'reminder_test.dart' show FakeReminderService;
 import 'winner_mail_test.dart' show FakeWinnerMailService;
 import 'winner_send_test.dart' show FakeSendService;
@@ -55,6 +56,7 @@ Widget _eventConsole({
     accessService: FakeAccessService([
       const AccessCheck.granted(AccessRole.admin),
     ]),
+    receptionStaffKeyIssuer: FakeReceptionStaffKeyIssuer(),
     eventSummaryService: FakeImportService(
       event: event ?? _summary,
       eventError: eventError,
@@ -206,7 +208,7 @@ void main() {
 
     testWidgets(
       'Phase 11L: 「受付」を開くと、PCのカメラは起動せず、受付スタッフ用QR(選択中のeventIdが自動的に'
-      '引き継がれた、既存のスマホ受付スキャナ`/console/scan?eventId=…`を開くだけのURL)が表示される',
+      '引き継がれた、アカウント不要の受付端末`/reception/staff?eventId=…&key=…`を開くURL)が表示される',
       (tester) async {
         await tester.pumpWidget(_eventConsole());
         await tester.pumpAndSettle();
@@ -224,8 +226,11 @@ void main() {
             (tester.widget<QrImageView>(find.byType(QrImageView)).key
                     as ValueKey<String>)
                 .value;
-        expect(key, contains('/console/scan'));
+        // アカウント不要の受付端末の入口(このイベント専用の受付キーつき)。ログイン用の/console/scanではない。
+        expect(key, contains('/reception/staff?'));
         expect(key, contains('eventId=evfixture0123456789'));
+        expect(key, contains('key=$fakeReceptionKey'));
+        expect(key.contains('/console/scan'), isFalse);
         expect(key.contains('participantId='), isFalse);
         expect(key.contains('publicId='), isFalse);
       },

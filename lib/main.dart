@@ -12,6 +12,7 @@ import 'confirmed/pass_page.dart';
 import 'confirmed/pass_service.dart';
 import 'confirmed/qr_scanner_page.dart';
 import 'confirmed/reception_route.dart';
+import 'confirmed/reception_staff_device_page.dart';
 import 'firebase_options.dart';
 import 'pages/demo_admin_page.dart';
 import 'pages/event_list_page.dart';
@@ -106,6 +107,12 @@ Widget resolveRoute(Uri uri) => switch (uri.path) {
   // eventIdは任意(イベント選択後の管理画面「受付」から渡される。内部的な引き継ぎのみ)。
   '/console/scan' => ConfirmedScanReceptionRoute(
     eventId: uri.queryParameters['eventId'],
+  ),
+  // 受付スタッフ用QR(PCの「受付」に表示)を読み取った受付端末。ログイン不要で、URLの受付キー(サーバーが毎回検証)により
+  // このイベントの受付だけを行う(管理機能・他イベントは不可)。カメラへ直接進む。
+  '/reception/staff' => ReceptionStaffDeviceRoute(
+    eventId: uri.queryParameters['eventId'],
+    receptionKey: uri.queryParameters['key'],
   ),
   // 受付用QR。従来方式は従来の受付画面、新方式(confirmed)はprogram別受付画面。どちらもstaff/adminのログインが必要(Phase 10C)。
   // 未知のflow・存在しないイベント・読み取り失敗では、どちらの受付画面も出さない。

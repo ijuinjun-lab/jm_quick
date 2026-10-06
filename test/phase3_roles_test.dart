@@ -18,6 +18,7 @@ import 'package:jm_quick/confirmed/reception_staff_qr_page.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'import_page_test.dart' show FakeImportService;
+import 'reception_staff_key_fake.dart';
 import 'reminder_test.dart' show FakeReminderService;
 import 'winner_mail_test.dart' show FakeWinnerMailService;
 import 'winner_send_test.dart' show FakeSendService;
@@ -156,6 +157,7 @@ Widget _console({
     winnerSendService: FakeSendService(),
     reminderService: FakeReminderService(),
     assignmentService: assignments,
+    receptionStaffKeyIssuer: FakeReceptionStaffKeyIssuer(),
   ),
   onGenerateRoute: routes == null
       ? null

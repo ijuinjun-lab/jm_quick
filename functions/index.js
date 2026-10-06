@@ -5,7 +5,7 @@ const {initializeApp} = require("firebase-admin/app");
 const {getFirestore, FieldValue} = require("firebase-admin/firestore");
 const {createHash, randomBytes} = require("crypto");
 const {isLegacyFlow, legacyConfirmationDue} = require("./flow");
-const {confirmedCallable, confirmedEventCallable, confirmedPublicPassCallable, publicCapabilityCallable} = require("./auth");
+const {confirmedCallable, confirmedEventCallable, confirmedPublicPassCallable, publicCapabilityCallable, confirmedReceptionKeyCallable} = require("./auth");
 const {EVENT_SCOPES} = require("./event_scope");
 const {createLegacyApi} = require("./legacy/legacy_api");
 const {createRateLimiter, clientIpOf} = require("./rate_limit");
@@ -19,6 +19,7 @@ const {createPassApi} = require("./confirmed/pass_api");
 const {createReminderApi} = require("./confirmed/reminder_api");
 const {createAssignmentApi} = require("./confirmed/assignment_api");
 const {createInvitationApi} = require("./confirmed/invitation_api");
+const {createReceptionKeyApi} = require("./confirmed/reception_key_api");
 const {generateQrPng} = require("./qr_png");
 const {createMailApiTransport} = require("./mail_transport");
 
@@ -977,6 +978,15 @@ exports.checkInConfirmedProgram = confirmedEventCallable("eventStaff", EVENT_SCO
 // 受付後の訂正・取消(Phase 1B: 対象イベントのstaff以上に開放。他イベントは不可)。受付状態の正本はprogramAttendancesのまま。実変更ごとにhistoryを1件追記する。
 exports.correctConfirmedProgramAttendance = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.correct);
 exports.cancelConfirmedProgramCheckIn = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.cancel);
+// 受付スタッフ用QR(アカウントを持たない受付スタッフの端末に、対象イベントの受付だけを許可する)。
+// - issueReceptionStaffKey: PCの「受付」画面(正式ログインした対象イベントのstaff以上)が、QRに載せる受付キーを取得する(有効期限24時間)
+// - *ByStaffKey: QRを読んだ端末(ログインなし・App Check必須)が、受付キーで呼ぶ。許可するのは受付画面の表示と初回受付だけ
+//   (訂正・取消・管理機能・他イベントは不可。受付キーはdata.eventIdのイベントのキーとしてサーバーが毎回検証する)
+const receptionKeyApi = createReceptionKeyApi({getDb: getFirestore, serverTimestamp});
+exports.issueReceptionStaffKey = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, receptionKeyApi.issue, {timeoutSeconds: 30});
+exports.getReceptionStaffSessionByStaffKey = confirmedReceptionKeyCallable(receptionKeyApi.getSession);
+exports.getConfirmedReceptionViewByStaffKey = confirmedReceptionKeyCallable(passApi.getReceptionView);
+exports.checkInConfirmedProgramByStaffKey = confirmedReceptionKeyCallable(passApi.checkIn);
 
 // 従来方式(legacy)の管理・受付・参加者本人API(Phase 10C)。旧画面がFirestoreを直接読み書きしていた経路の置き換え。
 // admin: イベント一覧・詳細(参加者・受付・一括メール進捗)・作成・設定更新・参加者の手動登録

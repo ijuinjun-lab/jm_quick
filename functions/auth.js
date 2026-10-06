@@ -236,6 +236,43 @@ function publicCapabilityCallable(handler, options = {}) {
   return publicCallable("publicCapabilityCallable", handler, options);
 }
 
+// ---- 受付スタッフ用QRの受付キーで呼ぶcallable(アカウントを持たない受付端末。対象イベントの受付だけ) ----------------------
+// 認可の正本は receptionStaffKeys/{eventId}(confirmed/reception_key_api.js)。Firebase Auth(request.auth)は一切見ない
+// (受付キーは、ログイン中のstaff・adminの権限を広げることも、ログインの代わりに管理機能を開くこともない)。
+//   1. App Check(公開入口と同じ。正規のJM Quick Webアプリからのリクエスト)
+//   2. data.receptionKey が data.eventId の有効な受付キーと一致し、期限内であること(サーバー側で毎回検証)
+// ハンドラへは receptionKey を取り除いた data を渡す(既存の受付ハンドラの「想定外のキーは拒否」をそのまま使える)。
+// identity.uid は `reception-key:{keyId}`(受付履歴の checkedInBy・changedBy に残る。キー本体は残さない)。
+// 無効・期限切れ・別イベントのキーは、理由を区別せず同じ応答(permission-denied, code: reception-key-invalid)。
+const RECEPTION_KEY_DENIED_MESSAGE = "受付スタッフ用QRが無効か、有効期限が切れています。";
+
+function receptionKeyGuard(now) {
+  return async (request, {db, logger} = {}) => {
+    requireAppCheck(request, {logger});
+    const data = request && request.data;
+    const ok = data !== null && typeof data === "object" && !Array.isArray(data);
+    const {verifyReceptionKey, RECEPTION_KEY_ACTOR_PREFIX} = require("./confirmed/reception_key_api");
+    const verified = ok ? await verifyReceptionKey(db || defaultDb(), {eventId: data.eventId, key: data.receptionKey}, now ? {now} : undefined) : null;
+    if (!verified) {
+      (logger || console).warn("reception key denied", {reason: "reception-key-invalid"});
+      throw new HttpsError("permission-denied", RECEPTION_KEY_DENIED_MESSAGE, {code: "reception-key-invalid"});
+    }
+    return {
+      uid: `${RECEPTION_KEY_ACTOR_PREFIX}${verified.keyId}`, role: "reception-key", systemAdmin: false, receptionKey: true,
+      eventId: verified.eventId, expiresAt: verified.expiresAt,
+    };
+  };
+}
+
+function confirmedReceptionKeyCallable(handler, options = {}) {
+  if (typeof handler !== "function") throw new Error("confirmedReceptionKeyCallable: handler required");
+  const {now, ...callableOptions} = options; // nowはテスト用の時刻の差し替え口(本番は省略=現在時刻)
+  return defineCallable(receptionKeyGuard(now), async ({identity, data, request}) => {
+    const {receptionKey, ...withoutKey} = data; // eslint-disable-line no-unused-vars
+    return handler({identity, data: withoutKey, request});
+  }, {...PUBLIC_CALLABLE_OPTIONS, ...callableOptions});
+}
+
 module.exports = {
   ROLE_ADMIN,
   ROLE_STAFF,
@@ -251,6 +288,8 @@ module.exports = {
   confirmedEventCallable,
   confirmedPublicPassCallable,
   publicCapabilityCallable,
+  confirmedReceptionKeyCallable,
+  RECEPTION_KEY_DENIED_MESSAGE,
   requireAppCheck,
   PUBLIC_CALLABLE_OPTIONS,
   PUBLIC_PASS_CALLABLE_OPTIONS,

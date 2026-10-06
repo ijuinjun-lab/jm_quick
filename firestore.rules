@@ -60,6 +60,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // 受付スタッフ用QRの受付キー(1イベントにつき1ドキュメント。対象イベントの受付だけを許可する)。
+    // クライアントSDKからはread/writeとも一切許可しない(受付端末・PCも直接読めない)。読み書きはAdmin SDK(Functions)だけ。
+    match /receptionStaffKeys/{eventId} {
+      allow read, write: if false;
+    }
+
     // 新方式の当選者CSV取込の記録(取込回と、その全行の監査)。クライアントからのread/writeは一切許可しない。
     // 読み書きはAdmin SDK(admin専用callable)だけ。監査行には個人情報を持たない。
     match /importBatches/{batchId} {

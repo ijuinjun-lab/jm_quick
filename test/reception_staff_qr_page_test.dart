@@ -8,19 +8,30 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/confirmed/qr_scanner_page.dart';
 import 'package:jm_quick/confirmed/reception_staff_qr_page.dart';
 import 'package:jm_quick/confirmed/web_qr_camera.dart';
+import 'package:jm_quick/confirmed/reception_service.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+
+import 'reception_staff_key_fake.dart';
 
 Widget _page({
   String eventId = 'evfixture0123456789',
   String eventName = '犬猫譲渡会・トークショー(架空)',
   Uri? baseUri,
+  FakeReceptionStaffKeyIssuer? issuer,
 }) => MaterialApp(
   home: ConfirmedReceptionStaffQrPage(
     eventId: eventId,
     eventName: eventName,
     baseUri: baseUri,
+    issuer: issuer ?? FakeReceptionStaffKeyIssuer(),
   ),
 );
+
+String _qrData(WidgetTester tester) =>
+    (tester.widget<QrImageView>(find.byType(QrImageView)).key
+            as ValueKey<String>)
+        .value
+        .replaceFirst('reception-staff-qr:', '');
 
 void main() {
   group('ConfirmedReceptionStaffQrPage(PCの「受付」= 受付スタッフ用QRの表示のみ)', () {
@@ -33,28 +44,53 @@ void main() {
       expect(find.text('このPCではカメラを使用しません。'), findsOneWidget);
     });
 
-    testWidgets(
-      'QRの中身は、このイベントに固定された既存のスマホ受付スキャナのURL。participantId/publicIdは含まない',
-      (tester) async {
-        await tester.pumpWidget(
-          _page(
-            eventId: 'event1',
-            baseUri: Uri.parse('https://jm-quick.web.app/console'),
-          ),
-        );
-        await tester.pumpAndSettle();
-        final key =
-            (tester.widget<QrImageView>(find.byType(QrImageView)).key
-                    as ValueKey<String>)
-                .value;
-        expect(
-          key,
-          contains('https://jm-quick.web.app/console/scan?eventId=event1'),
-        );
-        expect(key.contains('participantId='), isFalse);
-        expect(key.contains('publicId='), isFalse);
-      },
-    );
+    testWidgets('QRの中身は、アカウント不要の受付端末の入口(このイベントの受付キーつき)。ログイン用の/console/scanではなく、'
+        'participantId/publicId・Firebaseのトークン・パスワードは含まない', (tester) async {
+      final issuer = FakeReceptionStaffKeyIssuer();
+      await tester.pumpWidget(
+        _page(
+          eventId: 'event1',
+          baseUri: Uri.parse('https://jm-quick.web.app/console?x=1#frag'),
+          issuer: issuer,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final data = _qrData(tester);
+      expect(
+        data,
+        'https://jm-quick.web.app/reception/staff?eventId=event1&key=$fakeReceptionKey',
+      );
+      expect(issuer.calls, ['event1'], reason: 'サーバーで、このイベントの受付キーを取得する');
+      final uri = Uri.parse(data);
+      expect(uri.queryParameters.keys.toSet(), {'eventId', 'key'});
+      for (final forbidden in [
+        '/console/scan',
+        'participantId',
+        'publicId',
+        'token',
+        'password',
+        'Bearer',
+      ]) {
+        expect(data.contains(forbidden), isFalse, reason: forbidden);
+      }
+      expect(find.textContaining('有効期限:'), findsOneWidget);
+      expect(find.textContaining('ログインは不要です'), findsOneWidget);
+    });
+
+    testWidgets('受付キーを取得できなければQRを出さず、理由と再試行を表示する(再試行で表示できる)', (tester) async {
+      final issuer = FakeReceptionStaffKeyIssuer(
+        error: const ReceptionException('この操作を行う権限がありません。'),
+      );
+      await tester.pumpWidget(_page(issuer: issuer));
+      await tester.pumpAndSettle();
+      expect(find.byType(QrImageView), findsNothing);
+      expect(find.text('この操作を行う権限がありません。'), findsOneWidget);
+      issuer.error = null;
+      await tester.tap(find.text('再試行'));
+      await tester.pumpAndSettle();
+      expect(find.byType(QrImageView), findsOneWidget);
+      expect(issuer.calls.length, 2);
+    });
 
     testWidgets('イベントが変われば、QRのURLのeventIdも変わる', (tester) async {
       await tester.pumpWidget(
@@ -64,10 +100,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final keyA =
-          (tester.widget<QrImageView>(find.byType(QrImageView)).key
-                  as ValueKey<String>)
-              .value;
+      final keyA = _qrData(tester);
       expect(keyA, contains('eventId=event-a'));
 
       await tester.pumpWidget(
@@ -77,10 +110,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final keyB =
-          (tester.widget<QrImageView>(find.byType(QrImageView)).key
-                  as ValueKey<String>)
-              .value;
+      final keyB = _qrData(tester);
       expect(keyB, contains('eventId=event-b'));
       expect(keyB.contains('eventId=event-a'), isFalse);
     });
@@ -113,9 +143,10 @@ void main() {
       'Phase 11L: PCの「受付」画面(reception_staff_qr_page.dart)は、カメラ関連ファイルを一切importしない'
       '(getUserMediaを呼ぶ経路自体が存在しない、ソースレベルの保証)',
       () {
-        final text = File(
-          'lib/confirmed/reception_staff_qr_page.dart',
-        ).readAsLinesSync().where((l) => !l.trimLeft().startsWith('//')).join('\n');
+        final text = File('lib/confirmed/reception_staff_qr_page.dart')
+            .readAsLinesSync()
+            .where((l) => !l.trimLeft().startsWith('//'))
+            .join('\n');
         for (final forbidden in [
           'web_qr_camera',
           'qr_scanner_page.dart',
@@ -125,7 +156,10 @@ void main() {
           expect(text.contains(forbidden), isFalse, reason: forbidden);
         }
         // 使っているのは既存のqr_flutter(表示専用のQR画像生成)だけ。
-        expect(text.contains("import 'package:qr_flutter/qr_flutter.dart';"), isTrue);
+        expect(
+          text.contains("import 'package:qr_flutter/qr_flutter.dart';"),
+          isTrue,
+        );
       },
     );
 

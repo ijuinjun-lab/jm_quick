@@ -19,6 +19,7 @@ const DOCS = [
   ["accessRoles", "u-admin", {role: "admin", active: true}],
   ["eventAssignments", "ea-fixture", {eventId: "e1", uid: "u-staff", role: "staff", active: true, email: "secret@example.invalid"}],
   ["eventInvitations", "ei-fixture", {eventId: "e1", email: "secret@example.invalid", role: "staff", status: "pending", tokenHash: "x"}],
+  ["receptionStaffKeys", "e1", {eventId: "e1", key: "k".repeat(43), keyId: "rk_fixture", expiresAt: 4102444800000}],
   ["importBatches", "b1", {eventId: "e1", status: "committed"}],
   ["importBatches/b1/rows", "r1", {result: "created"}],
   ["sendJobs", "s1", {eventId: "e1", status: "ready"}],
@@ -73,12 +74,12 @@ describe("Firestore Rules(Phase 10D): 全collectionを、どのクライアン�
     assert.doesNotMatch(code, /request\.auth/, "request.authに依存した許可が無い");
     assert.doesNotMatch(code, /match\s+\/\{[^}]*=\*\*\}/);
     const allows = code.match(/allow[^;]*;/g) || [];
-    assert.equal(allows.length, 18, "match 18か所(サブcollection含む。Phase 1AでeventAssignments、Phase 4でeventInvitationsを追加)");
+    assert.equal(allows.length, 19, "match 19か所(サブcollection含む。Phase 1AでeventAssignments、Phase 4でeventInvitations、受付スタッフ用QRでreceptionStaffKeysを追加)");
     assert.deepEqual([...new Set(allows)], ["allow read, write: if false;"]);
     // DOCSの全collection(先頭のcollection)に、明示のmatchがある(未知のcollectionだけがdefault deny)
     const matched = new Set([...code.matchAll(/match \/(\w+)\/\{/g)].map((m) => m[1]));
     for (const [collection] of DOCS.filter(([c]) => c !== "unknownCollection")) assert.ok(matched.has(collection.split("/")[0]), `${collection}のmatch`);
-    for (const required of ["events", "participants", "checkIns", "mailJobs", "mailLogs", "walkInRegistrations", "accessRoles", "eventAssignments", "eventInvitations", "importBatches", "sendJobs", "mailDeliveries", "programAttendances", "rateLimits"]) {
+    for (const required of ["events", "participants", "checkIns", "mailJobs", "mailLogs", "walkInRegistrations", "accessRoles", "eventAssignments", "eventInvitations", "receptionStaffKeys", "importBatches", "sendJobs", "mailDeliveries", "programAttendances", "rateLimits"]) {
       assert.ok(matched.has(required), `${required}の明示のmatch`);
     }
   });

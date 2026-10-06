@@ -33,6 +33,12 @@ const EVENT_SCOPE_RESOLVERS = ["dataEventId", "sendJobEventId"];
 const EVENT_CALLABLE = /^confirmedEventCallable\("(\w+)", EVENT_SCOPES\.(\w+), /;
 // ログインなしで公開してよいのは、参加者本人の「参加証の閲覧(読み取り専用)」だけ。増やさない。
 const PUBLIC_PASS_EXPORTS = ["getConfirmedParticipantPass"];
+// 受付スタッフ用QRの受付キーで呼ぶ入口(ログインなし・App Check・受付キー必須)。対象イベントの受付画面の表示・初回受付・キーの確認だけ。増やさない。
+const RECEPTION_KEY_EXPORTS = {
+  getReceptionStaffSessionByStaffKey: "receptionKeyApi.getSession",
+  getConfirmedReceptionViewByStaffKey: "passApi.getReceptionView",
+  checkInConfirmedProgramByStaffKey: "passApi.checkIn",
+};
 // confirmedの内部の定期実行(ブラウザ・callableから起動できない)。増やす場合は、認可のない入口にならないことを確認する。
 const INTERNAL_SCHEDULED_EXPORTS = ["sweepConfirmedMailDelivery", ...LEGACY_SCHEDULED_EXPORTS];
 
@@ -53,6 +59,10 @@ test("index.jsのexportは、Scheduler・公開入口(固定一覧)・confirmedC
       assert.match(rhs, /^publicCapabilityCallable\(/, name);
       continue;
     }
+    if (Object.hasOwn(RECEPTION_KEY_EXPORTS, name)) {
+      assert.equal(rhs, `confirmedReceptionKeyCallable(${RECEPTION_KEY_EXPORTS[name]});`, name);
+      continue;
+    }
     const event = EVENT_CALLABLE.exec(rhs);
     if (event) {
       assert.ok(EVENT_ACCESS_LEVELS.includes(event[1]), `${name} のイベント単位のアクセスレベルが不正: ${event[1]}`);
@@ -67,7 +77,7 @@ test("index.jsのexportは、Scheduler・公開入口(固定一覧)・confirmedC
 
 test("Phase 10C: 認証なしで呼べるcallableは固定一覧だけ(従来の管理・メール・削除は認証なしでは呼べない)", () => {
   const unauthenticated = exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !INTERNAL_SCHEDULED_EXPORTS.includes(e.name)).map((e) => e.name).sort();
-  assert.deepEqual(unauthenticated, [...PUBLIC_PASS_EXPORTS, ...PUBLIC_CAPABILITY_EXPORTS].sort());
+  assert.deepEqual(unauthenticated, [...PUBLIC_PASS_EXPORTS, ...PUBLIC_CAPABILITY_EXPORTS, ...Object.keys(RECEPTION_KEY_EXPORTS)].sort());
   assert.doesNotMatch(index, /\bonCall\(/, "index.jsにonCall直書き(認可なしの入口)が無い");
 });
 
@@ -257,6 +267,11 @@ const AUTHORIZATION_MAP_PHASE_1B = {
   revokeEventInvitation: E_MANAGER,
   getEventInvitation: "publicCapabilityCallable",
   acceptEventInvitation: "confirmedCallable:authenticated",
+  // 受付スタッフ用QR: キーの発行は対象イベントのstaff以上(正式ログイン)。受付端末は受付キー必須の3本だけ
+  issueReceptionStaffKey: E_STAFF,
+  getReceptionStaffSessionByStaffKey: "confirmedReceptionKeyCallable",
+  getConfirmedReceptionViewByStaffKey: "confirmedReceptionKeyCallable",
+  checkInConfirmedProgramByStaffKey: "confirmedReceptionKeyCallable",
 };
 // 従来のadmin / staffOrAdminのまま意図して残すもの(legacy業務・legacyのメール/削除。listLegacyEventsは全件一覧でsystem管理者専用)。
 const OLD_LEVEL_ALLOWLIST = [...LEGACY_ADMIN_EXPORTS, ...LEGACY_API_ADMIN, ...LEGACY_API_STAFF].sort();
@@ -271,7 +286,7 @@ const authorizationOf = (rhs) => {
 test("Phase 1B: 全exportの入口・認可レベル・対象イベントのresolverが正式マップと一致する(callableの追加・削除も無い)", () => {
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
-  assert.equal(exportsInIndex.length, 54);
+  assert.equal(exportsInIndex.length, 58);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {
@@ -281,6 +296,8 @@ test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていな�
   // confirmed業務(名前にConfirmedを含むcallable)は、公開参加証・systemAdminのイベント作成以外はすべてイベント単位
   for (const {name, rhs} of exportsInIndex.filter((e) => /Confirmed/.test(e.name) && !/^onSchedule\(/.test(e.rhs))) {
     if (name === "getConfirmedParticipantPass") continue;
+    // 受付キーの3本は、イベント単位の認可の代わりに「data.eventIdの受付キー」をguardが検証する(上の受付スタッフ用QRのテスト)
+    if (Object.hasOwn(RECEPTION_KEY_EXPORTS, name)) { assert.match(rhs, /^confirmedReceptionKeyCallable\(/); continue; }
     if (name === "createConfirmedEvent") { assert.match(rhs, /^confirmedCallable\("systemAdmin", /); continue; }
     assert.match(rhs, EVENT_CALLABLE, `${name}はイベント単位の認可`);
   }
@@ -361,10 +378,12 @@ const FIXED_PUBLIC_FIVE = ["getConfirmedParticipantPass", "registerWalkIn", "get
 // Phase 4: 招待リンクを開いた本人向けの1本を追加した(合計6本)。
 const FIXED_PUBLIC = [...FIXED_PUBLIC_FIVE, ...PUBLIC_INVITATION_EXPORTS];
 
-test("Phase 10D/4: ログイン不要のcallableは意図した6本だけ(従来の5本+招待リンクの1本)", () => {
+test("Phase 10D/4: ログイン不要のcallableは意図した6本だけ(従来の5本+招待リンクの1本)+受付キー必須の3本", () => {
   const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs)).map((e) => e.name);
   assert.deepEqual(publicOnes.sort(), [...FIXED_PUBLIC].sort());
-  assert.deepEqual(exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !/^onSchedule\(/.test(e.rhs)).map((e) => e.name).sort(), [...FIXED_PUBLIC].sort());
+  // ログイン不要の残りは、受付スタッフ用QRの受付キーが必須の3本だけ(受付キーなしでは呼べない)
+  assert.deepEqual(exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !/^onSchedule\(/.test(e.rhs)).map((e) => e.name).sort(),
+    [...FIXED_PUBLIC, ...Object.keys(RECEPTION_KEY_EXPORTS)].sort());
 });
 
 test("Phase 4: 招待リンクの公開1本は、接続元IP・招待token単位のrate limitとrate limit用Secretを必ず通り、閲覧用の上限", () => {
@@ -470,4 +489,21 @@ test("Phase 2: 任命APIはassignmentDocIdでIDを作り、Authユーザーを�
   assert.deepEqual([...indexCode.matchAll(/getAuth\(\)\.createUser\(([^)]*)\)/g)].map((m) => m[1]), [], "Auth登録はクライアントだけ");
   assert.doesNotMatch(indexCode, /password\s*:/i, "パスワードを設定しない");
   assert.match(index, /await getAuth\(\)\.getUserByEmail\(email\)/, "既存のAuthユーザーをメールアドレスで検索するだけ");
+});
+
+test("受付スタッフ用QR: 受付キーで呼べるのは受付画面の表示・初回受付・キー確認の3本だけ。訂正・取消・管理系・legacyには使えない", () => {
+  const withKey = exportsInIndex.filter((e) => /confirmedReceptionKeyCallable\(/.test(e.rhs)).map((e) => e.name).sort();
+  assert.deepEqual(withKey, Object.keys(RECEPTION_KEY_EXPORTS).sort());
+  for (const handler of ["passApi.correct", "passApi.cancel", "importApi", "winnerSendApi", "winnerMailApi", "reminderApi", "assignmentApi", "invitationApi", "legacyApi", "eventCreateApi"]) {
+    assert.ok(!exportsInIndex.some((e) => /confirmedReceptionKeyCallable\(/.test(e.rhs) && e.rhs.includes(handler)), handler);
+  }
+  // キーの発行は、正式ログインした対象イベントのstaff以上だけ(受付キー自身では発行できない)
+  assert.equal(exportsInIndex.find((e) => e.name === "issueReceptionStaffKey").rhs,
+    'confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, receptionKeyApi.issue, {timeoutSeconds: 30});');
+  // 受付キーのguardはFirebase Auth(request.auth)を見ない・App Checkを必須にする
+  const auth = strip(fs.readFileSync(path.join(FUNCTIONS_DIR, "auth.js"), "utf8"));
+  const guard = auth.slice(auth.indexOf("function receptionKeyGuard("), auth.indexOf("function confirmedReceptionKeyCallable("));
+  assert.match(guard, /requireAppCheck\(request/);
+  assert.match(guard, /verifyReceptionKey\(/);
+  assert.doesNotMatch(guard, /request\.auth|requireAuthenticated|loadAccessRole|getEventAccess/);
 });
