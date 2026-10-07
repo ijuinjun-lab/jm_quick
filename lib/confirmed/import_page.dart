@@ -106,7 +106,11 @@ class ConfirmedImportRoute extends StatelessWidget {
 }
 
 /// 参加者CSVの取込画面。
-///   イベント → CSVファイル選択 → 自動解析 → プレビュー → 内容確認 → 「取込を確定」→ 完了
+///   イベント → CSVファイル選択 → 自動解析 → 検証 → プレビュー → 内容確認 → 「取込を確定」→ 完了
+/// 検証(validateConfirmedImport。何も書き込まない)で、エラー・警告・項目別の件数と問題の行を確認する。
+/// エラーが0件で、必要な確認(メール重複の許可・取込済みの内容を新しい取込回として取り込むこと)を管理者が済ませた
+/// 場合だけプレビューへ進める。CSV・列の対応が変わったら検証は無効になる(再検証が必要)。
+/// 検証とプレビューの行の判定はサーバーの同じ計画から作られ、プレビュー時に一致を確認する(食い違えば確定させない)。
 /// Phase 11B-4から、通常運用ではCSVの列を利用者に選ばせない。[ConfirmedImportProfile](import_profile.dart)が
 /// 今年度の正式フォーマット(header名)からmappingを自動的に組み立てる。CSVのheaderがそのフォーマットと
 /// 一致しない場合は、プレビュー(サーバーへの問い合わせ)を試みる前に、対応していない形式として拒否する。
@@ -149,6 +153,37 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   List<String> missingHeadersList = [];
   ImportMapping? mapping;
 
+  bool validating = false;
+  ImportValidation? validation;
+  String? validationError;
+
+  /// 検証したCSV(fileHash)と列の対応。プレビュー時にこれと異なれば再検証が必要。
+  String? validatedFingerprint;
+
+  /// 取込済みの内容を新しい取込回として取り込むことの、管理者の明示的な確認。
+  bool ackNewImport = false;
+
+  /// 検証画面での管理者の対処(原本のCSVは変えない。サーバーが最終的な値を作って検証し直す):
+  /// 修正 (行番号, 列) → 値 / 今回の取込から除外 行番号 → 理由。
+  final Map<(int, String), String> corrections = {};
+  final Map<int, String> exclusions = {};
+
+  /// 警告の許可: (行番号, 種類) → 許可したときの許可の鍵(検証が返した値)。種類は確認が必要な行(review)・
+  /// 既存参加者とのメール重複(existingDuplicate)・CSV内のメール重複(csvDuplicate)。
+  /// 行を修正したら、その行の許可はすべて解除する。再検証で鍵が変わった許可(重複の相手が変わった等)も解除する。
+  /// 行番号が同じでも、古い許可は流用しない(サーバーも鍵で照合する)。不参加の残存人数は参考情報で、許可は無い。
+  final Map<(int, String), String> approvals = {};
+  static const _review = 'review';
+  static const _existingDuplicate = 'existingDuplicate';
+  static const _csvDuplicate = 'csvDuplicate';
+
+  /// 検証結果の行(行番号 → 行)。
+  Map<int, ValidationRow> _rowIndex = {};
+
+  /// 修正の入力中の行と、その入力欄。
+  int? editingRow;
+  final Map<String, TextEditingController> _editControllers = {};
+
   bool previewing = false;
   bool committing = false;
   ImportRequest? previewedRequest;
@@ -160,13 +195,96 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   String? commitError;
   bool commitAmbiguous = false;
 
-  bool get busy => previewing || committing;
+  bool get busy => validating || previewing || committing;
   bool get _eventFixed => (widget.eventId ?? '').isNotEmpty;
 
   @override
   void initState() {
     super.initState();
     if (_eventFixed) _loadEvent();
+  }
+
+  @override
+  void dispose() {
+    for (final c in _editControllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _clearDecisions() {
+    corrections.clear();
+    exclusions.clear();
+    approvals.clear();
+    editingRow = null;
+  }
+
+  // ---- 警告の許可 ------------------------------------------------------------------------------------
+  /// その行に、その種類の許可が必要な警告があるか(今回の取込から除外した行には無い)。
+  bool _needsApproval(int n, String kind) {
+    final v = validation;
+    final r = _rowIndex[n];
+    if (v == null || r == null || r.excluded) return false;
+    return switch (kind) {
+      _review => v.pendingReviewRows.contains(n),
+      _existingDuplicate => v.existingDuplicateRowList.contains(n),
+      _ => v.csvDuplicateRowList.contains(n),
+    };
+  }
+
+  String _approvalKeyOf(int n, String kind) => _rowIndex[n]?.approvalKeys[kind] ?? '';
+
+  /// 現在の検証結果の警告を許可しているか(許可したときの鍵が、現在の鍵と同じ)。
+  bool _isAllowed(int n, String kind) {
+    final key = approvals[(n, kind)];
+    return key != null && _needsApproval(n, kind) && key == _approvalKeyOf(n, kind);
+  }
+
+  bool _allAllowed(List<int> rows, String kind) => rows.isNotEmpty && rows.every((n) => _isAllowed(n, kind));
+
+  void _setAllowed(Iterable<int> rows, String kind, bool value) {
+    for (final n in rows) {
+      if (value) {
+        approvals[(n, kind)] = _approvalKeyOf(n, kind);
+      } else {
+        approvals.remove((n, kind));
+      }
+    }
+    _invalidatePreview();
+  }
+
+  /// 行を修正した(または修正を取り消した)ら、その行の許可はすべて解除する(再検証の結果で改めて許可させる)。
+  void _revokeApprovals(int n) => approvals.removeWhere((k, _) => k.$1 == n);
+
+  bool get ackExistingDuplicates => _allAllowed(validation?.existingDuplicateRowList ?? const [], _existingDuplicate);
+  bool get ackCsvDuplicates => _allAllowed(validation?.csvDuplicateRowList ?? const [], _csvDuplicate);
+
+  /// commitへ送る許可の鍵(現在の検証結果で許可している警告の鍵だけ)。
+  List<String> get _approvalKeysToSend => {
+    for (final e in approvals.entries)
+      if (e.value.isNotEmpty && _isAllowed(e.key.$1, e.key.$2)) e.value,
+  }.toList()..sort();
+
+  ImportDecisions get _decisions => ImportDecisions(
+    corrections: Map.of(corrections),
+    exclusions: Map.of(exclusions),
+  );
+
+  // 取込profile(=列の対応)が変わったら、mappingを作り直し、検証・プレビューは無効にする(再検証が必要)。
+  @override
+  void didUpdateWidget(covariant ConfirmedImportPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.profile, widget.profile)) return;
+    final parsed = table;
+    if (parsed == null || event == null) return;
+    setState(() {
+      formatError = null;
+      missingHeadersList = [];
+      mapping = null;
+      _invalidateValidation();
+      _clearDecisions();
+      _applyProfile(parsed);
+    });
   }
 
   // ---- イベント ----------------------------------------------------------------------------------
@@ -212,10 +330,21 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     formatError = null;
     missingHeadersList = [];
     mapping = null;
-    _invalidatePreview();
+    _invalidateValidation();
+    _clearDecisions();
     result = null;
     commitError = null;
     commitAmbiguous = false;
+  }
+
+  // ファイル・列の対応が変わったら、検証(と確認)・プレビューは無効。再検証が必要
+  void _invalidateValidation() {
+    validation = null;
+    validationError = null;
+    validatedFingerprint = null;
+    _rowIndex = {};
+    ackNewImport = false;
+    _invalidatePreview();
   }
 
   // ファイルが変わったら、以前のプレビュー(と承認)は無効。再プレビューが必要
@@ -242,45 +371,162 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       try {
         final parsed = parseCsvBytes(picked!.bytes);
         table = parsed;
-        // 通常運用ではCSVの列を利用者に選ばせない。CSVのheaderが今年度の正式フォーマットと一致しない場合は、
-        // プレビュー(サーバーへの問い合わせ)を試みる前に、ここで明確に拒否する。
-        final missing = widget.profile.missingHeaders(parsed.headers);
-        if (missing.isNotEmpty) {
-          formatError = 'このCSVは対応している参加者リストの形式ではありません。';
-          missingHeadersList = missing;
-          return;
-        }
-        mapping = buildMappingFromProfile(widget.profile, event!.programs);
+        _applyProfile(parsed);
       } on CsvParseException catch (e) {
         fileError = e.message;
       }
     });
   }
 
-  // ---- プレビュー ---------------------------------------------------------------------------------
-  Future<void> _runPreview() async {
+  // 通常運用ではCSVの列を利用者に選ばせない。CSVのheaderが今年度の正式フォーマットと一致しない場合は、
+  // 検証(サーバーへの問い合わせ)を試みる前に、ここで明確に拒否する。
+  void _applyProfile(CsvTable parsed) {
+    final missing = widget.profile.missingHeaders(parsed.headers);
+    if (missing.isNotEmpty) {
+      formatError = 'このCSVは対応している参加者リストの形式ではありません。';
+      missingHeadersList = missing;
+      return;
+    }
+    mapping = buildMappingFromProfile(widget.profile, event!.programs);
+  }
+
+  ImportRequest _buildRequest({int? newImportSequence}) => buildImportRequest(
+    eventId: event!.eventId,
+    fileName: file!.name,
+    fileBytes: file!.bytes,
+    table: table!,
+    mapping: mapping!,
+    newImportSequence: newImportSequence,
+    decisions: _decisions,
+  );
+
+  /// 検証した内容(CSV・列の対応・修正・除外)。プレビュー時にこれと異なれば再検証が必要。
+  static String _fingerprintOf(ImportRequest request) =>
+      '${request.json['fileHash']}\n${canonicalJson(request.json['mapping'])}\n'
+      '${canonicalJson({'c': request.json['corrections'], 'e': request.json['excludedRows']})}';
+
+  // ---- 検証 ---------------------------------------------------------------------------------------
+  /// 検証(修正・除外を含めた最終的な内容で、サーバーが判定する)。
+  /// [keepConfirmations]: 管理者の対処(修正・除外)による再検証。次の取込回が変わっていなければ、許可の鍵が
+  /// 変わっていない許可だけを引き継ぐ(修正した行の許可は修正の時点で解除済み。鍵が変わった許可も解除して、改めて許可させる)。
+  Future<void> _runValidate({bool keepConfirmations = false}) async {
     if (busy || table == null || mapping == null || event == null) return;
     // profileから自動生成したmappingが不正になることは無いはずだが、念のため送信前に確認する(内部エラー)。
-    final issues = mapping!.validate();
-    if (issues.isNotEmpty) {
+    if (mapping!.validate().isNotEmpty) {
       setState(
-        () => previewError = '内部エラー: 自動生成した列の対応を確認できませんでした。管理者へご連絡ください。',
+        () => validationError = '内部エラー: 自動生成した列の対応を確認できませんでした。管理者へご連絡ください。',
       );
       return;
     }
     final ImportRequest request;
     try {
-      request = buildImportRequest(
-        eventId: event!.eventId,
-        fileName: file!.name,
-        fileBytes: file!.bytes,
-        table: table!,
-        mapping: mapping!,
-      );
+      request = _buildRequest();
+    } on CsvParseException catch (e) {
+      setState(() => validationError = e.message);
+      return;
+    }
+    final previous = keepConfirmations ? validation : null;
+    final keptNewImport = ackNewImport;
+    setState(() {
+      validating = true;
+      _invalidateValidation();
+      result = null;
+      commitError = null;
+    });
+    try {
+      final loaded = await widget.service.validate(request);
+      if (!mounted) return;
+      setState(() {
+        validation = loaded;
+        validatedFingerprint = _fingerprintOf(request);
+        _rowIndex = {for (final r in loaded.rows) r.sourceRowNumber: r};
+        final p = previous;
+        final keep = p != null && p.nextImportSequence == loaded.nextImportSequence;
+        ackNewImport = keep && keptNewImport && loaded.alreadyImported;
+        if (keep) {
+          approvals.removeWhere((k, key) => !_isAllowed(k.$1, k.$2));
+        } else {
+          approvals.clear();
+        }
+      });
+    } on ImportException catch (e) {
+      if (mounted) setState(() => validationError = e.message);
+    } catch (_) {
+      if (mounted) setState(() => validationError = '検証できませんでした。');
+    } finally {
+      if (mounted) setState(() => validating = false);
+    }
+  }
+
+  /// 修正・除外を変えたら、最終的な内容でサーバーが検証し直す(修正しただけで正常扱いにはしない)。
+  Future<void> _changeDecisions(void Function() change) async {
+    if (busy) return;
+    setState(() {
+      change();
+      editingRow = null;
+    });
+    await _runValidate(keepConfirmations: true);
+  }
+
+  Future<void> _exclude(Iterable<int> rows, String reason) => _changeDecisions(() {
+    for (final n in rows) {
+      exclusions[n] = reason;
+    }
+  });
+
+  /// 未解決の問題(プレビューへ進む前に、修正・除外・許可のいずれかが必要なもの)。
+  ({int errors, int review, int warnings}) get _unresolved {
+    final v = validation;
+    if (v == null) return (errors: 0, review: 0, warnings: 0);
+    // 参考情報(不参加の残存人数など)は数えない(許可は要らない)。
+    final warnings =
+        v.existingDuplicateRowList.where((n) => !_isAllowed(n, _existingDuplicate)).length +
+        v.csvDuplicateRowList.where((n) => !_isAllowed(n, _csvDuplicate)).length;
+    return (
+      errors: v.pendingErrorRows.isNotEmpty ? v.pendingErrorRows.length : v.errorCount,
+      review: v.pendingReviewRows.where((n) => !_isAllowed(n, _review)).length,
+      warnings: warnings,
+    );
+  }
+
+  /// プレビューへ進める条件: 最新の対処で検証済み・未解決の問題0件・取込済みの内容なら新しい取込回の確認済み。
+  bool get _validationPassed {
+    final v = validation;
+    if (v == null || validating || validatedFingerprint == null) return false;
+    final u = _unresolved;
+    if (u.errors > 0 || u.review > 0 || u.warnings > 0) return false;
+    if (v.alreadyImported && !ackNewImport) return false;
+    return true;
+  }
+
+  /// 新しい取込回として取り込む場合だけ、batchIdへ含める取込回の番号(それ以外は従来どおりのbatchId)。
+  int? get _newImportSequence {
+    final v = validation;
+    return v != null && v.alreadyImported && ackNewImport
+        ? v.nextImportSequence
+        : null;
+  }
+
+  // ---- プレビュー ---------------------------------------------------------------------------------
+  Future<void> _runPreview() async {
+    if (busy || table == null || mapping == null || event == null) return;
+    if (!_validationPassed) return;
+    final ImportRequest request;
+    try {
+      request = _buildRequest(newImportSequence: _newImportSequence);
     } on CsvParseException catch (e) {
       setState(() => previewError = e.message);
       return;
     }
+    // 検証した後にCSV・列の対応が変わっていれば、検証結果は使えない(再検証が必要)。
+    if (_fingerprintOf(request) != validatedFingerprint) {
+      setState(() {
+        _invalidateValidation();
+        validationError = 'CSVまたは列の対応が検証時から変わりました。もう一度検証してください。';
+      });
+      return;
+    }
+    final checked = validation!;
     setState(() {
       previewing = true;
       _invalidatePreview();
@@ -290,10 +536,21 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     try {
       final loaded = await widget.service.preview(request);
       if (!mounted) return;
+      if (!checked.matchesPreview(loaded)) {
+        setState(
+          () => previewError =
+              '検証結果とプレビューの判定が一致しませんでした。取り込まずに、もう一度検証からやり直してください。',
+        );
+        return;
+      }
       setState(() {
         // このプレビューに対応するリクエストをそのまま保持し、確定でもこの内容だけを送る
         previewedRequest = request;
         preview = loaded;
+        // 確認が必要な行の許可は検証画面で行う(プレビューでは変えない)
+        approved
+          ..clear()
+          ..addAll(checked.pendingReviewRows.where((n) => _isAllowed(n, _review)));
       });
     } on ImportException catch (e) {
       if (mounted) setState(() => previewError = e.message);
@@ -313,23 +570,17 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     bool Function(PreviewRow r) include,
   ) {
     final p = preview;
-    final t = table;
-    if (p == null || t == null || g.countColumn == null) {
+    if (p == null || table == null || g.countColumn == null) {
       return (participants: 0, headcount: 0);
     }
-    final countIndex = t.headers.indexOf(g.countColumn!);
     var participants = 0;
     var headcount = 0;
     for (final r in p.rows) {
-      if (!include(r)) continue;
+      // 今回の取込から除外した行は数えない。人数は修正後の最終的な値で数える。
+      if (r.excluded || !include(r)) continue;
       if (!r.programIds.contains(g.programId)) continue;
       participants += 1;
-      if (countIndex < 0) continue;
-      final position = r.sourceRowNumber - 2;
-      if (position < 0 || position >= t.records.length) continue;
-      final record = t.records[position];
-      if (countIndex >= record.length) continue;
-      headcount += displayCountOf(record[countIndex]) ?? 0;
+      headcount += displayCountOf(_cellAt(r.sourceRowNumber, g.countColumn)) ?? 0;
     }
     return (participants: participants, headcount: headcount);
   }
@@ -352,8 +603,10 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       );
 
   // ---- 確定 --------------------------------------------------------------------------------------
+  /// 取込予定(今回の取込から除外していない行。未解決の問題が無いときだけプレビューできるため、すべて取り込まれる)。
   int get _importCount =>
-      (preview?.readyCount ?? 0) + approved.length; // 取込対象(取込対象の行+管理者が承認した確認の行)
+      preview?.decisionSummary?.importRows ??
+      (preview?.readyCount ?? 0) + approved.length;
 
   bool get _canCommit =>
       !busy &&
@@ -380,12 +633,18 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
               _confirmRow('イベント名', event!.eventName),
               _confirmRow('CSVファイル名', request.fileName),
               _confirmRow('CSV総行数', '${p.totalRecords}行'),
-              _confirmRow('取込対象件数', '$_importCount件'),
-              _confirmRow('エラー件数', '${p.errorCount}件(取り込まれません)'),
-              _confirmRow(
-                '未承認の確認行',
-                '${p.reviewCount - approved.length}件(取り込まれません)',
-              ),
+              _confirmRow('取込予定', '$_importCount件'),
+              _confirmRow('修正した行', '${corrections.keys.map((k) => k.$1).toSet().length}件'),
+              _confirmRow('今回の取込から除外した行', '${exclusions.length}件(取り込まれません)'),
+              for (final (i, line) in _allowedWarningLines.indexed)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    line,
+                    key: ValueKey('confirm-allowed-$i'),
+                    style: const TextStyle(color: Color(0xffb54708)),
+                  ),
+                ),
               const SizedBox(height: 6),
               const Text(
                 'program別予定(この内容で確定する分)',
@@ -396,6 +655,16 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                   g.name,
                   '${_committingTotals(g).headcount}人 / ${_committingTotals(g).participants} participant',
                 ),
+              if (validation?.hasEmailDuplicates == true) ...[
+                const SizedBox(height: 10),
+                const Text(
+                  '同じメールアドレスの参加者が複数、有効な参加者になります(別参加者として扱われます)。',
+                  key: Key('confirm-duplicate-caution'),
+                  style: TextStyle(color: Color(0xffb54708)),
+                ),
+              ],
+              if (_newImportSequence != null)
+                _confirmRow('取込回', '新しい取込回(第$_newImportSequence回)として取り込みます'),
               const SizedBox(height: 10),
               const Text(
                 '取り込んでも、メールは送信されません。',
@@ -428,12 +697,23 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       final done = await widget.service.commit(
         request,
         approvedReviewRows: approved.toList(),
+        validation: validation,
+        acknowledgeExistingEmailDuplicates: ackExistingDuplicates,
+        acknowledgeCsvEmailDuplicates: ackCsvDuplicates,
+        approvalKeys: _approvalKeysToSend,
       );
       if (!mounted) return;
       setState(() => result = done);
     } on ImportException catch (e) {
       if (mounted) {
         setState(() {
+          if (_revalidationCodes.contains(e.code)) {
+            // サーバーが最新の状態で確認した結果、検証時から状態が変わっていた(別の取込の確定など)。
+            // 勝手に次の回として取り込まず、検証からやり直させる(以前の確認はすべて無効)。
+            _invalidateValidation();
+            validationError = e.message;
+            return;
+          }
           commitError = e.message;
           commitAmbiguous = e.ambiguous;
         });
@@ -443,6 +723,30 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     } finally {
       if (mounted) setState(() => committing = false);
     }
+  }
+
+  /// サーバーが「検証からやり直す必要がある」と返した理由。
+  static const _revalidationCodes = {
+    'import-state-changed',
+    'validation-required',
+    'import-has-errors',
+    'existing-email-duplicates-unacknowledged',
+    'csv-email-duplicates-unacknowledged',
+    'unresolved-review-rows',
+    'approvals-outdated',
+  };
+
+  /// 管理者が許可した警告(確認ダイアログに示す)。
+  List<String> get _allowedWarningLines {
+    final v = validation;
+    if (v == null) return const [];
+    return [
+      if (v.existingDuplicateRowList.isNotEmpty && ackExistingDuplicates)
+        '既存参加者とのメール重複${v.existingDuplicateRowList.length}件を許可して、別参加者として取り込みます',
+      if (v.csvDuplicateRowList.isNotEmpty && ackCsvDuplicates)
+        'CSV内のメール重複${v.csvDuplicateRowList.length}件を許可して、別参加者として取り込みます',
+      if (approved.isNotEmpty) '確認が必要な行${approved.length}件を許可して取り込みます',
+    ];
   }
 
   // ---- 表示 --------------------------------------------------------------------------------------
@@ -548,13 +852,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     if (position < 0 || position >= t.records.length) {
       return r.issueCodes.map(importIssueLabel).toList();
     }
-    final record = t.records[position];
-    String cellOf(String? column) {
-      if (column == null) return '';
-      final i = t.headers.indexOf(column);
-      if (i < 0 || i >= record.length) return '';
-      return record[i].trim();
-    }
+    // 修正があれば修正後の最終的な値で示す
+    String cellOf(String? column) => _cellAt(r.sourceRowNumber, column);
 
     final messages = <String>[];
     for (final g in m.programs) {
@@ -584,16 +883,38 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
 
   Widget _previewSection() {
     final p = preview!;
+    // プレビューは「最終的に取り込まれる内容」(修正後の値・今回の取込から除外した行を除く)。
     final review = p.rows
-        .where((r) => r.classification == RowClass.review)
+        .where((r) => !r.excluded && r.classification == RowClass.review)
         .toList();
     final errors = p.rows
-        .where((r) => r.classification == RowClass.error)
+        .where((r) => !r.excluded && r.classification == RowClass.error)
         .toList();
     final ready = p.rows
-        .where((r) => r.classification == RowClass.ready)
+        .where((r) => !r.excluded && r.classification == RowClass.ready)
         .toList();
+    final summary = p.decisionSummary;
     return _section('プレビュー結果(まだ取り込まれていません)', [
+      if (summary != null)
+        Container(
+          key: const Key('preview-decision-summary'),
+          padding: const EdgeInsets.all(12),
+          color: const Color(0xffeef3f8),
+          child: Text(
+            '原本CSV: ${summary.originalRows}件　修正: ${summary.correctedRows}件　'
+            '除外: ${summary.excludedRows}件　取込予定: ${summary.importRows}件',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          key: const Key('back-to-validation'),
+          onPressed: busy ? null : () => setState(_invalidatePreview),
+          icon: const Icon(Icons.arrow_back),
+          label: const Text('検証画面へ戻る(修正・除外・許可を変える)'),
+        ),
+      ),
       if (p.existingStatus == 'committed')
         _notice(
           'この内容(ファイル)は、既に取り込み済みです(第${p.existingSequence ?? '?'}回)。もう一度取り込んでも、参加者は増えません。',
@@ -618,9 +939,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         ),
       InfoRow('CSV総行数', '${p.totalRecords}行'),
       InfoRow('空の行', '${p.blankRecordCount}行'),
-      InfoRow('取込対象', '${p.readyCount}件'),
-      InfoRow('確認が必要', '${p.reviewCount}件'),
-      InfoRow('エラー', '${p.errorCount}件(取り込まれません)'),
+      InfoRow('取込対象', '${ready.length}件'),
+      InfoRow('確認が必要(検証画面で許可済み)', '${review.length}件'),
+      InfoRow('エラー', '${errors.length}件(取り込まれません)'),
       const SizedBox(height: 6),
       if (p.participationTypes.isNotEmpty) ...[
         const Text('参加タイプ別（取込対象の申込者件数・同伴者を除く）', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -670,40 +991,21 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (review.isNotEmpty) ...[
         const Divider(),
         Text(
-          '確認が必要な行(${review.length}件)— 取り込む行を承認してください',
+          '確認が必要な行(${review.length}件)— 検証画面で許可した行だけが取り込まれます',
           style: const TextStyle(fontWeight: FontWeight.bold),
         ),
-        Wrap(
-          spacing: 8,
-          children: [
-            TextButton(
-              key: const Key('approve-all'),
-              onPressed: busy
-                  ? null
-                  : () => setState(
-                      () => approved
-                        ..clear()
-                        ..addAll(review.map((r) => r.sourceRowNumber)),
-                    ),
-              child: const Text('すべて承認'),
-            ),
-            TextButton(
-              onPressed: busy ? null : () => setState(approved.clear),
-              child: const Text('すべて解除'),
-            ),
-          ],
-        ),
         for (final r in review)
-          CheckboxListTile(
+          Padding(
             key: ValueKey('review-${r.sourceRowNumber}'),
-            contentPadding: EdgeInsets.zero,
-            controlAffinity: ListTileControlAffinity.leading,
-            title: Text('${r.sourceRowNumber}行目を承認して取り込む'),
-            subtitle: Column(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (p.participationTypes.isNotEmpty)
-                  const Text('参加タイプ: 未確定'),
+                Text(
+                  '${r.sourceRowNumber}行目: ${approved.contains(r.sourceRowNumber) ? '許可済み' : '未許可(取り込まれません)'}',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                if (p.participationTypes.isNotEmpty) const Text('参加タイプ: 未確定'),
                 for (final (i, msg) in _reviewMessages(r).indexed)
                   Text(
                     msg,
@@ -711,14 +1013,6 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                   ),
               ],
             ),
-            value: approved.contains(r.sourceRowNumber),
-            onChanged: busy
-                ? null
-                : (v) => setState(
-                    () => v == true
-                        ? approved.add(r.sourceRowNumber)
-                        : approved.remove(r.sourceRowNumber),
-                  ),
           ),
       ],
       if (errors.isNotEmpty) ...[
@@ -757,7 +1051,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       ],
       const SizedBox(height: 12),
       Text(
-        '取り込まれる件数: $_importCount件(取込対象+承認した確認の行)',
+        '取り込まれる件数: $_importCount件(取込対象+許可した確認の行)',
         style: const TextStyle(fontWeight: FontWeight.bold),
       ),
       const SizedBox(height: 8),
@@ -779,6 +1073,469 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           color: const Color(0xfffff1cf),
         ),
     ]);
+  }
+
+  /// 手元のCSVの、指定した行・列の原本の値(前後の空白を除く)。
+  String _originalCellAt(int sourceRowNumber, String? column) {
+    final t = table;
+    if (t == null || column == null) return '';
+    final position = sourceRowNumber - 2;
+    final index = t.headers.indexOf(column);
+    if (position < 0 || position >= t.records.length || index < 0) return '';
+    final record = t.records[position];
+    return index < record.length ? record[index].trim() : '';
+  }
+
+  /// 最終的な値(管理者の修正があれば修正後の値、無ければ原本の値)。表示・集計はこの値で行う。
+  /// 検証の応答は氏名・メールを含まないため、表示は手元のCSVと修正から作る。
+  String _cellAt(int sourceRowNumber, String? column) {
+    if (column == null) return '';
+    final corrected = corrections[(sourceRowNumber, column)];
+    return corrected != null ? corrected.trim() : _originalCellAt(sourceRowNumber, column);
+  }
+
+  /// 検証の問題1件の、利用者向けの説明(内部コード・programIdは出さない)。
+  String _findingMessage(ValidationRow row, ValidationFinding f) {
+    final program = f.programId == null ? null : _programName(f.programId!);
+    String countText() {
+      final g = mapping?.programs.where((p) => p.programId == f.programId).firstOrNull;
+      final raw = _cellAt(row.sourceRowNumber, g?.countColumn);
+      final count = displayCountOf(raw);
+      return count != null ? '$count' : '「$raw」';
+    }
+
+    switch (f.code) {
+      case 'email-duplicate-in-csv':
+        return row.duplicateRows.isEmpty
+            ? 'CSV内に同じメールアドレスの行があります。'
+            : 'CSV内の${row.duplicateRows.join('、')}行目と同じメールアドレスです。';
+      case 'email-duplicate-existing':
+        return 'このイベントの既存の有効な参加者と同じメールアドレスです。';
+      case 'not-attending-count-ignored':
+        return '$program：不参加ですが人数欄に${countText()}が残っています。人数は無視されます。';
+      case 'not-attending-count-present':
+        return '$program：不参加ですが人数欄に${countText()}が残っています(確認が必要)。';
+    }
+    final label = importIssueLabel(f.code);
+    return program == null ? label : '$program：$label';
+  }
+
+  String _typeLabel(String? value) {
+    final v = validation;
+    if (v == null || v.participationTypes.isEmpty) return '';
+    final label = v.participationTypes
+        .where((t) => t['value'] == value)
+        .firstOrNull?['label'];
+    return '参加タイプ: ${label ?? '判定できません'}';
+  }
+
+  /// 問題の種類から、検証画面で修正できる列(検証で問題になった入力値だけ。汎用のCSV編集はしない)。
+  List<String> _editableColumns(ValidationRow r) {
+    final m = mapping!;
+    final columns = <String>[];
+    void add(String? c) {
+      if (c != null && !columns.contains(c)) columns.add(c);
+    }
+
+    ProgramMapping? programOf(String? id) =>
+        m.programs.where((p) => p.programId == id).firstOrNull;
+    for (final f in r.findings) {
+      switch (f.code) {
+        case 'email-missing' || 'email-invalid' || 'email-duplicate-existing' || 'email-duplicate-in-csv':
+          add(m.emailColumn);
+        case 'name-missing':
+          add(m.nameColumn);
+        case 'count-invalid' || 'attending-count-missing' || 'not-attending-count-present' || 'not-attending-count-ignored':
+          add(programOf(f.programId)?.countColumn);
+        case 'participation-empty' || 'participation-unknown':
+          add(programOf(f.programId)?.participationColumn);
+        case 'slot-missing' || 'slot-unparsed' || 'slot-zero-length' || 'slot-reversed' || 'slot-too-long':
+          add(programOf(f.programId)?.slotColumn);
+        case 'no-program' || 'participation-type-undetermined':
+          for (final p in m.programs) {
+            add(p.participationColumn);
+            add(p.countColumn);
+          }
+      }
+    }
+    for (final key in corrections.keys) {
+      if (key.$1 == r.sourceRowNumber) add(key.$2);
+    }
+    return columns;
+  }
+
+  void _startEdit(ValidationRow r) {
+    setState(() {
+      editingRow = r.sourceRowNumber;
+      for (final c in _editControllers.values) {
+        c.dispose();
+      }
+      _editControllers
+        ..clear()
+        ..addAll({
+          for (final column in _editableColumns(r))
+            column: TextEditingController(text: _cellAt(r.sourceRowNumber, column)),
+        });
+    });
+  }
+
+  /// 入力した値を修正として登録し、サーバーで検証し直す(原本と同じ値に戻した列は修正を取り消す)。
+  Future<void> _applyEdit(int row) => _changeDecisions(() {
+    _revokeApprovals(row);
+    for (final entry in _editControllers.entries) {
+      final value = entry.value.text;
+      if (value == _originalCellAt(row, entry.key) || value.trim() == _originalCellAt(row, entry.key)) {
+        corrections.remove((row, entry.key));
+      } else {
+        corrections[(row, entry.key)] = value;
+      }
+    }
+  });
+
+  static const _shownProblemRows = 300;
+  static const _excludeReason = '検証画面で管理者が除外';
+
+  /// 種類ごとの一括処理(許可・今回の取込から除外)。
+  Widget _bulkPanel({
+    required Key key,
+    required String text,
+    required List<int> rows,
+    Widget? allow,
+    required String excludeKey,
+    required String excludeLabel,
+  }) => Container(
+    key: key,
+    margin: const EdgeInsets.only(top: 8),
+    padding: const EdgeInsets.all(10),
+    color: const Color(0xfffff1cf),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SelectableText(text),
+        ?allow,
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: Key(excludeKey),
+            onPressed: busy || rows.isEmpty ? null : () => _exclude(rows, '一括除外: $excludeLabel'),
+            child: Text('該当行(${rows.length}件)をすべて今回の取込から除外'),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _validationSection() {
+    final v = validation!;
+    final m = mapping!;
+    // 問題のある行・修正した行・除外した行を表示する(正常で対処の無い行は操作不要)。
+    final shown = v.rows
+        .where((r) => r.result != ValidationResult.ok || r.excluded || r.corrected ||
+            corrections.keys.any((k) => k.$1 == r.sourceRowNumber))
+        .toList()
+      ..sort((a, b) => a.sourceRowNumber - b.sourceRowNumber);
+    // 項目別の件数は、エラー → 警告の順に表示する(0件の項目は出さない)。
+    final severityOf = <String, ValidationResult>{
+      for (final r in v.rows)
+        for (final f in r.findings) f.code: f.severity,
+    };
+    final findingEntries = v.findingCounts.entries.toList()
+      ..sort((a, b) {
+        final sa = severityOf[a.key] == ValidationResult.error ? 0 : 1;
+        final sb = severityOf[b.key] == ValidationResult.error ? 0 : 1;
+        return sa != sb ? sa - sb : b.value - a.value;
+      });
+    final u = _unresolved;
+    const warnColor = Color(0xfffff1cf);
+    final pendingReview = v.pendingReviewRows;
+    return _section('検証結果(まだ取り込まれていません)', [
+      InfoRow('総行数', '${v.totalRows}件(CSV ${v.totalRecords}行・空の行${v.blankRecordCount}行を除く)', key: const Key('validation-total')),
+      InfoRow('正常', '${v.okCount}件', key: const Key('validation-ok')),
+      InfoRow('警告', '${v.warningCount}件', key: const Key('validation-warning')),
+      InfoRow('エラー', '${v.errorCount}件', key: const Key('validation-error-count')),
+      if (v.infoRowList.isNotEmpty)
+        InfoRow('参考情報', '${v.infoRowList.length}件(取込には影響しません。許可は不要です)', key: const Key('validation-info')),
+      if (v.correctedRowCount > 0 || v.excludedRowCount > 0) ...[
+        InfoRow('修正した行', '${v.correctedRowCount}件', key: const Key('validation-corrected')),
+        InfoRow('今回の取込から除外した行', '${v.excludedRowCount}件', key: const Key('validation-excluded')),
+        InfoRow('取込予定', '${v.importRowCount}件', key: const Key('validation-import')),
+      ],
+      Container(
+        key: const Key('unresolved-summary'),
+        margin: const EdgeInsets.only(top: 6),
+        padding: const EdgeInsets.all(10),
+        color: u.errors + u.review + u.warnings == 0 ? const Color(0xffe7f5ec) : const Color(0xffffe8e8),
+        child: Text(
+          u.errors + u.review + u.warnings == 0
+              ? '未解決の問題はありません。'
+              : '未解決: エラー${u.errors}件・確認待ち${u.review}件・未許可の警告${u.warnings}件(修正・今回の取込から除外・許可のいずれかで対処してください)',
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
+      if (findingEntries.isNotEmpty) ...[
+        const SizedBox(height: 6),
+        const Text('項目別', style: TextStyle(fontWeight: FontWeight.bold)),
+        for (final e in findingEntries)
+          Text(
+            '・${severityOf[e.key] == ValidationResult.error ? 'エラー' : severityOf[e.key] == ValidationResult.info ? '参考' : '警告'} ${importIssueLabel(e.key)}: ${e.value}件',
+            key: ValueKey('finding-count-${e.key}'),
+          ),
+      ],
+      if (v.participationTypes.isNotEmpty) ...[
+        const SizedBox(height: 6),
+        const Text('参加タイプ別（取込対象の行・同伴者を除く）', style: TextStyle(fontWeight: FontWeight.bold)),
+        for (final type in v.participationTypes)
+          InfoRow('${type['label']}', '${type['count']}件'),
+        InfoRow('タイプ判定不能', '${v.findingCounts['participation-type-undetermined'] ?? 0}件'),
+      ],
+      if (v.importedBatches.isNotEmpty)
+        _notice(
+          '既に取り込まれている回: ${v.importedBatches.map((b) => '第${b.sequence}回${b.status == 'committed' ? '' : '(未完了)'}').join('、')}\n'
+          '次に新規取込すると: 第${v.nextImportSequence}回',
+          color: const Color(0xffeef3f8),
+          key: const Key('imported-batches'),
+        ),
+      if (v.existingStatus == 'committing' || v.existingStatus == 'failed')
+        _notice(
+          '前回の取込が完了していません(${v.existingStatus == 'failed' ? '失敗' : '処理中'})。同じ内容で取り込むと、続きから安全に完了できます(二重には作られません)。',
+          color: warnColor,
+          key: const Key('validation-existing-incomplete'),
+        ),
+      if (v.alreadyImported) ...[
+        _notice(
+          'このCSV(同じ内容・同じ列の対応)は、既に第${v.existingSequence ?? '?'}回として取り込まれています。'
+          'もう一度取り込む場合は、新しい取込回(第${v.nextImportSequence}回)として、別の参加者が作られます。'
+          '第${v.existingSequence ?? '?'}回の参加者・送信履歴は変更されません。',
+          color: warnColor,
+          key: const Key('already-imported'),
+        ),
+        CheckboxListTile(
+          key: const Key('ack-new-import'),
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
+          title: Text('第${v.nextImportSequence}回として新しく取り込みます。'),
+          value: ackNewImport,
+          onChanged: busy
+              ? null
+              : (value) => setState(() {
+                  ackNewImport = value == true;
+                  _invalidatePreview();
+                }),
+        ),
+      ] else if (v.sameFileSequences.isNotEmpty && v.existingStatus == null)
+        _notice(
+          '参考: 同じファイルが、既に別の回として取り込まれています(${v.sameFileSequences.map((n) => '第$n回').join('、')})。',
+          color: warnColor,
+        ),
+      if (u.errors > 0)
+        _bulkPanel(
+          key: const Key('validation-blocked'),
+          text: '未解決のエラーの行が${u.errors}件あります。各行で修正するか、今回の取込から除外してください(エラーは許可できません)。',
+          rows: v.pendingErrorRows,
+          excludeKey: 'exclude-all-errors',
+          excludeLabel: 'エラーの行',
+        ),
+      if (pendingReview.isNotEmpty)
+        _bulkPanel(
+          key: const Key('review-panel'),
+          text: '確認が必要な行: ${pendingReview.length}件(許可した行だけが取り込まれます)',
+          rows: pendingReview,
+          allow: Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: const Key('allow-all-review'),
+              onPressed: busy
+                  ? null
+                  : () => setState(() => _setAllowed(pendingReview, _review, true)),
+              child: Text('確認が必要な行${pendingReview.length}件をすべて許可'),
+            ),
+          ),
+          excludeKey: 'exclude-all-review',
+          excludeLabel: '確認が必要な行',
+        ),
+      if (v.hasEmailDuplicates)
+        _notice(
+          [
+            if (v.existingDuplicateRowList.isNotEmpty)
+              'このイベントの既存の有効な参加者(${v.existingActiveParticipantCount}件)とメールアドレスが重複する行: ${v.existingDuplicateRowList.length}件',
+            if (v.csvDuplicateRowList.isNotEmpty)
+              'CSV内でメールアドレスが重複する行: ${v.csvDuplicateRowList.length}件',
+            '取り込むと、同じメールアドレスの参加者が複数、有効(active)になります。'
+                'イベント全体への配信・前日リマインド・受付名簿等でも別参加者として扱われ、同じアドレスへ複数通届くことがあります。',
+          ].join('\n'),
+          color: warnColor,
+          key: const Key('duplicate-caution'),
+        ),
+      if (v.existingDuplicateRowList.isNotEmpty)
+        _bulkPanel(
+          key: const Key('existing-duplicates-panel'),
+          text: '既存参加者とのメール重複: ${v.existingDuplicateRowList.length}件',
+          rows: v.existingDuplicateRowList,
+          allow: CheckboxListTile(
+            key: const Key('ack-existing-duplicates'),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: Text('${v.existingDuplicateRowList.length}件すべて許可(既存参加者とは別の参加者として取り込みます)'),
+            value: ackExistingDuplicates,
+            onChanged: busy
+                ? null
+                : (value) => setState(() => _setAllowed(v.existingDuplicateRowList, _existingDuplicate, value == true)),
+          ),
+          excludeKey: 'exclude-all-existing-duplicates',
+          excludeLabel: '既存参加者とのメール重複',
+        ),
+      if (v.csvDuplicateRowList.isNotEmpty)
+        _bulkPanel(
+          key: const Key('csv-duplicates-panel'),
+          text: 'CSV内のメール重複: ${v.csvDuplicateRowList.length}件',
+          rows: v.csvDuplicateRowList,
+          allow: CheckboxListTile(
+            key: const Key('ack-csv-duplicates'),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: Text('${v.csvDuplicateRowList.length}件すべて許可(それぞれ別の参加者として取り込みます)'),
+            value: ackCsvDuplicates,
+            onChanged: busy
+                ? null
+                : (value) => setState(() => _setAllowed(v.csvDuplicateRowList, _csvDuplicate, value == true)),
+          ),
+          excludeKey: 'exclude-all-csv-duplicates',
+          excludeLabel: 'CSV内のメール重複',
+        ),
+      // 参考情報: 見せるだけ(参加扱いにはせず、人数は無視する)。許可は要らず、プレビュー・取込を妨げない。
+      if (v.ignoredCountRowList.isNotEmpty)
+        _notice(
+          '参考情報: 不参加のprogramに人数が残っている行: ${v.ignoredCountRowList.length}件'
+          '(${v.ignoredCountRowList.map((n) => '$n行目').join('、')})\n'
+          '参加扱いにはせず、人数は無視されます。許可は不要です(各行の内容は下の一覧で確認できます)。',
+          color: const Color(0xffeef3f8),
+          key: const Key('ignored-counts-panel'),
+        ),
+      if (shown.isNotEmpty) ...[
+        const Divider(),
+        Text(
+          '問題のある行・対処した行(${shown.length}件)',
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        for (final r in shown.take(_shownProblemRows)) _validationRow(v, m, r),
+        if (shown.length > _shownProblemRows)
+          Text('ほか${shown.length - _shownProblemRows}件(CSVを修正して再検証してください)'),
+      ],
+    ]);
+  }
+
+  Widget _validationRow(ImportValidation v, ImportMapping m, ValidationRow r) {
+    final n = r.sourceRowNumber;
+    final rowCorrections = corrections.entries.where((e) => e.key.$1 == n).toList();
+    final status = r.excluded
+        ? '今回の取込から除外(${exclusions[n] ?? ''})'
+        : r.classification == RowClass.review && _isAllowed(n, _review)
+        ? '${r.result.label}(許可済み)'
+        : r.result.label;
+    final color = r.excluded
+        ? const Color(0xffeceff1)
+        : r.result == ValidationResult.error
+        ? const Color(0xffffe8e8)
+        : r.result == ValidationResult.warning
+        ? const Color(0xfffff1cf)
+        : r.result == ValidationResult.info
+        ? const Color(0xffeef3f8)
+        : const Color(0xffe7f5ec);
+    final editable = _editableColumns(r);
+    return Container(
+      key: ValueKey('validation-row-$n'),
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      color: color,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$n行目　$status', style: const TextStyle(fontWeight: FontWeight.bold)),
+          SelectableText('${_cellAt(n, m.nameColumn)}　${_cellAt(n, m.emailColumn)}'),
+          if (v.participationTypes.isNotEmpty && !r.excluded) Text(_typeLabel(r.participationType)),
+          for (final (i, f) in r.findings.indexed)
+            Text(
+              '・${f.severity == ValidationResult.error ? '[エラー] ' : f.severity == ValidationResult.info ? '[参考] ' : ''}${_findingMessage(r, f)}',
+              key: ValueKey('validation-row-$n-finding-$i'),
+            ),
+          for (final e in rowCorrections)
+            Text(
+              '修正: ${e.key.$2}「${_originalCellAt(n, e.key.$2)}」→「${e.value}」',
+              key: ValueKey('correction-$n-${e.key.$2}'),
+              style: const TextStyle(color: Color(0xff175cd3)),
+            ),
+          if (editingRow == n) ...[
+            for (final column in _editControllers.keys)
+              TextField(
+                key: ValueKey('edit-$n-$column'),
+                controller: _editControllers[column],
+                decoration: InputDecoration(
+                  labelText: column,
+                  helperText: '原本: 「${_originalCellAt(n, column)}」',
+                ),
+              ),
+            Wrap(
+              spacing: 8,
+              children: [
+                FilledButton(
+                  key: ValueKey('apply-edit-$n'),
+                  onPressed: busy ? null : () => _applyEdit(n),
+                  child: const Text('修正して再検証'),
+                ),
+                TextButton(
+                  key: ValueKey('cancel-edit-$n'),
+                  onPressed: busy ? null : () => setState(() => editingRow = null),
+                  child: const Text('キャンセル'),
+                ),
+              ],
+            ),
+          ] else
+            Wrap(
+              spacing: 8,
+              children: [
+                if (r.excluded)
+                  TextButton(
+                    key: ValueKey('unexclude-$n'),
+                    onPressed: busy ? null : () => _changeDecisions(() => exclusions.remove(n)),
+                    child: const Text('除外を取り消す'),
+                  )
+                else ...[
+                  // 許可は警告(確認が必要な行)だけ。エラーは許可できない(修正か除外)。
+                  if (r.classification == RowClass.review)
+                    FilterChip(
+                      key: ValueKey('allow-$n'),
+                      label: const Text('許可'),
+                      selected: _isAllowed(n, _review),
+                      onSelected: busy ? null : (value) => setState(() => _setAllowed([n], _review, value)),
+                    ),
+                  if (editable.isNotEmpty)
+                    TextButton(
+                      key: ValueKey('edit-$n'),
+                      onPressed: busy ? null : () => _startEdit(r),
+                      child: const Text('修正'),
+                    ),
+                  TextButton(
+                    key: ValueKey('exclude-$n'),
+                    onPressed: busy ? null : () => _exclude([n], _excludeReason),
+                    child: const Text('今回の取込から除外'),
+                  ),
+                ],
+                if (rowCorrections.isNotEmpty)
+                  TextButton(
+                    key: ValueKey('uncorrect-$n'),
+                    onPressed: busy
+                        ? null
+                        : () => _changeDecisions(() {
+                            _revokeApprovals(n);
+                            corrections.removeWhere((k, _) => k.$1 == n);
+                          }),
+                    child: const Text('修正を取り消す'),
+                  ),
+              ],
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _resultSection() {
@@ -907,14 +1664,40 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           if (formatError != null) _formatErrorSection(),
           if (mapping != null && table != null) _autoAnalysisSection(),
           if (mapping != null && table != null)
+            _section('検証', [
+              const Text('取り込む前に、重複・人数・時間枠などを検証します。検証では何も取り込まれません。'),
+              const SizedBox(height: 8),
+              FilledButton(
+                key: const Key('run-validate'),
+                onPressed: busy ? null : _runValidate,
+                child: Text(
+                  validating
+                      ? '検証中…'
+                      : (validation == null ? '検証する' : 'もう一度検証する'),
+                ),
+              ),
+              if (validationError != null)
+                _notice(validationError!, key: const Key('validation-error')),
+            ]),
+          if (validation != null && mapping != null && table != null)
+            _validationSection(),
+          if (validation != null && mapping != null && table != null)
             _section('プレビュー', [
               const Text('プレビューでは何も取り込まれません。内容を確認してから取り込みます。'),
               const SizedBox(height: 8),
               FilledButton(
                 key: const Key('run-preview'),
-                onPressed: busy ? null : _runPreview,
+                onPressed: busy || !_validationPassed ? null : _runPreview,
                 child: Text(previewing ? 'プレビュー中…' : 'プレビューする'),
               ),
+              if (!_validationPassed)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                    '検証でエラーが0件になり、必要な確認を済ませると、プレビューへ進めます。',
+                    key: Key('preview-locked'),
+                  ),
+                ),
               if (previewError != null)
                 _notice(previewError!, key: const Key('preview-error')),
             ]),

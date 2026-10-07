@@ -8,6 +8,7 @@ const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeRecord, HEADERS} = require("../confirmed/test_support/synthetic");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createPassApi} = require("../confirmed/pass_api");
 const {createReceptionKeyApi, RECEPTION_KEY_TTL_MS, RECEPTION_STAFF_KEYS_COLLECTION} = require("../confirmed/reception_key_api");
 const {createReminderApi} = require("../confirmed/reminder_api");
@@ -66,7 +67,7 @@ describe("受付スタッフ用QR(受付キー。Emulator + 実Admin SDK)", {ski
     });
   }
   async function importInto(eventId, clientRequestId, rows) {
-    const api = createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+    const api = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
     const records = rows.map((i) => makeRecord(i, {"午後参加時間": "13:00-14:00", "午後参加人数": "3"}));
     await api.commit({identity: {uid: "u-admin"}, data: buildImportRequest({table: {headers: HEADERS, records}, eventId, clientRequestId})});
     return (await db.collection("participants").where("eventId", "==", eventId).get()).docs.map((d) => d.data()).sort((a, b) => a.importRow - b.importRow);

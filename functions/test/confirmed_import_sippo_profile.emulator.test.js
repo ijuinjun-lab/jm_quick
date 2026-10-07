@@ -8,6 +8,7 @@ const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createPassApi} = require("../confirmed/pass_api");
 const {confirmedCallable} = require("../auth");
 
@@ -77,7 +78,7 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
   let db;
 
   const makeApi = () => {
-    const api = createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+    const api = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
     const passApi = createPassApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
     const wrap = (level, handler) => {
       const callable = confirmedCallable(level, handler, {db, logger: silent});
@@ -180,7 +181,8 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
 
   test("Phase 11H: 上記fixtureをcommitしても、不参加と判定したprogramにはattendance・plannedCountが作られない"
     + "(参加意思の列だけが正本。人数は無視される)", async () => {
-    const result = await api.commit(asAdmin(request(sipposampleLikeTable())));
+    // 不参加のprogramに残っている人数(無視される)は、管理者が確認したうえで取り込む
+    const result = await api.commit(asAdmin(request(sipposampleLikeTable(), {extra: {acknowledgeIgnoredCounts: true}})));
     assert.equal(result.status, "committed");
     assert.equal(result.createdCount, 90);
     // C・D行(32〜37、架空データのため氏名は「架空参加者32」〜「架空参加者37」)は、午後が「参加を希望しない」
@@ -298,6 +300,7 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
     assert.equal(result.rows[0].classification, "ready");
     assert.deepEqual(result.rows[0].issueCodes, []);
     assert.deepEqual(result.rows[0].programIds, ["program-3"], "不参加と判定した午前・午後にはattendance候補を作らない(人数は無視)");
+    // 無視される人数は参考情報: 確認(acknowledgeIgnoredCounts)なしで取り込める
     const committed = await api.commit(asAdmin(request(table)));
     assert.equal(committed.createdCount, 1);
     assert.equal(await count("programAttendances"), 1, "参加したトークショーだけattendanceが作られる");
@@ -367,7 +370,8 @@ describe("CSV取込: 今年度の正式フォーマット(sipposample形式)を�
   });
 
   test("1 CSV行 = 1 participant。同一メール100行・同一氏名100行はどちらも100participant(重複統合なし)", async () => {
-    const r1 = await api.commit(asAdmin(request(makeTable(100, () => ({"メールアドレス": "same@example.invalid"})))));
+    // CSV内のメール重複は、管理者の明示的な許可があれば、すべて別の参加者として取り込む
+    const r1 = await api.commit(asAdmin(request(makeTable(100, () => ({"メールアドレス": "same@example.invalid"})), {extra: {acknowledgeCsvEmailDuplicates: true}})));
     assert.equal(r1.createdCount, 100);
     assert.equal(await count("participants"), 100);
     await env.clear();

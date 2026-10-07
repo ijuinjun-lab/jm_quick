@@ -12,6 +12,7 @@ const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeTable, makeRecord, HEADERS} = require("../confirmed/test_support/synthetic");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createPassApi} = require("../confirmed/pass_api");
 const {receptionQrPayload} = require("../confirmed/pass_urls");
 const {confirmedCallable, confirmedPublicPassCallable} = require("../auth");
@@ -57,7 +58,7 @@ describe("受付の訂正・取消・再受付(admin専用 / Emulator + 実Admin
         {programId: "custom-zeta-9", name: "任意のprogram", order: 3}],
     });
   }
-  const importApi = () => createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+  const importApi = () => withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
   async function importBatch() {
     // 午前(alpha)=2名 / 午後(beta)=3名 / トーク(gamma)=1名 の3programに参加する参加者を2人
     const records = [1, 2].map((i) => makeRecord(i, {"午後参加時間": "13:00-14:00", "午後参加人数": "3"}));

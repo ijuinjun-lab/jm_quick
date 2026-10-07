@@ -12,6 +12,7 @@ const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeTable} = require("../confirmed/test_support/synthetic");
 const {createEventCreateApi} = require("../confirmed/event_create_api");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createWinnerSendApi} = require("../confirmed/winner_send_api");
 const {confirmedCallable} = require("../auth");
 const {generateQrPng} = require("../qr_png");
@@ -47,6 +48,16 @@ describe("取込画面の要求 × 実際の取込API(Emulator + 実Admin SDK)",
   const newEvent = async (extra) => (await create(asAdmin(eventData(extra)))).eventId;
   // Flutterが作る要求(共有fixture)。eventIdだけ、実際に作成したイベントのものへ差し替える
   const fixtureRequest = (eventId, extra = {}) => ({...structuredClone(FIXTURE.expectedRequest), eventId, ...extra});
+  // 共有fixtureには人数が不正(abc)なerror行(5行目)がある。新しい取込回はエラー行が1件でもあれば取り込まないため、
+  // 取込の成功を確認するテストでは、その値だけを直した要求(5行目は区分が対象外のreviewとして残る)を使う。
+  const fixedRequest = (eventId, extra = {}) => {
+    const request = fixtureRequest(eventId, extra);
+    const countIndex = request.headers.indexOf("午前参加人数");
+    request.rows.find((r) => r.rowNumber === 5).values[countIndex] = "2";
+    // 5行目(区分が対象外のreview)は許可して取り込む(テストが別の判断を指定した場合はそれを使う)
+    if (!("approvedReviewRows" in extra) && !("excludedRows" in extra)) request.approvedReviewRows = [5];
+    return request;
+  };
 
   before(async () => {
     env = await startAdminEmulator();
@@ -55,7 +66,7 @@ describe("取込画面の要求 × 実際の取込API(Emulator + 実Admin SDK)",
     const eventApi = createEventCreateApi({getDb: () => db, serverTimestamp, logger: silent, now: () => NOW});
     create = wrap("admin", eventApi.createEvent);
     summary = wrap("admin", eventApi.getSummary);
-    const importApi = createImportApi({getDb: () => db, serverTimestamp});
+    const importApi = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp}));
     preview = wrap("admin", importApi.preview);
     commit = wrap("admin", importApi.commit);
     // 実transportは使わない(呼ばれたら記録して失敗させる)
@@ -117,30 +128,37 @@ describe("取込画面の要求 × 実際の取込API(Emulator + 実Admin SDK)",
       assert.equal(JSON.stringify(result).includes("example.invalid"), false, "previewに個人情報(メール)を返さない");
     });
 
+    test("共有fixture(error行あり)のcommitは、エラー行だけを除いて取り込まず、何も書かずに拒否される", async () => {
+      const eventId = await newEvent();
+      const before = await counts();
+      await assert.rejects(commit(asAdmin(fixtureRequest(eventId))), (e) => e.details && e.details.code === "import-has-errors" && e.details.count === 1);
+      assert.deepEqual(await counts(), before);
+    });
+
     test("commit: 1回目はcommitted、同じ要求の再送(応答喪失後の再試行・二重クリック)は同じ結果で二重に作らない", async () => {
       const eventId = await newEvent();
-      const first = await commit(asAdmin(fixtureRequest(eventId)));
+      const first = await commit(asAdmin(fixedRequest(eventId)));
       assert.equal(first.status, "committed");
       assert.equal(first.batchId, FIXTURE.batchId);
       const created = (await db.collection("participants").where("eventId", "==", eventId).get()).size;
       assert.ok(created >= 2);
-      const again = await commit(asAdmin(fixtureRequest(eventId)));
+      const again = await commit(asAdmin(fixedRequest(eventId)));
       assert.equal(again.status, "committed");
       assert.equal(again.idempotentReplay, true);
       assert.equal((await db.collection("participants").where("eventId", "==", eventId).get()).size, created);
       assert.equal((await db.collection("importBatches").get()).size, 1);
       // 並列(連打)でも参加者は増えない
-      const parallel = await Promise.all(Array.from({length: 5}, () => commit(asAdmin(fixtureRequest(eventId))).then((r) => r.status, (e) => e.code)));
+      const parallel = await Promise.all(Array.from({length: 5}, () => commit(asAdmin(fixedRequest(eventId))).then((r) => r.status, (e) => e.code)));
       assert.ok(parallel.every((s) => s === "committed" || s === "aborted" || s === "already-exists" || s === "failed-precondition"), JSON.stringify(parallel));
       assert.equal((await db.collection("participants").where("eventId", "==", eventId).get()).size, created);
     });
 
-    test("承認した確認行(review)だけが追加で取り込まれ、承認しなかった行・エラー行は登録されない。取込でメール・jobは何も作られない", async () => {
+    test("承認した確認行(review)だけが追加で取り込まれ、承認しなかった行は登録されない。取込でメール・jobは何も作られない", async () => {
       const eventId = await newEvent();
-      const previewed = await preview(asAdmin(fixtureRequest(eventId)));
+      const previewed = await preview(asAdmin(fixedRequest(eventId, {excludedRows: []}))); // previewには許可を付けない
       const reviewRows = previewed.rows.filter((r) => r.classification === "review").map((r) => r.sourceRowNumber);
       const readyCount = previewed.rows.filter((r) => r.classification === "ready").length;
-      const result = await commit(asAdmin(fixtureRequest(eventId, {approvedReviewRows: reviewRows, clientRequestId: "b2approved"})));
+      const result = await commit(asAdmin(fixedRequest(eventId, {approvedReviewRows: reviewRows, clientRequestId: "b2approved"})));
       assert.equal(result.status, "committed");
       assert.equal((await db.collection("participants").where("eventId", "==", eventId).get()).size, readyCount + reviewRows.length);
       for (const name of ["sendJobs", "mailDeliveries", "mailLogs", "mailJobs"]) {
@@ -158,7 +176,7 @@ describe("取込画面の要求 × 実際の取込API(Emulator + 実Admin SDK)",
         assert.equal(await code(commit(asAdmin(fixtureRequest(eventId, extra)))), "invalid-argument", JSON.stringify(extra));
       }
       assert.equal((await db.collection("participants").get()).size, 0);
-      await commit(asAdmin(fixtureRequest(eventId)));
+      await commit(asAdmin(fixedRequest(eventId)));
       const publicIds = (await db.collection("participants").get()).docs.map((d) => d.data().publicId);
       assert.ok(publicIds.length >= 2);
       assert.ok(publicIds.every((id) => typeof id === "string" && id.length >= 20));
@@ -191,7 +209,7 @@ describe("取込画面の要求 × 実際の取込API(Emulator + 実Admin SDK)",
       const request = {...bulk(100, () => ({"メールアドレス": "same-address@example.invalid", "午後参加時間": "13:00-14:00", "午後参加人数": "1"})), eventId};
       const previewed = await preview(asAdmin(request));
       assert.equal(previewed.rows.filter((r) => r.classification === "ready").length, 100);
-      await commit(asAdmin(request));
+      await commit(asAdmin({...request, acknowledgeCsvEmailDuplicates: true}));
       assert.equal((await db.collection("participants").where("eventId", "==", eventId).get()).size, 100);
       assert.equal((await db.collection("programAttendances").where("eventId", "==", eventId).get()).size, 300);
     });

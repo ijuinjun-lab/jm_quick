@@ -10,6 +10,7 @@ const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeTable} = require("../confirmed/test_support/synthetic");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createWinnerSendApi} = require("../confirmed/winner_send_api");
 const {DELIVERY_LIMITS, HALT} = require("../confirmed/delivery_worker");
 const {confirmedCallable} = require("../auth");
@@ -69,10 +70,11 @@ describe("サーバー側の継続処理(Emulator + 実Admin SDK + 偽transport)
       ...overrides,
     });
   }
-  const importApi = () => createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+  const importApi = () => withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
   async function importBatch(clientRequestId, tableOrN = 3) {
     const table = typeof tableOrN === "number" ? makeTable(tableOrN) : tableOrN;
-    return importApi().commit({identity: {uid: "u-admin"}, data: buildImportRequest({table, clientRequestId})});
+    // テスト用の取込(複数の取込回で同じ架空メールを使う)。既存参加者・CSV内のメール重複は、管理者が許可した取込として扱う。
+    return importApi().commit({identity: {uid: "u-admin"}, data: {...buildImportRequest({table, clientRequestId}), acknowledgeExistingEmailDuplicates: true, acknowledgeCsvEmailDuplicates: true}});
   }
   const create = (batchId = "batchA") => api.create(asAdmin({eventId: "event1", batchId, expectedTemplateVersion: 3}));
   const start = (jobId = "winner-batchA", actor = asAdmin) => api.start(actor({jobId}));

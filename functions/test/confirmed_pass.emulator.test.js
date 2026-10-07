@@ -7,6 +7,7 @@ const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeTable, makeRecord, HEADERS, UNMAPPED_MARKER} = require("../confirmed/test_support/synthetic");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createWinnerMailApi} = require("../confirmed/winner_mail_api");
 const {createPassApi} = require("../confirmed/pass_api");
 const {buildMailSnapshot} = require("../confirmed/mail_view_model");
@@ -61,7 +62,7 @@ describe("Web参加証・program別受付(Emulator + 実Admin SDK)", {skip: skip
       ...overrides,
     });
   }
-  const importApi = () => createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+  const importApi = () => withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
   // 3programすべてに参加する架空参加者(午前=alpha 2名・午後=beta 3名・トーク=gamma 1名)+ 午後不参加の参加者を取り込む
   async function importBatch(clientRequestId = "batchA", records) {
     const table = records ? {headers: HEADERS, records} : makeTable(3);

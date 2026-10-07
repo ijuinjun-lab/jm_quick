@@ -8,6 +8,7 @@ const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {loadIndex} = require("../test_support/load_index");
 const {buildImportRequest} = require("../test_support/import_request_builder");
+const {validatedCommitRun} = require("../test_support/validated_commit");
 const {makeTable} = require("../confirmed/test_support/synthetic");
 const {assignmentDocId, getEventAccess} = require("../event_access");
 
@@ -168,7 +169,7 @@ describe("イベント単位の任命API・担当イベント(実際のindex.js 
       assert.equal((await stored(EV_A, "u-staff-1")).assignedBy, "u-mgr-a");
       assert.equal(await rank("u-staff-1", EV_A), 1);
       // 実際の受付callableで確認するため、参加者を取り込む
-      await index.commitConfirmedImport.run(as("u-admin", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchAssignA"})));
+      await validatedCommitRun(index)(as("u-admin", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchAssignA"})));
       const participant = (await db.collection("participants").where("eventId", "==", EV_A).get()).docs[0];
       const view = {eventId: EV_A, participantId: participant.id, publicId: participant.data().publicId};
       assert.equal(await call("getConfirmedReceptionView", "u-staff-1", view), "ok");

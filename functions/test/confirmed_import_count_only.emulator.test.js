@@ -10,6 +10,7 @@ const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {confirmedCallable} = require("../auth");
 
 const silent = {warn: () => {}};
@@ -44,7 +45,7 @@ describe("CSV取込: 人数の列だけで参加を判定する通常運用(Emul
   let db;
 
   const makeApi = () => {
-    const api = createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+    const api = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
     const wrap = (level, handler) => {
       const callable = confirmedCallable(level, handler, {db, logger: silent});
       return (request) => callable.run(request);
@@ -140,11 +141,12 @@ describe("CSV取込: 人数の列だけで参加を判定する通常運用(Emul
 
   describe("人数の値ごとの判定(空欄・0・負数・小数・文字列)", () => {
     test("空欄 → その行のそのprogramにはattendanceが作られない(参加しない)", async () => {
+      // 全program空欄の行は review(下のdescribeで別途検証)。ここでは許可して取り込み、空欄→attendanceなしを確認する。
       const result = await api.commit(asAdmin(request([
         record({name: "架空参加者D", email: "test-d@example.invalid", counts: ["", "", ""]}),
-      ], {mapping: mapping()})));
-      // 全program空欄の行は review(下のdescribeで別途検証)。ここではalpha単体で空欄→不参加のみ確認する。
-      assert.equal(result.reviewPendingCount + result.createdCount + result.errorCount, 1);
+      ], {mapping: mapping(), approvedReviewRows: [2]})));
+      assert.equal(result.createdCount, 1);
+      assert.equal(await count("programAttendances"), 0);
     });
     test("0 → 空欄と同じく、そのprogramにはattendanceが作られない(参加しない)", async () => {
       const result = await api.commit(asAdmin(request([
@@ -155,30 +157,24 @@ describe("CSV取込: 人数の列だけで参加を判定する通常運用(Emul
       assert.deepEqual(attendances.map((d) => d.data().programId).sort(), ["beta"]);
       assert.equal(attendances[0].data().plannedCount, 3);
     });
-    test("負数 → 行はerrorとして拒否され、participantは作られない(該当行だけ除外)", async () => {
-      const result = await api.commit(asAdmin(request([
-        record({name: "架空参加者F", email: "test-f@example.invalid", counts: [-1, "", ""]}),
-      ])));
-      assert.equal(result.errorCount, 1);
-      assert.equal(result.createdCount, 0);
+    // 人数が不正な行はerror。エラー行が1件でもある取込は、何も書かずに拒否される(エラー行だけを除いた取込はしない)。
+    const expectCountError = async (counts, label) => {
+      const data = request([record({name: `架空参加者${label}`, email: `test-${label.toLowerCase()}@example.invalid`, counts})]);
+      const preview = await api.preview(asAdmin(data));
+      assert.equal(preview.errorCount, 1);
+      assert.deepEqual(preview.rows[0].issueCodes, ["count-invalid"]);
+      await assert.rejects(api.commit(asAdmin(data)), (e) => e.details && e.details.code === "import-has-errors");
       assert.equal(await count("participants"), 0);
-      assert.deepEqual(result.rows[0].issueCodes, ["count-invalid"]);
+      assert.equal(await count("importBatches"), 0);
+    };
+    test("負数 → 行はerror。取込は拒否され、participantは作られない", async () => {
+      await expectCountError([-1, "", ""], "F");
     });
-    test("小数 → 行はerrorとして拒否される", async () => {
-      const result = await api.commit(asAdmin(request([
-        record({name: "架空参加者G", email: "test-g@example.invalid", counts: ["1.5", "", ""]}),
-      ])));
-      assert.equal(result.errorCount, 1);
-      assert.equal(result.createdCount, 0);
-      assert.deepEqual(result.rows[0].issueCodes, ["count-invalid"]);
+    test("小数 → 行はerror。取込は拒否される", async () => {
+      await expectCountError(["1.5", "", ""], "G");
     });
-    test("数値でない文字列 → 行はerrorとして拒否される", async () => {
-      const result = await api.commit(asAdmin(request([
-        record({name: "架空参加者H", email: "test-h@example.invalid", counts: ["たくさん", "", ""]}),
-      ])));
-      assert.equal(result.errorCount, 1);
-      assert.equal(result.createdCount, 0);
-      assert.deepEqual(result.rows[0].issueCodes, ["count-invalid"]);
+    test("数値でない文字列 → 行はerror。取込は拒否される", async () => {
+      await expectCountError(["たくさん", "", ""], "H");
     });
   });
 
@@ -190,14 +186,12 @@ describe("CSV取込: 人数の列だけで参加を判定する通常運用(Emul
       assert.deepEqual([result.readyCount, result.reviewCount, result.errorCount], [0, 1, 0]);
       assert.deepEqual(result.rows[0].issueCodes, ["no-program"]);
     });
-    test("commit: 未承認なら参加者は作られず監査(review-pending)に残る。承認すれば0件のattendanceで参加者だけ作られる", async () => {
+    test("commit: 未承認なら何も書かずに拒否される(許可か除外が必要)。承認すれば0件のattendanceで参加者だけ作られる", async () => {
       const row = () => [record({name: "架空参加者I", email: "test-i@example.invalid", counts: ["", 0, ""]})];
-      const pending = await api.commit(asAdmin(request(row(), {clientRequestId: "batchA"})));
-      assert.deepEqual([pending.createdCount, pending.reviewPendingCount], [0, 1]);
+      await assert.rejects(api.commit(asAdmin(request(row(), {clientRequestId: "batchA"}))), (e) => e.details && e.details.code === "unresolved-review-rows");
       assert.equal(await count("participants"), 0);
+      assert.equal(await count("importBatches"), 0);
 
-      // 承認は行ごとの明示的な判断であり、既にcommitted済みの同じbatchIdへ承認状態だけ変えて再送しても
-      // 冪等リプレイとして扱われ、変わらない(実運用どおり別のclientRequestIdで承認して送る)。
       const approved = await api.commit(asAdmin(request(row(), {clientRequestId: "batchB", approvedReviewRows: [2]})));
       assert.deepEqual([approved.createdCount, approved.reviewPendingCount], [1, 0]);
       assert.equal(await count("participants"), 1);
@@ -209,7 +203,8 @@ describe("CSV取込: 人数の列だけで参加を判定する通常運用(Emul
     test("同じメールアドレス100行 → 100participant(人数の列だけの判定でも変わらない)", async () => {
       const records = Array.from({length: 100}, (_, i) =>
         record({name: `架空同一メール${i + 1}`, email: "same@example.invalid", counts: [1, "", ""]}));
-      const result = await api.commit(asAdmin(request(records)));
+      // CSV内のメール重複は、管理者の明示的な許可があれば、すべて別の参加者として取り込む
+      const result = await api.commit(asAdmin(request(records, {extra: {acknowledgeCsvEmailDuplicates: true}})));
       assert.equal(result.createdCount, 100);
       assert.equal(await count("participants"), 100);
       assert.equal(new Set((await docs("participants")).map((d) => d.data().email)).size, 1);

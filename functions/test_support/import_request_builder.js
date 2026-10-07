@@ -4,7 +4,7 @@ const {normalizeImportMapping, mappedColumns} = require("../confirmed/import_map
 const {syntheticMapping, FILE_HASH} = require("../confirmed/test_support/synthetic");
 
 function buildImportRequest({table, mapping = syntheticMapping(), eventId = "event1", clientRequestId = "batchA",
-  sourceFileName = "synthetic.csv", fileHash = FILE_HASH, label, approvedReviewRows, excludedRows, extra = {}}) {
+  sourceFileName = "synthetic.csv", fileHash = FILE_HASH, label, approvedReviewRows, excludedRows, corrections, extra = {}}) {
   const columns = mappedColumns(normalizeImportMapping(mapping));
   const indexes = columns.map((column) => table.headers.indexOf(column));
   const rows = [];
@@ -21,6 +21,7 @@ function buildImportRequest({table, mapping = syntheticMapping(), eventId = "eve
   if (label !== undefined) request.label = label;
   if (approvedReviewRows !== undefined) request.approvedReviewRows = approvedReviewRows;
   if (excludedRows !== undefined) request.excludedRows = excludedRows;
+  if (corrections !== undefined) request.corrections = corrections;
   return request;
 }
 

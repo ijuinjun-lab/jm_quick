@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator, failingDb, dbWithWrongParticipantCount} = require("../test_support/emulator_admin");
 const {buildImportRequest} = require("../test_support/import_request_builder");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {makeTable, syntheticMapping, HEADERS, makeRecord, UNMAPPED_MARKER, NOT_ATTENDING} = require("../confirmed/test_support/synthetic");
 const {createImportApi} = require("../confirmed/import_api");
 const {confirmedCallable} = require("../auth");
@@ -21,17 +22,17 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
   let calls; // 外部通信の記録(Emulator以外へのfetch)
 
   const makeApi = (options = {}) => {
-    const api = createImportApi({
+    const api = withValidatedCommit(createImportApi({
       getDb: () => options.db || db,
       serverTimestamp: () => env.FieldValue.serverTimestamp(),
       concurrency: options.concurrency,
-    });
+    }));
     // confirmedCallable(認可つきcallable)を、.run で呼び出せる関数にする(認可はindex.jsの公開経路と同じ仕組み)
     const wrap = (level, handler) => {
       const callable = confirmedCallable(level, handler, {db, logger: silent});
       return (request) => callable.run(request);
     };
-    return {preview: wrap("admin", api.preview), commit: wrap("admin", api.commit)};
+    return {validate: wrap("admin", api.validate), preview: wrap("admin", api.preview), commit: wrap("admin", api.commit)};
   };
   let api;
   const asAdmin = (data) => ({auth: {uid: "u-admin"}, data});
@@ -213,7 +214,12 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
       assert.deepEqual([result.createdCount, result.reviewPendingCount, result.errorCount, result.excludedByOperatorCount], [100, 0, 0, 0]);
     });
     test("同じメールアドレス100行 → 100participant(すべてready)", async () => {
-      const result = await api.commit(asAdmin(request(makeTable(100, () => ({"メールアドレス": "same@example.invalid"})))));
+      const table = makeTable(100, () => ({"メールアドレス": "same@example.invalid"}));
+      // CSV内のメール重複は、管理者の明示的な許可がなければ取り込まない(許可すれば、すべて別の参加者)。
+      await assert.rejects(api.commit(asAdmin(request(table))),
+        (e) => e.details && e.details.code === "csv-email-duplicates-unacknowledged" && e.details.count === 100);
+      assert.equal(await count("importBatches"), 0);
+      const result = await api.commit(asAdmin(request(table, {extra: {acknowledgeCsvEmailDuplicates: true}})));
       assert.equal(result.createdCount, 100);
       const participants = await participantsOf("batchA");
       assert.equal(participants.length, 100);
@@ -235,7 +241,11 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
     test("別batchで同一人物 → 両方登録される(過去のbatchとの照合・skipをしない)", async () => {
       const table = makeTable(30);
       const first = await api.commit(asAdmin(request(table, {clientRequestId: "batchA"})));
-      const second = await api.commit(asAdmin(request(table, {clientRequestId: "batchB"})));
+      // 既存の有効な参加者と同じメールの参加者を作るため、管理者の明示的な許可が要る(許可すれば両方登録される)。
+      await assert.rejects(api.commit(asAdmin(request(table, {clientRequestId: "batchB"}))),
+        (e) => e.code === "failed-precondition" && e.details.code === "existing-email-duplicates-unacknowledged" && e.details.count === 30);
+      assert.equal((await db.collection("importBatches").doc("batchB").get()).exists, false, "許可のない拒否は何も書かない");
+      const second = await api.commit(asAdmin(request(table, {clientRequestId: "batchB", extra: {acknowledgeExistingEmailDuplicates: true}})));
       assert.deepEqual([first.createdCount, second.createdCount], [30, 30]);
       assert.equal(await count("participants"), 60);
       const ids = (await docs("participants")).map((d) => d.id);
@@ -251,26 +261,26 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
   });
 
   describe("review / error / operator除外(黙って除外しない。すべて監査に残る)", () => {
+    // 新しい取込回はエラー行が1件でもあれば取り込まない(検証ステップの確定仕様)。review・除外の確認はエラー行のない表で行う。
     const tableWithProblems = () => makeTable(6, (i) => (i === 2 ? {"午前参加時間": "22:20-22:20"} // review
-      : i === 3 ? {"氏名": ""} // error
-        : i === 4 ? {"午後参加時間": NOT_ATTENDING, "午後参加人数": "3"} // review
-          : {}));
+      : i === 4 ? {"午後参加時間": NOT_ATTENDING, "午後参加人数": "3"} // review
+        : {}));
+    const tableWithError = () => makeTable(6, (i) => (i === 3 ? {"氏名": ""} : {})); // 4行目がerror
 
-    test("review未承認 → participantを作らず、行は監査(review-pending)に残る", async () => {
-      const result = await api.commit(asAdmin(request(tableWithProblems())));
-      assert.deepEqual([result.createdCount, result.reviewPendingCount, result.errorCount, result.excludedByOperatorCount], [3, 2, 1, 0]);
-      const rows = await rowsOf("batchA");
-      const pending = rows.filter((r) => r.result === "review-pending").map((r) => r.sourceRowNumber).sort();
-      assert.deepEqual(pending, [3, 5]);
-      assert.ok(pending.every((n) => !rows.find((r) => r.sourceRowNumber === n).participantId));
-      const participantIds = (await participantsOf("batchA")).map((d) => d.id);
-      assert.ok(!participantIds.includes("batchA-000003") && !participantIds.includes("batchA-000005"));
-      assert.equal(rows.find((r) => r.sourceRowNumber === 3).classification, "review");
-      assert.deepEqual(rows.find((r) => r.sourceRowNumber === 3).issueCodes, ["slot-zero-length"]);
+    test("review未承認の行が残る取込は、何も書かずに拒否される(許可か除外の明示が必要。黙って取込対象から外さない)", async () => {
+      const before = await allCollectionCounts();
+      await assert.rejects(api.commit(asAdmin(request(tableWithProblems()))),
+        (e) => e.details && e.details.code === "unresolved-review-rows" && e.details.count === 2);
+      await assert.rejects(api.commit(asAdmin(request(tableWithProblems(), {approvedReviewRows: [3]}))),
+        (e) => e.details && e.details.code === "unresolved-review-rows" && e.details.count === 1, "承認は行ごと。1行だけでは足りない");
+      assert.deepEqual(await allCollectionCounts(), before);
+      const preview = await api.preview(asAdmin(request(tableWithProblems())));
+      assert.equal(preview.rows.find((r) => r.sourceRowNumber === 3).classification, "review");
+      assert.deepEqual(preview.rows.find((r) => r.sourceRowNumber === 3).issueCodes, ["slot-zero-length"]);
     });
-    test("review明示承認 → participant作成 + 承認記録(approvedBy=サーバー確定のUID・approvedAt)", async () => {
-      const result = await api.commit(asAdmin(request(tableWithProblems(), {approvedReviewRows: [3]})));
-      assert.deepEqual([result.createdCount, result.reviewPendingCount, result.errorCount], [4, 1, 1]);
+    test("review明示承認 → participant作成 + 承認記録(approvedBy=サーバー確定のUID・approvedAt)。残りのreviewは除外", async () => {
+      const result = await api.commit(asAdmin(request(tableWithProblems(), {approvedReviewRows: [3], excludedRows: [{sourceRowNumber: 5, reason: "主催者へ確認中"}]})));
+      assert.deepEqual([result.createdCount, result.reviewPendingCount, result.errorCount, result.excludedByOperatorCount], [5, 0, 0, 1]);
       const row = (await rowsOf("batchA")).find((r) => r.sourceRowNumber === 3);
       assert.deepEqual([row.result, row.classification, row.approvedReview, row.approvedBy, row.participantId],
         ["created", "review", true, "u-admin", "batchA-000003"]);
@@ -280,18 +290,21 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
       const alpha = (await db.collection("programAttendances").doc("batchA-000003_alpha").get()).data();
       assert.deepEqual([alpha.slotLabel, alpha.startAt, alpha.endAt], ["22:20-22:20", null, null]);
     });
-    test("承認していないreview行は、他の行を承認しても作られない(承認は行ごとの明示的な判断)", async () => {
-      await api.commit(asAdmin(request(tableWithProblems(), {approvedReviewRows: [3]})));
+    test("除外したreview行は作られず、監査に「除外」と許可の別が残る(承認は行ごとの明示的な判断)", async () => {
+      await api.commit(asAdmin(request(tableWithProblems(), {approvedReviewRows: [3], excludedRows: [{sourceRowNumber: 5, reason: "主催者へ確認中"}]})));
       const rows = await rowsOf("batchA");
-      assert.equal(rows.find((r) => r.sourceRowNumber === 5).result, "review-pending");
-      assert.equal(rows.find((r) => r.sourceRowNumber === 5).approvedReview, false);
+      const r5 = rows.find((r) => r.sourceRowNumber === 5);
+      assert.deepEqual([r5.result, r5.approvedReview, r5.resolution, r5.excludedReason], ["excluded", false, "excluded", "主催者へ確認中"]);
+      const r3 = rows.find((r) => r.sourceRowNumber === 3);
+      assert.deepEqual([r3.resolution, r3.allowedWarnings], ["allowed", ["review"]]);
+      assert.equal(rows.find((r) => r.sourceRowNumber === 2).resolution, "none");
     });
     test("error行は承認できない(承認してもparticipantは作られず、リクエスト全体が拒否され、何も書かれない)", async () => {
-      await assert.rejects(api.commit(asAdmin(request(tableWithProblems(), {approvedReviewRows: [4]}))),
+      await assert.rejects(api.commit(asAdmin(request(tableWithError(), {approvedReviewRows: [4]}))),
         (e) => e.code === "invalid-argument" && e.details.code === "error-row-cannot-be-approved" && e.details.sourceRowNumber === 4);
       assert.equal(await count("importBatches"), 0);
       assert.equal(await count("participants"), 0);
-      const preview = await api.preview(asAdmin(request(tableWithProblems())));
+      const preview = await api.preview(asAdmin(request(tableWithError())));
       assert.equal(preview.rows.find((r) => r.sourceRowNumber === 4).classification, "error");
     });
     test("readyの行・存在しない行は承認できない", async () => {
@@ -302,12 +315,13 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
     });
     test("operator除外 → participantを作らず、除外記録(行番号・UID・時刻・理由)が監査に残る", async () => {
       const result = await api.commit(asAdmin(request(tableWithProblems(), {excludedRows: [
-        {sourceRowNumber: 2, reason: "主催者へ確認済み"}, {sourceRowNumber: 3, reason: "重複の連絡あり"}, {sourceRowNumber: 4, reason: "エラー行を送らない"}]})));
-      assert.deepEqual([result.createdCount, result.reviewPendingCount, result.errorCount, result.excludedByOperatorCount], [2, 1, 0, 3]);
+        {sourceRowNumber: 2, reason: "主催者へ確認済み"}, {sourceRowNumber: 3, reason: "重複の連絡あり"}, {sourceRowNumber: 4, reason: "主催者の依頼で除外"}],
+      approvedReviewRows: [5]})));
+      assert.deepEqual([result.createdCount, result.reviewPendingCount, result.errorCount, result.excludedByOperatorCount], [3, 0, 0, 3]);
       const rows = await rowsOf("batchA");
       const excluded = rows.filter((r) => r.excludedByOperator).sort((a, b) => a.sourceRowNumber - b.sourceRowNumber);
       assert.deepEqual(excluded.map((r) => [r.sourceRowNumber, r.result, r.excludedBy, r.excludedReason]),
-        [[2, "excluded", "u-admin", "主催者へ確認済み"], [3, "excluded", "u-admin", "重複の連絡あり"], [4, "excluded", "u-admin", "エラー行を送らない"]]);
+        [[2, "excluded", "u-admin", "主催者へ確認済み"], [3, "excluded", "u-admin", "重複の連絡あり"], [4, "excluded", "u-admin", "主催者の依頼で除外"]]);
       assert.ok(excluded.every((r) => r.excludedAt && typeof r.excludedAt.toDate === "function" && r.participantId === null));
       const ids = (await participantsOf("batchA")).map((d) => d.id);
       assert.ok(!ids.includes("batchA-000002") && !ids.includes("batchA-000003") && !ids.includes("batchA-000004"));
@@ -321,23 +335,28 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
     });
     test("created + reviewPending + error + excluded (+ blank) は全レコード数と一致する", async () => {
       const table = tableWithProblems();
-      table.records.push(HEADERS.map(() => ""), makeRecord(7), makeRecord(8, {"氏名": " "}));
+      table.records.push(HEADERS.map(() => ""), makeRecord(7), makeRecord(8));
       const result = await api.commit(asAdmin(request(table, {approvedReviewRows: [3], excludedRows: [{sourceRowNumber: 5, reason: "除外"}]})));
       const {createdCount: c, reviewPendingCount: r, errorCount: e, excludedByOperatorCount: x, blankRecordCount: b} = result;
-      assert.deepEqual([c, r, e, x, b], [5, 0, 2, 1, 1]);
+      assert.deepEqual([c, r, e, x, b], [7, 0, 0, 1, 1]);
       assert.equal(c + r + e + x, result.totalRows);
       assert.equal(c + r + e + x + b, result.totalRecords);
       assert.equal(result.totalRecords, 9);
       assert.equal(result.rows.length, 9, "空レコードも監査に残る");
       assert.equal(result.rows.find((row) => row.sourceRowNumber === 8).result, "blank");
       const stored = await batch("batchA");
-      assert.deepEqual([stored.createdCount, stored.reviewPendingCount, stored.errorCount, stored.excludedByOperatorCount, stored.blankRecordCount], [5, 0, 2, 1, 1]);
+      assert.deepEqual([stored.createdCount, stored.reviewPendingCount, stored.errorCount, stored.excludedByOperatorCount, stored.blankRecordCount], [7, 0, 0, 1, 1]);
     });
-    test("error行が含まれていても、他の行は登録され、errorは登録されない", async () => {
-      const result = await api.commit(asAdmin(request(tableWithProblems())));
-      const errorRow = result.rows.find((row) => row.sourceRowNumber === 4);
-      assert.deepEqual([errorRow.result, errorRow.participantId, errorRow.classification], ["error", null, "error"]);
-      assert.deepEqual(errorRow.issueCodes, ["name-missing"]);
+    test("未解決のerror行が1件でもあれば何も書かれない。管理者が明示的に除外したerror行だけは取込対象から外れる", async () => {
+      const before = await allCollectionCounts();
+      await assert.rejects(api.commit(asAdmin(request(tableWithError()))),
+        (e) => e.code === "failed-precondition" && e.details.code === "import-has-errors" && e.details.count === 1);
+      assert.deepEqual(await allCollectionCounts(), before, "batch・participant・attendanceは作られない");
+      assert.equal((await db.collection("events").doc("event1").get()).data().importSequence, undefined, "取込回の番号も進まない");
+      const result = await api.commit(asAdmin(request(tableWithError(), {excludedRows: [{sourceRowNumber: 4, reason: "氏名が空のため今回は除外"}]})));
+      assert.deepEqual([result.createdCount, result.errorCount, result.excludedByOperatorCount], [5, 0, 1]);
+      const row = (await rowsOf("batchA")).find((r) => r.sourceRowNumber === 4);
+      assert.deepEqual([row.result, row.classification, row.resolution, row.participantId], ["excluded", "error", "excluded", null]);
     });
   });
 
@@ -358,11 +377,11 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
       assert.equal((await batch("batchA")).sequence, 1);
     });
     test("commit成功後に応答が届かず再試行 → 同一結果(3回再送しても同じ)", async () => {
-      const data = request(makeTable(10, (i) => (i === 3 ? {"氏名": ""} : {})), {approvedReviewRows: []});
+      const data = request(makeTable(10, (i) => (i === 3 ? {"区分": "その他"} : {})), {approvedReviewRows: [4]});
       const results = [];
       for (let attempt = 0; attempt < 3; attempt += 1) results.push(await api.commit(asAdmin(data)));
-      assert.deepEqual(results.map((r) => [r.sequence, r.createdCount, r.errorCount, r.status]), [[1, 9, 1, "committed"], [1, 9, 1, "committed"], [1, 9, 1, "committed"]]);
-      assert.equal(await count("participants"), 9);
+      assert.deepEqual(results.map((r) => [r.sequence, r.createdCount, r.reviewPendingCount, r.status]), [[1, 10, 0, "committed"], [1, 10, 0, "committed"], [1, 10, 0, "committed"]]);
+      assert.equal(await count("participants"), 10);
       assert.equal(await count("importBatches"), 1);
     });
     test("同じclientRequestIdを同時に2回送っても participant は増えない", async () => {
@@ -453,8 +472,8 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
     });
     test("失敗途中に承認・除外の判断を変えた再実行は拒否される(内容が違う)", async () => {
       const table = makeTable(10, (i) => (i === 3 ? {"区分": "変更申込"} : {}));
-      await assert.rejects(failingApi(5).commit(asAdmin(request(table))), (e) => e.code === "internal");
-      await rejectsWith(api.commit(asAdmin(request(table, {approvedReviewRows: [4]}))), "already-exists");
+      await assert.rejects(failingApi(5).commit(asAdmin(request(table, {approvedReviewRows: [4]}))), (e) => e.code === "internal");
+      await rejectsWith(api.commit(asAdmin(request(table, {excludedRows: [{sourceRowNumber: 4, reason: "やはり除外"}]}))), "already-exists");
     });
     test("再実行時に、別の取込の同じIDのデータ(監査行なし)があれば、上書きせず失敗する", async () => {
       await db.collection("participants").doc("batchA-000003").set({foreign: true});
@@ -487,9 +506,22 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
   });
 
   describe("sequence(eventのカウンタをtransactionで採番)", () => {
-    test("同時に複数のbatchをcommitしても sequence が重複しない(1,2,3,4,5)", async () => {
+    test("同時に複数のbatchをcommitしても sequence が重複しない。同じ取込回の番号で作られるのは1つだけで、他は再検証を求められる", async () => {
       const ids = ["batchA", "batchB", "batchC", "batchD", "batchE"];
-      const results = await Promise.all(ids.map((id) => api.commit(asAdmin(request(makeTable(15), {clientRequestId: id})))));
+      const tableOf = (id) => makeTable(15, (i) => ({"メールアドレス": `${id}-${i}@example.invalid`}));
+      // 5つとも「次は第1回」と検証した状態から同時にcommit → 第1回は1つだけ。残りは何も書かずに拒否される。
+      const validated = await Promise.all(ids.map(async (id) => {
+        const data = request(tableOf(id), {clientRequestId: id});
+        const v = await api.validate(asAdmin(data));
+        return {...data, expectedImportSequence: v.expectedImportSequence, validationFingerprint: v.validationFingerprint};
+      }));
+      const settled = await Promise.allSettled(validated.map((data) => api.commit(asAdmin(data))));
+      const won = settled.filter((r) => r.status === "fulfilled");
+      assert.equal(won.length, 1);
+      assert.ok(settled.filter((r) => r.status === "rejected").every((r) => r.reason.details.code === "import-state-changed"));
+      // 拒否された側は再検証(次は第2回…)してからcommitすれば作られる
+      const results = [won[0].value];
+      for (const id of ids.filter((x) => x !== won[0].value.batchId)) results.push(await api.commit(asAdmin(request(tableOf(id), {clientRequestId: id}))));
       assert.deepEqual(results.map((r) => r.sequence).sort(), [1, 2, 3, 4, 5]);
       assert.equal((await db.collection("events").doc("event1").get()).data().importSequence, 5);
       const stored = await Promise.all(ids.map((id) => batch(id)));
@@ -499,7 +531,7 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
     test("sequenceはクライアントの指定を信用しない(サーバーが採番)。labelは既定で「第N回」", async () => {
       await assert.rejects(api.commit(asAdmin({...request(3), sequence: 99})), (e) => e.code === "invalid-argument");
       const first = await api.commit(asAdmin(request(2, {clientRequestId: "batchA"})));
-      const second = await api.commit(asAdmin(request(2, {clientRequestId: "batchB", label: "追加分"})));
+      const second = await api.commit(asAdmin(request(2, {clientRequestId: "batchB", label: "追加分", extra: {acknowledgeExistingEmailDuplicates: true}})));
       assert.deepEqual([first.sequence, first.label, second.sequence, second.label], [1, "第1回", 2, "追加分"]);
     });
     test("別イベントのsequenceは独立している", async () => {
@@ -539,21 +571,26 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
       assert.equal((await db.collection("programAttendances").doc("batchA-000002_beta").get()).exists, false, "不参加のprogramのattendanceは作られない");
     });
     test("行の監査と応答に個人情報(氏名・メール・かな・自由記述)を複製しない", async () => {
-      const result = await api.commit(asAdmin(request(makeTable(8, (i) => (i === 3 ? {"氏名": ""} : {})))));
+      const result = await api.commit(asAdmin(request(makeTable(8, (i) => (i === 3 ? {"区分": "その他"} : {})), {approvedReviewRows: [4]})));
       const rows = await rowsOf("batchA");
       const serialized = JSON.stringify([rows, result, await batch("batchA")]);
       for (const forbidden of ["架空テスト", "synthetic1", "かくうてすと", UNMAPPED_MARKER, "example.invalid", "@"]) {
         assert.ok(!serialized.includes(forbidden), forbidden);
       }
-      assert.deepEqual(Object.keys(rows[0]).sort(), ["approvedAt", "approvedBy", "approvedReview", "classification", "createdAt", "excludedAt", "excludedBy",
-        "excludedByOperator", "excludedReason", "importRecordId", "issueCodes", "participantId", "programIds", "result", "sourceRowNumber"]);
+      assert.deepEqual(Object.keys(rows[0]).sort(), ["allowedWarnings", "approvedAt", "approvedBy", "approvedReview", "classification", "correctedColumns",
+        "corrections", "createdAt", "excludedAt", "excludedBy", "excludedByOperator", "excludedReason", "importRecordId", "issueCodes", "participantId",
+        "programIds", "resolution", "result", "sourceRowNumber"]);
     });
     test("importBatchの項目", async () => {
-      await api.commit(asAdmin(request(makeTable(4, (i) => (i === 2 ? {"氏名": ""} : {})), {sourceFileName: "list1.csv", fileHash: "c".repeat(64), label: "第1回"})));
+      await api.commit(asAdmin(request(makeTable(4, (i) => (i === 2 ? {"区分": "その他"} : {})), {sourceFileName: "list1.csv", fileHash: "c".repeat(64), label: "第1回", approvedReviewRows: [3]})));
       const b = await batch("batchA");
       assert.deepEqual([b.eventId, b.sequence, b.label, b.sourceFileName, b.fileHash, b.mappingVersion, b.totalRows, b.createdCount, b.reviewPendingCount,
         b.errorCount, b.excludedByOperatorCount, b.blankRecordCount, b.createdBy, b.status],
-        ["event1", 1, "第1回", "list1.csv", "c".repeat(64), 3, 4, 3, 0, 1, 0, 0, "u-admin", "committed"]);
+        ["event1", 1, "第1回", "list1.csv", "c".repeat(64), 3, 4, 4, 0, 0, 0, 0, "u-admin", "committed"]);
+      assert.deepEqual([b.correctedRowCount, b.allowedWarningCounts], [0, {review: 1, existingEmailDuplicates: 0, csvEmailDuplicates: 0}]);
+      // 取込中の重複確認用に、作った参加者のメールはハッシュだけを保存する(メールそのものは保存しない)
+      assert.equal(b.createdEmailHashes.length, 4);
+      assert.ok(b.createdEmailHashes.every((h) => /^[0-9a-f]{64}$/.test(h)));
       assert.ok(b.createdAt && b.completedAt);
       assert.ok(!("skipped" + "Count" in b));
     });
@@ -564,7 +601,7 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
       assert.ok(ids.every((id) => /^pub_[A-Za-z0-9_-]{32}$/.test(id)));
     });
     test("旧人数フィールドは、participant・attendance・監査・batch・eventのどこにも書かれない(plannedCountだけが人数の正本)", async () => {
-      await api.commit(asAdmin(request(makeTable(10, (i) => (i === 2 ? {"氏名": ""} : {})))));
+      await api.commit(asAdmin(request(makeTable(10, (i) => (i === 2 ? {"区分": "その他"} : {})), {approvedReviewRows: [3]})));
       const scan = async (path) => (await docs(path)).flatMap((d) => Object.keys(d.data()));
       const keys = [...await scan("participants"), ...await scan("programAttendances"), ...await scan("importBatches"), ...await scan("events"),
         ...(await rowsOf("batchA")).flatMap((r) => Object.keys(r))];
@@ -625,25 +662,29 @@ describe("新方式CSV取込API(Emulator + 実Admin SDK)", {skip: skipReason()},
     test("値の個数がheadersと違う行は、捨てずにreviewとして残る", async () => {
       const data = request(makeTable(4));
       data.rows[1].values = data.rows[1].values.slice(0, 5);
-      const result = await api.commit(asAdmin(data));
+      const result = await api.commit(asAdmin({...data, approvedReviewRows: [3]}));
       const row = result.rows.find((r) => r.sourceRowNumber === 3);
       assert.equal(row.classification, "review");
       assert.ok(row.issueCodes.includes("row-length-mismatch"));
-      assert.equal(result.reviewPendingCount, 1);
+      assert.equal(result.reviewPendingCount, 0);
+      assert.equal(result.createdCount, 4);
       assert.equal(result.totalRows, 4);
     });
-    test("previewはapprovedReviewRows・excludedRows(commitでの判断)を受け付けない", async () => {
+    test("previewは許可(approvedReviewRows・acknowledge*)を受け付けない。修正・除外は受け付け、最終的な内容を返す", async () => {
       await rejectsWith(api.preview(asAdmin({...request(3), approvedReviewRows: [2]})), "invalid-argument");
-      await rejectsWith(api.preview(asAdmin({...request(3), excludedRows: []})), "invalid-argument");
+      await rejectsWith(api.preview(asAdmin({...request(3), acknowledgeIgnoredCounts: true})), "invalid-argument");
+      const p = await api.preview(asAdmin({...request(3), excludedRows: [{sourceRowNumber: 2, reason: "x"}]}));
+      assert.deepEqual(p.decisionSummary, {originalRows: 3, correctedRows: 0, excludedRows: 1, importRows: 2});
+      assert.equal(p.rows.find((r) => r.sourceRowNumber === 2).excluded, true);
     });
     test("commitはpreviewの結果を信用しない: クライアントが分類・participantを送っても無視できず、拒否される", async () => {
       await rejectsWith(api.commit(asAdmin({...request(3), classification: "ready", rows: request(3).rows})), "invalid-argument");
       await rejectsWith(api.commit(asAdmin({...request(3), previewResult: {readyCount: 3}})), "invalid-argument");
-      // サーバーは値から自分で分類する: メールが壊れた行は、クライアントが何と言おうとerror
+      // サーバーは値から自分で分類する: メールが壊れた行は、クライアントが何と言おうとerror(エラー行があれば何も取り込まない)
       const data = request(makeTable(3, (i) => (i === 2 ? {"メールアドレス": "壊れた値"} : {})));
-      const result = await api.commit(asAdmin(data));
-      assert.equal(result.rows.find((r) => r.sourceRowNumber === 3).result, "error");
-      assert.equal(await count("participants"), 2);
+      await assert.rejects(api.commit(asAdmin(data)), (e) => e.details && e.details.code === "import-has-errors");
+      assert.equal((await api.preview(asAdmin(data))).rows.find((r) => r.sourceRowNumber === 3).classification, "error");
+      assert.equal(await count("participants"), 0);
     });
   });
 

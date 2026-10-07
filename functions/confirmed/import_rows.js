@@ -172,6 +172,9 @@ function planRow(row, mapping, eventDate) {
       // 正本として扱い、不参加と判定したprogramの人数列は無視する(このprogramの矛盾チェック自体を行わない)。
       if (!program.ignoreCountWhenNotAttending && (count.kind === "ok" || count.kind === "invalid")) {
         issues.push(makeIssue("not-attending-count-present", {...at, column: program.countColumn}));
+      } else if (program.ignoreCountWhenNotAttending && (count.kind === "ok" || count.kind === "invalid")) {
+        // 人数は無視される(分類には影響させない)。取込前の検証で「無視される人数」として見せるためだけの記録。
+        notices.push({code: "not-attending-count-ignored", ...at, column: program.countColumn});
       }
     } else if (count.kind === "empty") {
       issues.push(makeIssue("attending-count-missing", {...at, column: program.countColumn}));

@@ -903,6 +903,7 @@ exports.acceptEventInvitation = confirmedCallable("authenticated", invitationApi
 
 // 当選者CSVの取込(Phase 1B: 対象イベントのevent_manager以上。adminは全イベント)。preview=dry-run(書込みなし) / commit=サーバー側で再検証して登録。メールは送らない。
 const importApi = createImportApi({getDb: getFirestore, serverTimestamp: () => FieldValue.serverTimestamp()});
+exports.validateConfirmedImport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, importApi.validate);
 exports.previewConfirmedImport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, importApi.preview);
 exports.commitConfirmedImport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, importApi.commit, {timeoutSeconds: 300});
 

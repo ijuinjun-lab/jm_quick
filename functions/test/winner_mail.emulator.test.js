@@ -8,6 +8,7 @@ const {skipReason, startAdminEmulator, failingDb} = require("../test_support/emu
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeTable, HEADERS, makeRecord, UNMAPPED_MARKER} = require("../confirmed/test_support/synthetic");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createWinnerMailApi} = require("../confirmed/winner_mail_api");
 const {createWinnerSendApi} = require("../confirmed/winner_send_api");
 const {confirmedCallable} = require("../auth");
@@ -73,11 +74,12 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
       ...overrides,
     }));
   }
-  const importApi = () => createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+  const importApi = () => withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
   // Phase 5の実APIで取り込む(committedなbatchとparticipant・programAttendancesができる)
   async function importBatch(clientRequestId, tableOrN = 3, extra = {}) {
     const table = typeof tableOrN === "number" ? makeTable(tableOrN) : tableOrN;
-    return importApi().commit({identity: {uid: "u-admin"}, data: buildImportRequest({table, clientRequestId, ...extra})});
+    // テスト用の取込(複数の取込回で同じ架空メールを使う)。既存参加者・CSV内のメール重複は、管理者が許可した取込として扱う。
+    return importApi().commit({identity: {uid: "u-admin"}, data: {...buildImportRequest({table, clientRequestId, ...extra}), acknowledgeExistingEmailDuplicates: true, acknowledgeCsvEmailDuplicates: true}});
   }
   const docs = async (path, query) => (await (query ? query(db.collection(path)) : db.collection(path)).get()).docs;
   const count = async (path, query) => (await docs(path, query)).length;
@@ -861,15 +863,15 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
       assert.deepEqual(externalCalls, []);
     });
 
-    test("送信対象はcommittedなbatch由来のactive participantだけ(review未承認・error・除外はparticipantが無いので対象外)", async () => {
-      const table = makeTable(6, (i) => (i === 2 ? {"午前参加時間": "22:20-22:20"} : i === 3 ? {"氏名": ""} : {}));
-      await importBatch("batchA", table, {excludedRows: [{sourceRowNumber: 6, reason: "除外"}]});
+    test("送信対象はcommittedなbatch由来のactive participantだけ(除外した行はparticipantが無いので対象外)", async () => {
+      const table = makeTable(6, (i) => (i === 2 ? {"午前参加時間": "22:20-22:20"} : {}));
+      await importBatch("batchA", table, {excludedRows: [{sourceRowNumber: 6, reason: "除外"}], approvedReviewRows: [3]});
       const job = await send.create(asAdmin({eventId: "event1", batchId: "batchA"}));
       const batch = await get("importBatches/batchA");
       assert.equal(job.targetCount, batch.createdCount);
-      assert.deepEqual([batch.createdCount, batch.reviewPendingCount, batch.errorCount, batch.excludedByOperatorCount], [3, 1, 1, 1]);
+      assert.deepEqual([batch.createdCount, batch.reviewPendingCount, batch.errorCount, batch.excludedByOperatorCount], [5, 0, 0, 1]);
       const ids = (await jobItems("winner-batchA")).map((d) => d.id).sort();
-      assert.deepEqual(ids, ["batchA-000002", "batchA-000005", "batchA-000007"]);
+      assert.deepEqual(ids, ["batchA-000002", "batchA-000003", "batchA-000004", "batchA-000005", "batchA-000007"]);
     });
   });
 });

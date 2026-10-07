@@ -101,14 +101,25 @@ String canonicalJson(Object? value) {
 /// - 同じ内容の再送(二重クリック・応答が届かなかった後の再操作・画面の再読み込み後の再選択)は同じbatchIdになり、
 ///   サーバーの冪等性(同じclientRequestIdの再送は既存の取込を返す/続きから完了する)がそのまま働く。参加者は二重に作られない。
 /// - ファイル名は含めない(同名でも内容が違うことがあるため)。
+/// - [newImportSequence]: 同じ内容が既に取り込み済みのとき、管理者が検証画面で「新しい取込回として取り込む」を
+///   明示的に選んだ場合だけ指定する(サーバーの検証が返す次の取込回の番号)。指定したときだけ識別に含めるため、
+///   指定しない取込(通常の取込・既存の取込回)のbatchIdは従来と完全に同じ(既存のbatchIdを変更・再計算しない)。
+///   同じ番号での再送(二重クリック・応答が届かなかった後の再操作)は同じbatchIdになり、冪等性はそのまま働く。
+/// - [decisions]: 検証画面での管理者の対処(修正・除外)。ある場合だけ識別に含める(対処の無い取込のbatchIdは従来と同じ)。
+///   対処を変えた取込は別の取込として扱われる(同じbatchIdで内容が違う、という衝突を起こさない)。
 String deriveBatchId({
   required String eventId,
   required String fileHash,
   required Map<String, dynamic> mappingJson,
+  int? newImportSequence,
+  Map<String, dynamic>? decisions,
 }) {
-  final digest = sha256.convert(
-    utf8.encode('$eventId\n$fileHash\n${canonicalJson(mappingJson)}'),
-  );
+  var source = '$eventId\n$fileHash\n${canonicalJson(mappingJson)}';
+  if (newImportSequence != null) source = '$source\nnew-import:$newImportSequence';
+  if (decisions != null && decisions.isNotEmpty) {
+    source = '$source\ndecisions:${canonicalJson(decisions)}';
+  }
+  final digest = sha256.convert(utf8.encode(source));
   return 'b${digest.toString().substring(0, 30)}';
 }
 
@@ -273,6 +284,8 @@ ImportRequest buildImportRequest({
   required Uint8List fileBytes,
   required CsvTable table,
   required ImportMapping mapping,
+  int? newImportSequence,
+  ImportDecisions decisions = const ImportDecisions(),
 }) {
   final columns = mapping.mappedColumns();
   if (columns.length > importMaxHeaders) {
@@ -322,6 +335,8 @@ ImportRequest buildImportRequest({
     eventId: eventId,
     fileHash: fileHash,
     mappingJson: mappingJson,
+    newImportSequence: newImportSequence,
+    decisions: decisions.toJson(),
   );
   return ImportRequest(
     fileName: fileName,
@@ -337,8 +352,42 @@ ImportRequest buildImportRequest({
       'rows': rows,
       'totalRecords': table.records.length,
       'blankRecordNumbers': blank,
+      ...decisions.toJson(),
     },
   );
+}
+
+/// 検証画面での管理者の対処のうち、取り込む内容を変えるもの(原本のCSVは変えない。サーバーが最終的な値を作って判定する)。
+///   corrections: 修正した値(行番号・列 → 値) / exclusions: 今回の取込から除外する行(行番号 → 理由)
+class ImportDecisions {
+  const ImportDecisions({
+    this.corrections = const {},
+    this.exclusions = const {},
+  });
+
+  /// キーは (行番号, 列名)。
+  final Map<(int, String), String> corrections;
+  final Map<int, String> exclusions;
+
+  bool get isEmpty => corrections.isEmpty && exclusions.isEmpty;
+
+  /// サーバーへ送る形(空の項目は送らない。行番号・列名の順に並べる)。
+  Map<String, dynamic> toJson() {
+    final keys = corrections.keys.toList()
+      ..sort((a, b) => a.$1 != b.$1 ? a.$1 - b.$1 : a.$2.compareTo(b.$2));
+    final rows = exclusions.keys.toList()..sort();
+    return {
+      if (keys.isNotEmpty)
+        'corrections': [
+          for (final k in keys)
+            {'sourceRowNumber': k.$1, 'column': k.$2, 'value': corrections[k]},
+        ],
+      if (rows.isNotEmpty)
+        'excludedRows': [
+          for (final r in rows) {'sourceRowNumber': r, 'reason': exclusions[r]},
+        ],
+    };
+  }
 }
 
 /// 行の判定(サーバーの分類)。
@@ -361,8 +410,12 @@ class PreviewRow {
     required this.issueCodes,
     required this.programIds,
     this.participationType,
+    this.excluded = false,
+    this.corrected = false,
   });
   final int sourceRowNumber;
+  final bool excluded;
+  final bool corrected;
   final RowClass classification;
   final List<String> issueCodes;
   final List<String> programIds;
@@ -388,6 +441,7 @@ class ImportPreview {
     required this.warningColumns,
     this.participationTypes = const [],
     required this.rows,
+    this.decisionSummary,
   });
 
   factory ImportPreview.fromJson(Map<String, dynamic> json) {
@@ -407,7 +461,18 @@ class ImportPreview {
               e.key.toString(): (e.value as num?)?.toInt() ?? 0,
           }
         : <String, int>{};
+    final summary = json['decisionSummary'] is Map
+        ? Map<String, dynamic>.from(json['decisionSummary'] as Map)
+        : null;
     return ImportPreview(
+      decisionSummary: summary == null
+          ? null
+          : (
+              originalRows: (summary['originalRows'] as num?)?.toInt() ?? 0,
+              correctedRows: (summary['correctedRows'] as num?)?.toInt() ?? 0,
+              excludedRows: (summary['excludedRows'] as num?)?.toInt() ?? 0,
+              importRows: (summary['importRows'] as num?)?.toInt() ?? 0,
+            ),
       participationTypes: maps(json['participationTypes']),
       batchId: json['batchId'] as String? ?? '',
       totalRecords: number('totalRecords'),
@@ -437,6 +502,8 @@ class ImportPreview {
           PreviewRow(
             sourceRowNumber: (r['sourceRowNumber'] as num?)?.toInt() ?? 0,
             participationType: r['participationType'] as String?,
+            excluded: r['excluded'] == true,
+            corrected: r['corrected'] == true,
             classification: RowClass.fromValue(r['classification']),
             issueCodes: [
               for (final c
@@ -475,6 +542,10 @@ class ImportPreview {
   final List<String> warningColumns;
   final List<Map<String, dynamic>> participationTypes;
   final List<PreviewRow> rows;
+
+  /// 最終的に取り込まれる内容の集計(原本の行数・修正・除外・取込予定)。
+  final ({int originalRows, int correctedRows, int excludedRows, int importRows})?
+  decisionSummary;
 }
 
 /// commitConfirmedImport の応答(氏名・メール・publicIdは含まれない)。
@@ -527,6 +598,290 @@ class ImportResult {
   bool get committed => status == 'committed';
 }
 
+/// 検証(validateConfirmedImport)の行の判定。
+enum ValidationResult {
+  ok('ok', '正常'),
+  warning('warning', '警告'),
+  error('error', 'エラー'),
+  info('info', '参考');
+
+  const ValidationResult(this.value, this.label);
+  final String value;
+  final String label;
+  static ValidationResult fromValue(Object? value) => values.firstWhere(
+    (c) => c.value == value,
+    orElse: () => ValidationResult.error,
+  );
+}
+
+/// 行の問題1件。[programId]はprogramごとの問題のときだけ。
+class ValidationFinding {
+  const ValidationFinding({
+    required this.code,
+    required this.severity,
+    this.programId,
+  });
+  final String code;
+  final ValidationResult severity;
+  final String? programId;
+}
+
+class ValidationRow {
+  const ValidationRow({
+    required this.sourceRowNumber,
+    required this.classification,
+    required this.result,
+    required this.findings,
+    required this.programIds,
+    this.participationType,
+    this.duplicateRows = const [],
+    this.excluded = false,
+    this.corrected = false,
+    this.approvalKeys = const {},
+  });
+  final int sourceRowNumber;
+
+  /// 許可が必要な警告の種類(review / existingDuplicate / csvDuplicate) → 許可の鍵(サーバーが行の最終的な値と
+  /// 警告の内容から作る)。commitには許可した警告の鍵を送り、サーバーが現在の鍵と照合する(修正等で変われば無効)。
+  final Map<String, String> approvalKeys;
+
+  /// 今回の取込から除外した行 / 修正した行(サーバーが検証に使った対処)。
+  final bool excluded;
+  final bool corrected;
+
+  /// プレビューと同じ計画上の分類(ready / review / error)。プレビューとの一致確認に使う。
+  final RowClass classification;
+  final ValidationResult result;
+  final List<ValidationFinding> findings;
+  final List<String> programIds;
+  final String? participationType;
+
+  /// CSV内で同じメールアドレスを持つ他の行の番号。
+  final List<int> duplicateRows;
+}
+
+/// validateConfirmedImport の応答(行番号と判定コードだけ。氏名・メールは含まれない。表示は手元のCSVから行う)。
+/// 判定はサーバーがプレビュー・取込と同じ計画から作る(クライアントは判定しない)。
+class ImportValidation {
+  const ImportValidation({
+    required this.batchId,
+    required this.totalRecords,
+    required this.totalRows,
+    required this.blankRecordCount,
+    required this.okCount,
+    required this.warningCount,
+    required this.errorCount,
+    this.infoCount = 0,
+    required this.findingCounts,
+    required this.existingEmailDuplicateCount,
+    required this.csvEmailDuplicateCount,
+    required this.existingActiveParticipantCount,
+    required this.existingStatus,
+    required this.existingSequence,
+    required this.sameFileSequences,
+    required this.nextImportSequence,
+    required this.rows,
+    this.participationTypes = const [],
+    this.validationFingerprint = '',
+    this.importedBatches = const [],
+    this.errorRows = const [],
+    this.reviewRows = const [],
+    this.ignoredCountRows = const [],
+    this.existingDuplicateRows = const [],
+    this.csvDuplicateRows = const [],
+    this.excludedRowCount = 0,
+    this.correctedRowCount = 0,
+    this.importRowCount = 0,
+  });
+
+  factory ImportValidation.fromJson(Map<String, dynamic> json) {
+    int number(Object? v) => (v as num?)?.toInt() ?? 0;
+    List<Map<String, dynamic>> maps(Object? value) => value is List
+        ? [
+            for (final item in value)
+              if (item is Map) Map<String, dynamic>.from(item),
+          ]
+        : const [];
+    final existing = json['existingBatch'] is Map
+        ? Map<String, dynamic>.from(json['existingBatch'] as Map)
+        : null;
+    List<int> numbers(Object? value) =>
+        value is List ? [for (final n in value) number(n)] : const [];
+    return ImportValidation(
+      errorRows: numbers(json['errorRows']),
+      reviewRows: numbers(json['reviewRows']),
+      ignoredCountRows: numbers(json['ignoredCountRows']),
+      existingDuplicateRows: numbers(json['existingDuplicateRows']),
+      csvDuplicateRows: numbers(json['csvDuplicateRows']),
+      excludedRowCount: number(json['excludedRowCount']),
+      correctedRowCount: number(json['correctedRowCount']),
+      importRowCount: number(json['importRowCount']),
+      batchId: json['batchId'] as String? ?? '',
+      totalRecords: number(json['totalRecords']),
+      totalRows: number(json['totalRows']),
+      blankRecordCount: number(json['blankRecordCount']),
+      okCount: number(json['okCount']),
+      warningCount: number(json['warningCount']),
+      errorCount: number(json['errorCount']),
+      infoCount: number(json['infoCount']),
+      findingCounts: json['findingCounts'] is Map
+          ? {
+              for (final e in (json['findingCounts'] as Map).entries)
+                e.key.toString(): number(e.value),
+            }
+          : const {},
+      existingEmailDuplicateCount: number(json['existingEmailDuplicateCount']),
+      csvEmailDuplicateCount: number(json['csvEmailDuplicateCount']),
+      existingActiveParticipantCount: number(
+        json['existingActiveParticipantCount'],
+      ),
+      existingStatus: existing?['status'] as String?,
+      existingSequence: (existing?['sequence'] as num?)?.toInt(),
+      sameFileSequences: [
+        for (final b in maps(json['sameFileBatches'])) number(b['sequence']),
+      ],
+      nextImportSequence: number(
+        json['expectedImportSequence'] ?? json['nextImportSequence'],
+      ),
+      validationFingerprint: json['validationFingerprint'] as String? ?? '',
+      importedBatches: [
+        for (final b in maps(json['importedBatches']))
+          (sequence: number(b['sequence']), status: b['status'] as String? ?? ''),
+      ],
+      participationTypes: maps(json['participationTypes']),
+      rows: [
+        for (final r in maps(json['rows']))
+          ValidationRow(
+            sourceRowNumber: number(r['sourceRowNumber']),
+            classification: RowClass.fromValue(r['classification']),
+            result: ValidationResult.fromValue(r['result']),
+            findings: [
+              for (final f in maps(r['findings']))
+                ValidationFinding(
+                  code: f['code']?.toString() ?? '',
+                  severity: ValidationResult.fromValue(f['severity']),
+                  programId: f['programId'] as String?,
+                ),
+            ],
+            programIds: [
+              for (final c in (r['programIds'] is List
+                  ? r['programIds'] as List
+                  : const []))
+                c.toString(),
+            ],
+            participationType: r['participationType'] as String?,
+            excluded: r['excluded'] == true,
+            corrected: r['corrected'] == true,
+            duplicateRows: [
+              for (final n in (r['duplicateRows'] is List
+                  ? r['duplicateRows'] as List
+                  : const []))
+                number(n),
+            ],
+            approvalKeys: r['approvalKeys'] is Map
+                ? {
+                    for (final e in (r['approvalKeys'] as Map).entries)
+                      e.key.toString(): e.value.toString(),
+                  }
+                : const {},
+          ),
+      ],
+    );
+  }
+
+  final String batchId;
+  final int totalRecords;
+  final int totalRows;
+  final int blankRecordCount;
+  final int okCount;
+  final int warningCount;
+  final int errorCount;
+
+  /// 参考情報だけの行の数(警告・エラーは無い。取込に影響せず、許可も要らない)。
+  final int infoCount;
+
+  /// 問題の種類(コード) → その問題を持つ行の数。
+  final Map<String, int> findingCounts;
+  final int existingEmailDuplicateCount;
+  final int csvEmailDuplicateCount;
+  final int existingActiveParticipantCount;
+
+  /// 同じ内容(同じbatchId)が既にサーバーにある場合の状態(committing / committed / failed)。
+  final String? existingStatus;
+  final int? existingSequence;
+  final List<int> sameFileSequences;
+
+  /// このイベントで次に作られる取込回の番号(サーバーが返す期待値)。新しい取込回を作るcommitはこの番号を送り、
+  /// サーバーが採番と同じトランザクションで照合する(別の取込が先に確定していれば拒否され、再検証が必要)。
+  final int nextImportSequence;
+
+  /// 検証の指紋(サーバーが再計算できる値)。新しい取込回を作るcommitに付けて送る。
+  final String validationFingerprint;
+
+  /// このイベントの取込回(番号・状態)。
+  final List<({int sequence, String status})> importedBatches;
+
+  /// 対処が必要な行(今回の取込から除外した行は含まない): 未解決のエラー / 確認が必要(許可か除外) /
+  /// 既存参加者・CSV内のメール重複(許可が必要)。
+  /// [ignoredCountRows]は参考情報(不参加のprogramに残る人数。無視され、参加にはならない。許可は要らない)。
+  final List<int> errorRows;
+  final List<int> reviewRows;
+  final List<int> ignoredCountRows;
+  final List<int> existingDuplicateRows;
+  final List<int> csvDuplicateRows;
+  final int excludedRowCount;
+  final int correctedRowCount;
+
+  /// 今回の取込から除外していない行の数(取込予定)。
+  final int importRowCount;
+  final List<Map<String, dynamic>> participationTypes;
+  final List<ValidationRow> rows;
+
+  bool get hasEmailDuplicates =>
+      existingEmailDuplicateCount > 0 || csvEmailDuplicateCount > 0;
+
+  List<int> _includedRowsWhere(bool Function(ValidationRow r) test) => [
+    for (final r in rows)
+      if (!r.excluded && test(r)) r.sourceRowNumber,
+  ];
+  bool Function(ValidationRow r) _has(String code) =>
+      (r) => r.findings.any((f) => f.code == code);
+
+  /// 対処が必要な行(今回の取込から除外した行は含まない)。サーバーの一覧を優先し、無ければ行ごとの判定から求める。
+  List<int> get pendingErrorRows => errorRows.isNotEmpty
+      ? errorRows
+      : _includedRowsWhere((r) => r.result == ValidationResult.error);
+  List<int> get pendingReviewRows => reviewRows.isNotEmpty
+      ? reviewRows
+      : _includedRowsWhere((r) => r.classification == RowClass.review);
+  List<int> get existingDuplicateRowList => existingDuplicateRows.isNotEmpty
+      ? existingDuplicateRows
+      : _includedRowsWhere(_has('email-duplicate-existing'));
+  List<int> get csvDuplicateRowList => csvDuplicateRows.isNotEmpty
+      ? csvDuplicateRows
+      : _includedRowsWhere(_has('email-duplicate-in-csv'));
+  List<int> get ignoredCountRowList => ignoredCountRows.isNotEmpty
+      ? ignoredCountRows
+      : _includedRowsWhere(_has('not-attending-count-ignored'));
+
+  /// 参考情報のある行(今回の取込から除外した行は含まない。警告・エラーと重なる行も含む)。
+  List<int> get infoRowList => _includedRowsWhere(
+    (r) => r.findings.any((f) => f.severity == ValidationResult.info),
+  );
+  bool get alreadyImported => existingStatus == 'committed';
+
+  /// プレビューの行の分類が、検証の行の分類と完全に一致するか(同じ計画から作られていることの確認)。
+  bool matchesPreview(ImportPreview preview) {
+    if (preview.totalRows != totalRows || preview.rows.length != rows.length) {
+      return false;
+    }
+    final byRow = {for (final r in rows) r.sourceRowNumber: r.classification};
+    return preview.rows.every(
+      (r) => byRow[r.sourceRowNumber] == r.classification,
+    );
+  }
+}
+
 /// 取込先のイベント(getConfirmedEventSummary の応答。テンプレート等は含まれない)。
 class ImportEventSummary {
   const ImportEventSummary({
@@ -576,7 +931,14 @@ const Map<String, String> importIssueLabels = {
   'review-unknown': '参加の列に、指定していない値があります(確認が必要)',
   'row-check-failed': '行の確認(区分など)に合いません',
   'row-length-mismatch': '列の数がヘッダーと合いません',
-  'slot-missing': '時間枠がありません',
+  'slot-missing': '参加なのに時間枠がありません',
+  'slot-unparsed': '時間枠を解釈できません(未知の時間枠)',
+  'slot-zero-length': '時間枠の開始と終了が同じです',
+  'slot-reversed': '時間枠の終了が開始より前です',
+  'email-duplicate-in-csv': 'CSV内でメールアドレスが重複しています',
+  'email-duplicate-existing': '既存の有効な参加者とメールアドレスが重複しています',
+  'not-attending-count-ignored': '不参加のprogramに人数が残っています(人数は無視されます)',
+  'participation-type-undetermined': '参加タイプ(7タイプ)を判定できません',
   'slot-too-long': '時間枠の値が長すぎます',
   'no-program': '参加するprogramがありません',
   'attendance-invalid': '参加情報が不正です',

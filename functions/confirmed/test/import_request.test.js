@@ -132,3 +132,15 @@ test("mappingの重複判定に相当する設定(identity・dedupe等)はAPIで
   }
   assert.ok(makeRecord(1).length > 0);
 });
+
+test("許可の鍵(approvalKeys)はcommitだけが受け付け、64桁の16進・重複なしを検証する", () => {
+  const data = body(makeTable(2));
+  const k = (c) => c.repeat(64);
+  assert.equal(codeOf(() => parseImportRequest({...data, approvalKeys: [k("a")]}, {commit: false})), "unknown-key");
+  assert.deepEqual(parseImportRequest({...data, approvalKeys: [k("b"), k("a")]}, {commit: true}).approvalKeys, [k("a"), k("b")]);
+  assert.deepEqual(parseImportRequest(data, {commit: true}).approvalKeys, []);
+  for (const [bad, code] of [["x", "invalid-list"], [["x"], "invalid-list"], [[k("A")], "invalid-list"], [[1], "invalid-list"],
+    [[k("a"), k("a")], "duplicate-approval-key"]]) {
+    assert.equal(codeOf(() => parseImportRequest({...data, approvalKeys: bad}, {commit: true})), code, JSON.stringify(bad));
+  }
+});

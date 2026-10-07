@@ -10,6 +10,7 @@ const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {loadIndex} = require("../test_support/load_index");
 const {buildImportRequest} = require("../test_support/import_request_builder");
+const {validatedCommitRun} = require("../test_support/validated_commit");
 const {makeTable} = require("../confirmed/test_support/synthetic");
 const {assignmentDocId} = require("../event_access");
 
@@ -27,7 +28,7 @@ describe("confirmed業務callableのイベント単位の認可(実際のindex.j
   let unexpectedRequests;
 
   const as = (uid, data) => ({auth: {uid}, data});
-  const call = (name, uid, data) => outcome(index[name].run(as(uid, data)));
+  const call = (name, uid, data) => outcome((name === "commitConfirmedImport" ? validatedCommitRun(index) : (r) => index[name].run(r))(as(uid, data)));
   const seedEvent = (eventId, name) => db.collection("events").doc(eventId).set({
     eventId, eventName: name, senderName: "架空事務局", flow: "confirmed", contact: "架空事務局",
     startAt: env.Timestamp.fromDate(new Date("2026-11-30T01:00:00Z")), endAt: env.Timestamp.fromDate(new Date("2026-11-30T07:00:00Z")),
@@ -40,7 +41,7 @@ describe("confirmed業務callableのイベント単位の認可(実際のindex.j
     assignedAt: env.FieldValue.serverTimestamp(), updatedAt: env.FieldValue.serverTimestamp(),
   });
   const importInto = (eventId, clientRequestId, n = 3) =>
-    index.commitConfirmedImport.run(as("u-admin", buildImportRequest({table: makeTable(n), eventId, clientRequestId})));
+    validatedCommitRun(index)(as("u-admin", buildImportRequest({table: makeTable(n), eventId, clientRequestId})));
   // 受付に使う参加者(participantId・publicId・programId)
   async function receptionTarget(eventId) {
     const participant = (await db.collection("participants").where("eventId", "==", eventId).get()).docs
@@ -96,15 +97,21 @@ describe("confirmed業務callableのイベント単位の認可(実際のindex.j
     test("admin・担当managerは成功、担当staff・他イベントmanager・無効・未任命・従来staffは拒否", async () => {
       const previewA = buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2"});
       for (const uid of ["u-admin", "u-mgr-a"]) {
+        assert.equal(await call("validateConfirmedImport", uid, previewA), "ok", uid);
         assert.equal(await call("previewConfirmedImport", uid, previewA), "ok", uid);
         assert.equal(await call("getConfirmedEventSummary", uid, {eventId: EV_A}), "ok", uid);
       }
       for (const uid of ["u-staff-a", ...OUTSIDERS_FOR_A]) {
+        assert.equal(await call("validateConfirmedImport", uid, previewA), "permission-denied", uid);
         assert.equal(await call("previewConfirmedImport", uid, previewA), "permission-denied", uid);
         assert.equal(await call("commitConfirmedImport", uid, buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: `x${uid.replace(/-/g, "")}`})), "permission-denied", uid);
         assert.equal(await call("getConfirmedEventSummary", uid, {eventId: EV_A}), "permission-denied", uid);
       }
-      assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2"})), "ok");
+      // EV_Aには同じ架空メールの有効な参加者が既にいる(batchA1)。別参加者として取り込む明示的な許可が要る。
+      assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2"})), "failed-precondition");
+      assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2",
+        extra: {acknowledgeExistingEmailDuplicates: true}})), "ok");
+      assert.equal(await call("validateConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_B, clientRequestId: "batchB9"})), "permission-denied");
       assert.equal(await call("previewConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_B, clientRequestId: "batchB9"})), "permission-denied");
       assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_B, clientRequestId: "batchB9"})), "permission-denied");
       assert.equal((await db.collection("importBatches").doc("batchB9").get()).exists, false, "拒否されたcommitは何も書かない");

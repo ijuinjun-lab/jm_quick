@@ -12,6 +12,7 @@ const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeTable} = require("../confirmed/test_support/synthetic");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createWinnerMailApi} = require("../confirmed/winner_mail_api");
 const {createWinnerSendApi} = require("../confirmed/winner_send_api");
 const {createReminderApi} = require("../confirmed/reminder_api");
@@ -88,10 +89,11 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     for (const key of Object.keys(event)) if (event[key] === undefined) delete event[key];
     await db.collection("events").doc("event1").set(event);
   }
-  const importApi = () => createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+  const importApi = () => withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
   async function importBatch(clientRequestId, tableOrN = 3) {
     const table = typeof tableOrN === "number" ? makeTable(tableOrN) : tableOrN;
-    return importApi().commit({identity: {uid: "u-admin"}, data: buildImportRequest({table, clientRequestId})});
+    // テスト用の取込(複数の取込回で同じ架空メールを使う)。既存参加者・CSV内のメール重複は、管理者が許可した取込として扱う。
+    return importApi().commit({identity: {uid: "u-admin"}, data: {...buildImportRequest({table, clientRequestId}), acknowledgeExistingEmailDuplicates: true, acknowledgeCsvEmailDuplicates: true}});
   }
   const JOB = "reminder-event1";
   const job = () => get(`sendJobs/${JOB}`);

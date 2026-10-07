@@ -4,6 +4,7 @@ const {test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {composeWinnerMailFor, composeReminderMailFor, loadAttendances} = require("../confirmed/winner_mail_message");
 const {buildMailSnapshot} = require("../confirmed/mail_view_model");
 const {receptionQrPayload} = require("../confirmed/pass_urls");
@@ -19,7 +20,7 @@ test("匿名fixtureのみ: 120行を現行import APIで照合し、一致後に7
   const {db, FieldValue} = env;
   const fixture = makeSyntheticSample();
   await db.doc(`events/${EVENT_ID}`).set(event());
-  const api = createImportApi({getDb: () => db, serverTimestamp: () => FieldValue.serverTimestamp()});
+  const api = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => FieldValue.serverTimestamp()}));
   const data = buildImportRequest({eventId: EVENT_ID, clientRequestId: "synthetic120", sourceFileName: "synthetic-expected-aggregates.csv", table: fixture.table, mapping});
   const preview = await api.preview({data});
   assert.equal(preview.totalRecords, 120);
@@ -38,7 +39,8 @@ test("匿名fixtureのみ: 120行を現行import APIで照合し、一致後に7
     assert.deepEqual([...actual.programIds].sort(), expected.expectedAttendances.map((a) => a.programId).sort());
   }
   // 上の照合が一致しなければ、以降の保存・メール確認には進まない。保存先はdemoローカルEmulatorのみ。
-  await api.commit({identity: {uid: "synthetic-admin"}, data: {...data, approvedReviewRows: [], excludedRows: []}});
+  // 不参加のprogramに残っている人数(無視される)は、管理者が確認したうえで取り込む
+  await api.commit({identity: {uid: "synthetic-admin"}, data: {...data, approvedReviewRows: [], excludedRows: [], acknowledgeIgnoredCounts: true}});
   const participants = (await db.collection("participants").where("eventId", "==", EVENT_ID).get()).docs;
   const attendanceDocs = (await db.collection("programAttendances").where("eventId", "==", EVENT_ID).get()).docs;
   assert.equal(participants.length, 120);

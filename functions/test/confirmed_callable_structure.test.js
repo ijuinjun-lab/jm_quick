@@ -97,11 +97,11 @@ test("Phase 10C: 従来方式のメール送信・一括メール・削除はadm
     /^confirmedEventCallable\("eventStaffOrLegacyStaff", EVENT_SCOPES\.dataEventId, legacyApi\.getEventKind, /);
 });
 
-test("当選者CSV取込のpreview・commitは対象イベントのevent_manager以上(Phase 1B。staffは実行できない)", () => {
-  for (const name of ["previewConfirmedImport", "commitConfirmedImport"]) {
+test("当選者CSV取込のvalidate・preview・commitは対象イベントのevent_manager以上(Phase 1B。staffは実行できない)", () => {
+  for (const name of ["validateConfirmedImport", "previewConfirmedImport", "commitConfirmedImport"]) {
     const found = exportsInIndex.find((e) => e.name === name);
     assert.ok(found, `${name}が見つかりません`);
-    assert.match(found.rhs, /^confirmedEventCallable\("eventManager", EVENT_SCOPES\.dataEventId, importApi\.(preview|commit)/, name);
+    assert.match(found.rhs, /^confirmedEventCallable\("eventManager", EVENT_SCOPES\.dataEventId, importApi\.(validate|preview|commit)/, name);
   }
 });
 
@@ -220,6 +220,7 @@ const AUTHORIZATION_MAP_PHASE_1B = {
   deleteParticipant: "confirmedCallable:admin",
   deleteEvent: "confirmedCallable:admin",
   getMyAccessRole: "confirmedCallable:authenticated",
+  validateConfirmedImport: E_MANAGER,
   previewConfirmedImport: E_MANAGER,
   commitConfirmedImport: E_MANAGER,
   createConfirmedEvent: "confirmedCallable:systemAdmin",
@@ -286,7 +287,7 @@ const authorizationOf = (rhs) => {
 test("Phase 1B: 全exportの入口・認可レベル・対象イベントのresolverが正式マップと一致する(callableの追加・削除も無い)", () => {
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
-  assert.equal(exportsInIndex.length, 58);
+  assert.equal(exportsInIndex.length, 59);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {

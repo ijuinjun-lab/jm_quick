@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/confirmed/import_models.dart';
 
@@ -336,6 +337,77 @@ void main() {
     );
   });
 
+  group('新しい取込回として取り込むbatchId', () {
+    final mapping = {'version': 1, 'programs': []};
+    String id({int? sequence}) => deriveBatchId(
+      eventId: 'ev1',
+      fileHash: 'a' * 64,
+      mappingJson: mapping,
+      newImportSequence: sequence,
+    );
+    test('指定しなければ従来と完全に同じbatchId(既存の取込回の識別は変わらない)', () {
+      final legacy = 'b${sha256.convert(utf8.encode('ev1\n${'a' * 64}\n${canonicalJson(mapping)}')).toString().substring(0, 30)}';
+      expect(id(), legacy);
+    });
+    test('検証画面の対処(修正・除外)は、ある場合だけ識別に含める(空なら従来どおり)', () {
+      String withDecisions(ImportDecisions d) => deriveBatchId(
+        eventId: 'ev1',
+        fileHash: 'a' * 64,
+        mappingJson: mapping,
+        decisions: d.toJson(),
+      );
+      expect(withDecisions(const ImportDecisions()), id());
+      final corrected = ImportDecisions(corrections: {(2, 'メールアドレス'): 'x@example.invalid'});
+      final excluded = const ImportDecisions(exclusions: {3: '除外'});
+      expect(withDecisions(corrected), isNot(id()));
+      expect(withDecisions(excluded), isNot(withDecisions(corrected)));
+      expect(withDecisions(corrected), withDecisions(ImportDecisions(corrections: {(2, 'メールアドレス'): 'x@example.invalid'})));
+      expect(corrected.toJson(), {
+        'corrections': [
+          {'sourceRowNumber': 2, 'column': 'メールアドレス', 'value': 'x@example.invalid'},
+        ],
+      });
+    });
+    test('指定すると同じ内容でも別のbatchId。同じ番号なら同じ(再送は冪等)。番号が違えば別', () {
+      expect(id(sequence: 2), isNot(id()));
+      expect(id(sequence: 2), id(sequence: 2));
+      expect(id(sequence: 3), isNot(id(sequence: 2)));
+      expect(RegExp(r'^b[0-9a-f]{30}$').hasMatch(id(sequence: 2)), isTrue);
+    });
+  });
+
+  group('検証の応答', () {
+    test('行・問題・重複・取込済みの情報を読み、プレビューとの一致を判定できる', () {
+      final v = ImportValidation.fromJson({
+        'batchId': 'b1', 'totalRecords': 3, 'totalRows': 2, 'blankRecordCount': 1,
+        'okCount': 1, 'warningCount': 1, 'errorCount': 0,
+        'findingCounts': {'email-duplicate-existing': 1},
+        'existingEmailDuplicateCount': 1, 'csvEmailDuplicateCount': 0, 'existingActiveParticipantCount': 10,
+        'existingBatch': {'status': 'committed', 'sequence': 1}, 'nextImportSequence': 2,
+        'sameFileBatches': [{'batchId': 'b1', 'sequence': 1, 'status': 'committed'}],
+        'rows': [
+          {'sourceRowNumber': 2, 'classification': 'ready', 'result': 'ok', 'findings': [], 'programIds': ['p1']},
+          {'sourceRowNumber': 3, 'classification': 'ready', 'result': 'warning',
+            'findings': [{'code': 'email-duplicate-existing', 'severity': 'warning'}], 'programIds': ['p1']},
+        ],
+      });
+      expect(v.hasEmailDuplicates, isTrue);
+      expect(v.alreadyImported, isTrue);
+      expect(v.nextImportSequence, 2);
+      expect(v.sameFileSequences, [1]);
+      expect(v.rows[1].findings.single.severity, ValidationResult.warning);
+      ImportPreview preview(String secondClass) => ImportPreview.fromJson({
+        'totalRows': 2,
+        'rows': [
+          {'sourceRowNumber': 2, 'classification': 'ready'},
+          {'sourceRowNumber': 3, 'classification': secondClass},
+        ],
+      });
+      expect(v.matchesPreview(preview('ready')), isTrue);
+      expect(v.matchesPreview(preview('review')), isFalse);
+    });
+  });
+
   group('サーバーの応答', () {
     test('previewの応答モデルは、サーバーが返す項目だけを読む(人数・氏名・メール・publicIdは無い)', () {
       final preview = ImportPreview.fromJson({
@@ -396,5 +468,27 @@ void main() {
       expect(importIssueLabel('row-check-failed'), contains('行の確認'));
       expect(importIssueLabel('brand-new-code'), 'brand-new-code');
     });
+  });
+
+  test('検証の応答: 許可の鍵(行ごと)と参考情報の件数を読む。参考情報の行は警告・エラーと重なっても数える', () {
+    final v = ImportValidation.fromJson({
+      'okCount': 1, 'warningCount': 1, 'errorCount': 0, 'infoCount': 1,
+      'ignoredCountRows': [3, 4],
+      'rows': [
+        {'sourceRowNumber': 2, 'classification': 'ready', 'result': 'ok', 'findings': []},
+        {'sourceRowNumber': 3, 'classification': 'ready', 'result': 'info',
+          'findings': [{'code': 'not-attending-count-ignored', 'severity': 'info', 'programId': 'p'}]},
+        {'sourceRowNumber': 4, 'classification': 'ready', 'result': 'warning',
+          'findings': [{'code': 'email-duplicate-existing', 'severity': 'warning'},
+            {'code': 'not-attending-count-ignored', 'severity': 'info', 'programId': 'p'}],
+          'approvalKeys': {'existingDuplicate': 'a' * 64}},
+      ],
+    });
+    expect(v.infoCount, 1);
+    expect(v.rows[2].approvalKeys, {'existingDuplicate': 'a' * 64});
+    expect(v.rows[1].approvalKeys, isEmpty, reason: '参考情報には許可の鍵が無い');
+    expect(v.rows[1].result, ValidationResult.info);
+    expect(v.infoRowList, [3, 4]);
+    expect(v.ignoredCountRowList, [3, 4]);
   });
 }

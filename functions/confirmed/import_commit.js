@@ -92,6 +92,25 @@ function countsOf(items) {
   return counts;
 }
 
+// 取込のトランザクション(batch作成・各行の書込み・committedへの更新)を、競合で中断された場合だけやり直す
+// (トランザクションは確定していないので書込みは残らない。各トランザクションは冪等)。
+// Admin SDKはABORTEDを自動で再試行するが、競合で閉じられたトランザクションへの読み取りが「Transaction is invalid or closed」
+// (INVALID_ARGUMENT)になる場合は再試行しない。やり直すと、作成の条件(guard)は最新の状態で判定し直される。
+const TRANSIENT_ATTEMPTS = 5;
+const isTransientTransactionError = (error) => Boolean(error) && error.isApiError !== true &&
+  (error.code === 10 || (error.code === 3 && /Transaction is invalid or closed/i.test(String(error.message))));
+
+async function runTransactionWithRetry(db, fn) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await db.runTransaction(fn);
+    } catch (error) {
+      if (attempt >= TRANSIENT_ATTEMPTS || !isTransientTransactionError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 * attempt));
+    }
+  }
+}
+
 async function runPool(items, limit, task) {
   let next = 0;
   const workers = Array.from({length: Math.min(limit, items.length)}, async () => {
@@ -108,9 +127,11 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
   importRecordId}) {
   const batchRefOf = (db, batchId) => db.collection("importBatches").doc(batchId);
 
-  function rowDoc(item, uid) {
+  // ctx.rowAudit(item): 管理者の対処(修正・許可・除外)の監査情報(新方式の検証画面からの取込)。無ければ追加しない。
+  function rowDoc(item, uid, rowAudit) {
     const {record, result, exclusion} = item;
     return {
+      ...(rowAudit ? rowAudit(item) : {}),
       sourceRowNumber: record.sourceRowNumber,
       importRecordId: record.importRecordId,
       classification: item.classification,
@@ -187,7 +208,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
   async function writeRow(db, ctx, item) {
     const batchRef = batchRefOf(db, ctx.batchId);
     const rowRef = batchRef.collection("rows").doc(String(item.record.sourceRowNumber));
-    await db.runTransaction(async (tx) => {
+    await runTransactionWithRetry(db, async (tx) => {
       const created = item.result === RESULT.CREATED;
       const participantRef = created ? db.collection("participants").doc(item.record.participantId) : null;
       const attendanceRefs = created
@@ -205,7 +226,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
         tx.create(participantRef, participantDoc(item, ctx));
         item.record.attendances.forEach((a, index) => tx.create(attendanceRefs[index], attendanceDoc(a, ctx)));
       }
-      tx.create(rowRef, rowDoc(item, ctx.uid));
+      tx.create(rowRef, rowDoc(item, ctx.uid, ctx.rowAudit));
     });
   }
 
@@ -219,6 +240,8 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
         sourceRowNumber: r.sourceRowNumber, importRecordId: r.importRecordId, classification: r.classification,
         result: r.result, participantId: r.participantId, issueCodes: r.issueCodes, programIds: r.programIds,
         approvedReview: r.approvedReview, excludedByOperator: r.excludedByOperator,
+        // 対処の種類と修正した列名だけ(原本の値・修正後の値は応答に含めない)。
+        ...(r.resolution ? {resolution: r.resolution, correctedColumns: r.correctedColumns || [], allowedWarnings: r.allowedWarnings || []} : {}),
       };
     }).sort((a, b2) => a.sourceRowNumber - b2.sourceRowNumber);
     return {
@@ -254,16 +277,24 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     return {ok: problems.length === 0, problems, actual};
   }
 
+  // 失敗の記録。同じ取込回を同時に処理している別のリクエストが既にcommittedにしていれば、上書きしない(committedは最終状態)。
   async function markFailed(db, batchId, reason) {
     try {
-      await batchRefOf(db, batchId).update({status: BATCH_STATUS.FAILED, failureReason: reason, updatedAt: serverTimestamp()});
+      const ref = batchRefOf(db, batchId);
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if (!snap.exists || snap.data().status === BATCH_STATUS.COMMITTED) return;
+        tx.update(ref, {status: BATCH_STATUS.FAILED, failureReason: reason, updatedAt: serverTimestamp()});
+      });
     } catch (secondary) {
       // 失敗の記録に失敗しても、元のエラーを優先する(statusはcommittingのまま=committedではない)。
     }
   }
 
   // request: parseImportRequest(commit)の結果 / plan: planImportBatchFromRows(...)の結果 / identity: {uid}
-  async function commit({db, identity, request, plan}) {
+  // guardNewBatch(tx, event): 新しい取込回を作る場合だけ、採番と同じトランザクションの中で呼ぶ(既存の取込回の再送・続きからの
+  //   完了では呼ばない)。例外を投げれば何も書かれない。戻り値のオブジェクトはbatch文書へ追加で保存する。
+  async function commit({db, identity, request, plan, guardNewBatch, rowAudit}) {
     const {batchId, eventId} = request;
     const hash = requestHash(request);
     const items = [...resolveRecords(plan, request), ...blankItems(plan, batchId, importRecordId)]
@@ -273,7 +304,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     const eventRef = db.collection("events").doc(eventId);
 
     // 1. batchの作成(または既存の再利用)。採番はeventのカウンタを同じトランザクションで進める。
-    const started = await db.runTransaction(async (tx) => {
+    const started = await runTransactionWithRetry(db, async (tx) => {
       const [batchSnap, eventSnap] = await tx.getAll(batchRef, eventRef);
       if (batchSnap.exists) {
         const existing = batchSnap.data();
@@ -290,8 +321,10 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
         throw new ApiError("failed-precondition", "このイベントは新方式(confirmed)ではありません。");
       }
       const sequence = (eventSnap.data().importSequence || 0) + 1;
+      const extra = guardNewBatch ? await guardNewBatch(tx, {event: eventSnap.data(), sequence}) : {};
       tx.update(eventRef, {importSequence: sequence});
       tx.create(batchRef, {
+        ...extra,
         eventId, sequence, label: request.label || `第${sequence}回`, sourceFileName: request.sourceFileName,
         fileHash: request.fileHash, mappingVersion: plan.batch.mappingVersion, requestHash: hash,
         totalRows: plan.batch.totalRows, totalRecords: plan.batch.totalRecords,
@@ -308,7 +341,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       return {...(await loadResult(db, batchId)), idempotentReplay: true};
     }
 
-    const ctx = {batchId, eventId, uid: identity.uid, totalRows: plan.batch.totalRows, totalRecords: plan.batch.totalRecords};
+    const ctx = {batchId, eventId, uid: identity.uid, totalRows: plan.batch.totalRows, totalRecords: plan.batch.totalRecords, rowAudit};
     try {
       // 2. 各行を冪等に書く(既に書けた行は何もしない)。
       await runPool(items, concurrency, (item) => writeRow(db, ctx, item));
@@ -320,7 +353,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
           {code: "conservation-violated", problems: verification.problems});
       }
       // 4. committed。
-      await db.runTransaction(async (tx) => {
+      await runTransactionWithRetry(db, async (tx) => {
         tx.update(batchRef, {
           status: BATCH_STATUS.COMMITTED, failureReason: null,
           createdCount: verification.actual.created, reviewPendingCount: verification.actual.reviewPending,

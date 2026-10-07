@@ -10,6 +10,7 @@ const {buildImportRequest} = require("../test_support/import_request_builder");
 const {makeTable, syntheticMapping} = require("../confirmed/test_support/synthetic");
 const {createEventCreateApi} = require("../confirmed/event_create_api");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createWinnerSendApi} = require("../confirmed/winner_send_api");
 const {createReminderApi} = require("../confirmed/reminder_api");
 const {confirmedCallable} = require("../auth");
@@ -48,7 +49,7 @@ describe("confirmedイベント作成API(Emulator + 実Admin SDK)", {skip: skipR
     db = env.db;
     const wrap = (handler) => { const callable = confirmedCallable("admin", handler, {db, logger: silent}); return (request) => callable.run(request); };
     create = wrap(createEventCreateApi({getDb: () => db, serverTimestamp, logger: silent, now: () => NOW}).createEvent);
-    const importApi = createImportApi({getDb: () => db, serverTimestamp});
+    const importApi = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp}));
     preview = wrap(importApi.preview);
     commit = wrap(importApi.commit);
     // 実transportは使わない: 呼ばれたら記録して失敗させる(メールが送られないことの確認用)
@@ -106,7 +107,8 @@ describe("confirmedイベント作成API(Emulator + 実Admin SDK)", {skip: skipR
     const request = buildImportRequest({table, eventId, mapping: syntheticMapping()});
     const previewed = await preview(asAdmin(request));
     assert.equal(JSON.stringify(previewed).includes("failed"), false);
-    const committed = await commit(asAdmin(request));
+    // CSV内のメール重複は、管理者の明示的な許可があれば別の参加者として取り込む
+    const committed = await commit(asAdmin({...request, acknowledgeCsvEmailDuplicates: true}));
     assert.ok(committed.batchId || committed.importBatchId || committed);
     const participants = (await db.collection("participants").where("eventId", "==", eventId).get()).docs.map((d) => d.data());
     assert.equal(participants.length, 3, "1 CSV行 = 1 participant");

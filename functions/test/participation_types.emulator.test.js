@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {before, after, test, describe} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {createImportApi} = require("../confirmed/import_api");
+const {withValidatedCommit} = require("../test_support/validated_commit");
 const {createWinnerMailApi} = require("../confirmed/winner_mail_api");
 const {composeReminderMailFor} = require("../confirmed/winner_mail_message");
 const {buildMailSnapshot} = require("../confirmed/mail_view_model");
@@ -17,7 +18,7 @@ describe("7タイプ: CSV→正本保存→参加者別メール・リマイン�
     const {db, FieldValue} = env;
     const serverTimestamp = () => FieldValue.serverTimestamp();
     await db.doc(`events/${EVENT_ID}`).set(event());
-    const imports = createImportApi({getDb: () => db, serverTimestamp});
+    const imports = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp}));
     const request = buildImportRequest({table: table(), mapping, eventId: EVENT_ID});
     const preview = await imports.preview({data: request});
     assert.equal(preview.readyCount, 7);
@@ -33,7 +34,8 @@ describe("7タイプ: CSV→正本保存→参加者別メール・リマイン�
     assert.equal(invalidPreview.rows[0].participationType, null);
     assert.equal(invalidPreview.rows[1].participationType, null);
     assert.equal(invalidPreview.participationTypes.reduce((sum, t) => sum + t.count, 0), 5);
-    await imports.commit({identity: {uid: "fixture-admin"}, data: {...request, approvedReviewRows: [], excludedRows: []}});
+    // fixtureの7行は同じ架空メール(CSV内のメール重複は管理者の明示的な許可で取り込む)
+    await imports.commit({identity: {uid: "fixture-admin"}, data: {...request, approvedReviewRows: [], excludedRows: [], acknowledgeCsvEmailDuplicates: true, acknowledgeIgnoredCounts: true}});
     const api = createWinnerMailApi({getDb: () => db, serverTimestamp, generateQrPng: fakeQrPng, getAppBaseUrl: () => APP_BASE_URL});
     const settings = await api.getSettings({data: {eventId: EVENT_ID}});
     assert.equal(settings.previewParticipants.length, 7);
@@ -70,7 +72,7 @@ describe("7タイプ: CSV→正本保存→参加者別メール・リマイン�
     const e = event();
     await db.doc(`events/${eventId}`).set(e);
     const api = createWinnerMailApi({getDb: () => db, serverTimestamp, generateQrPng: fakeQrPng, getAppBaseUrl: () => APP_BASE_URL});
-    const imports = createImportApi({getDb: () => db, serverTimestamp});
+    const imports = withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp}));
     const request = buildImportRequest({table: table(), mapping, eventId, clientRequestId: require("node:crypto").randomBytes(16).toString("hex")});
     assert.equal((await imports.preview({data: request})).participationTypes, undefined);
     assert.equal((await api.getSettings({data: {eventId}})).participationMapping, null);
@@ -83,7 +85,8 @@ describe("7タイプ: CSV→正本保存→参加者別メール・リマイン�
     const preview = await imports.preview({data: request});
     assert.deepEqual(preview.participationTypes.map((t) => t.count), [1, 1, 1, 1, 1, 1, 1]);
     assert.deepEqual(preview.rows.map((r) => r.participationType), TYPES.map((t) => t.value));
-    await imports.commit({identity: {uid: "admin"}, data: {...request, approvedReviewRows: [], excludedRows: []}});
+    // fixtureの7行は同じ架空メール(CSV内のメール重複は管理者の明示的な許可で取り込む)
+    await imports.commit({identity: {uid: "admin"}, data: {...request, approvedReviewRows: [], excludedRows: [], acknowledgeCsvEmailDuplicates: true, acknowledgeIgnoredCounts: true}});
     const settings = await api.getSettings({data: {eventId}});
     assert.deepEqual(settings.participationMapping, participationMapping);
     assert.equal(settings.programs.length, 3);
