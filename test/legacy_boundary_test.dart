@@ -11,10 +11,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:jm_quick/confirmed/access_role.dart';
-import 'package:jm_quick/pages/demo_admin_page.dart';
-import 'package:jm_quick/pages/event_list_page.dart';
-import 'package:jm_quick/pages/legacy_admin_gate.dart';
 import 'package:jm_quick/pages/participant_page.dart';
 import 'package:jm_quick/pages/reception_page.dart';
 import 'package:jm_quick/pages/walk_in_page.dart';
@@ -25,7 +21,7 @@ import 'package:jm_quick/services/legacy_api.dart';
 import 'package:jm_quick/services/polling_source.dart';
 
 import 'app_check_fake.dart';
-import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
+import 'confirmed_auth_test.dart' show FakeAuthClient;
 
 class _Call {
   _Call(this.name, this.headers, this.data);
@@ -438,146 +434,6 @@ void main() {
   });
 
   group('認証ゲートと画面', () {
-    Widget gate(
-      _Server server,
-      FakeAuthClient auth,
-      FakeAccessService access,
-    ) => _app(
-      LegacyAdminGate(
-        authClient: auth,
-        accessService: access,
-        httpClient: server.client,
-        builder: (context, api) => Builder(
-          builder: (context) {
-            api.call('listLegacyEvents', const {});
-            return const Scaffold(body: Text('ADMIN-PAGE'));
-          },
-        ),
-      ),
-    );
-
-    testWidgets('未ログインではログイン画面だけ。管理画面は作られず、サーバーへの取得もしない', (tester) async {
-      final server = _Server({
-        'listLegacyEvents': (_) => {'events': []},
-      });
-      await tester.pumpWidget(
-        gate(server, FakeAuthClient(signedIn: false), FakeAccessService([])),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('ADMIN-PAGE'), findsNothing);
-      expect(server.calls, isEmpty);
-    });
-
-    testWidgets('権限なし・staffでは管理画面に進めない(staffには「管理者のみ」)。adminだけ管理画面が作られる', (
-      tester,
-    ) async {
-      final server = _Server({
-        'listLegacyEvents': (_) => {'events': []},
-      });
-      await tester.pumpWidget(
-        gate(
-          server,
-          FakeAuthClient(signedIn: true),
-          FakeAccessService([const AccessCheck.denied()]),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('ADMIN-PAGE'), findsNothing);
-      expect(find.text('権限がありません'), findsOneWidget);
-      await tester.pumpWidget(const SizedBox());
-      await tester.pumpWidget(
-        gate(
-          server,
-          FakeAuthClient(signedIn: true),
-          FakeAccessService([AccessCheck.granted(AccessRole.staff)]),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('ADMIN-PAGE'), findsNothing);
-      expect(find.text('管理者のみ利用できます'), findsOneWidget);
-      expect(server.calls, isEmpty);
-      await tester.pumpWidget(const SizedBox());
-      await tester.pumpWidget(
-        gate(
-          server,
-          FakeAuthClient(signedIn: true),
-          FakeAccessService([AccessCheck.granted(AccessRole.admin)]),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('ADMIN-PAGE'), findsOneWidget);
-      await tester.pump();
-      await tester.pump();
-      expect(server.calls.single.headers['Authorization'], 'Bearer test-token');
-    });
-
-    testWidgets('新方式のイベントの管理画面は案内だけ。従来の設定・参加者・受付・メールの表示も、参加者・受付の取得もしない', (
-      tester,
-    ) async {
-      final server = _Server({
-        'getLegacyEventAdminView': (_) => {
-          'legacy': false,
-          'event': _eventDto('c1', flow: 'confirmed'),
-          'participants': [],
-          'checkIns': [],
-          'jobs': {},
-        },
-      });
-      final repo = DemoRepository(
-        selectedEventId: 'c1',
-        api: _api(server),
-        pollInterval: const Duration(minutes: 5),
-      );
-      await tester.pumpWidget(
-        _app(DemoAdminPage(eventId: 'c1', repository: repo)),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('新方式のイベントです。新しい管理画面を使用してください。'), findsOneWidget);
-      expect(find.textContaining('案内メール'), findsNothing);
-      expect(find.textContaining('参加者を追加'), findsNothing);
-      expect(server.names.toSet(), {'getLegacyEventAdminView'});
-      await tester.pumpWidget(const SizedBox());
-    });
-
-    testWidgets('イベント一覧: 従来方式は集計を表示し、新方式は案内だけ(削除も出さない)', (tester) async {
-      final server = _Server({
-        'listLegacyEvents': (_) => {
-          'events': [
-            {
-              ..._eventDto('e1', name: '従来イベント'),
-              'summary': {
-                'participantCount': 3,
-                'appliedCount': 5,
-                'registeredCount': 2,
-                'formallyRegisteredCount': 4,
-                'attendingCount': 1,
-                'notAttendingCount': 1,
-                'unansweredCount': 2,
-                'attendedCount': 3,
-              },
-            },
-            _eventDto('c1', flow: 'confirmed', name: '新方式イベント'),
-          ],
-        },
-      });
-      await tester.binding.setSurfaceSize(const Size(900, 1600));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      final repo = DemoRepository(
-        api: _api(server),
-        pollInterval: const Duration(minutes: 5),
-      );
-      await tester.pumpWidget(_app(EventListPage(repository: repo)));
-      await tester.pumpAndSettle();
-      expect(find.text('登録 3件'), findsOneWidget);
-      expect(find.text('申込人数 5名'), findsOneWidget);
-      expect(
-        find.text('新方式のイベントです。新しい管理画面(/console)を使用してください。'),
-        findsOneWidget,
-      );
-      expect(find.text('イベントを削除'), findsOneWidget, reason: '従来方式のイベントの分だけ');
-      await tester.pumpWidget(const SizedBox());
-    });
-
     testWidgets('マイページ: 無効な組は「有効なマイページURLではありません」だけ。有効なら氏名を表示し、メールアドレスは表示しない', (
       tester,
     ) async {
@@ -826,12 +682,9 @@ void main() {
       'lib/services/demo_repository.dart',
       'lib/services/legacy_api.dart',
       'lib/services/polling_source.dart',
-      'lib/pages/demo_admin_page.dart',
-      'lib/pages/event_list_page.dart',
       'lib/pages/participant_page.dart',
       'lib/pages/reception_page.dart',
       'lib/pages/walk_in_page.dart',
-      'lib/pages/legacy_admin_gate.dart',
     ];
     String code(String path) => File(path)
         .readAsLinesSync()

@@ -12,6 +12,7 @@
 //   結果のWidgetの型だけを確認する。Widgetをbuild(pumpWidget)すると各画面がFirebaseへ実際に触れてしまい、
 //   このテスト環境(Firebase未初期化)では失敗するため、意図的にbuildしない(型の確認だけで足りる)。
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/confirmed/confirmed_event_list_page.dart';
 import 'package:jm_quick/confirmed/console_page.dart';
@@ -21,7 +22,6 @@ import 'package:jm_quick/confirmed/pass_page.dart';
 import 'package:jm_quick/confirmed/qr_scanner_page.dart';
 import 'package:jm_quick/confirmed/reception_route.dart';
 import 'package:jm_quick/main.dart';
-import 'package:jm_quick/pages/legacy_admin_gate.dart';
 import 'package:jm_quick/pages/walk_in_page.dart';
 
 Widget _resolve(String path) => resolveRoute(Uri.parse(path));
@@ -90,18 +90,62 @@ void main() {
       expect(page.publicId, 'q1');
     });
 
-    test('/admin・/demo-admin → 従来方式の管理画面(LegacyAdminGate。維持)', () {
-      expect(_resolve('/admin'), isA<LegacyAdminGate>());
-      expect(_resolve('/demo-admin'), isA<LegacyAdminGate>());
+    // 旧管理画面(/admin)は廃止。旧URLは旧画面を出さず、新しい管理画面(/console)へ移す(404にはしない)。
+    test('/admin・/admin/・/demo-admin・/admin/…(イベント以外) → 新しい管理画面のトップ(/console)', () {
+      for (final path in ['/admin', '/admin/', '/demo-admin', '/demo-admin/x', '/admin/events', '/admin/foo', '/admin/events/ev1/x']) {
+        final page = _resolve(path);
+        expect(page, isA<LegacyAdminRedirect>(), reason: path);
+        expect((page as LegacyAdminRedirect).target.toString(), '/console', reason: path);
+        expect(resolveRoute(page.target), isA<ConfirmedConsolePage>(), reason: path);
+      }
     });
 
-    test('/admin/events/{id} → 従来方式のイベント管理(LegacyAdminGate。維持)', () {
-      expect(_resolve('/admin/events/ev1'), isA<LegacyAdminGate>());
+    test('/admin/events/{id} → そのイベントの新しい管理画面(/console?eventId=…)。eventIdは符号化して引き継ぐ', () {
+      final page = _resolve('/admin/events/ev1') as LegacyAdminRedirect;
+      expect(page.target.toString(), '/console?eventId=ev1');
+      expect((resolveRoute(page.target) as ConfirmedConsolePage).initialEventId, 'ev1');
+      final encoded = _resolve('/admin/events/a%26b%3Dc') as LegacyAdminRedirect;
+      expect(encoded.target.queryParameters, {'eventId': 'a&b=c'}, reason: '別のクエリとして解釈されない');
+      expect((_resolve('/admin/events/%20') as LegacyAdminRedirect).target.toString(), '/console', reason: '空のIDは推測せずトップへ');
+    });
+
+    test('旧管理画面のパスに似ているだけのURLは対象外(未知のURLのまま)', () {
+      for (final path in ['/administrator', '/admins', '/x/admin']) {
+        expect(_resolve(path), isNot(isA<LegacyAdminRedirect>()), reason: path);
+      }
     });
 
     test('/e/{eventId}/walk-in → 当日参加登録(WalkInPage。維持)', () {
       final page = _resolve('/e/ev1/walk-in') as WalkInPage;
       expect(page.eventId, 'ev1');
+    });
+  });
+
+  group('旧管理画面URLの置き換え(LegacyAdminRedirect)', () {
+    // 移動先はFirebaseへ触れない未知のURL(_HomePage)にして、ブラウザのURLの置き換えだけを確認する。
+    testWidgets('表示中のルートだけが、ブラウザのURLを移動先へ置き換える(履歴は増やさない)。下に積まれたルートは置き換えない', (tester) async {
+      final reported = <Map<Object?, Object?>>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.navigation, (call) async {
+        if (call.method == 'routeInformationUpdated') reported.add(call.arguments as Map<Object?, Object?>);
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.navigation, null));
+      await tester.pumpWidget(MaterialApp(
+        initialRoute: '/below/top',
+        onGenerateRoute: (settings) => MaterialPageRoute<void>(
+          settings: settings,
+          builder: (_) => switch (settings.name) {
+            '/below' => LegacyAdminRedirect(target: Uri.parse('/target-below')),
+            '/below/top' => LegacyAdminRedirect(target: Uri.parse('/target-top?eventId=ev1')),
+            _ => const SizedBox(),
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final ours = reported.where((r) => '${r['uri'] ?? r['location']}'.startsWith('/target')).toList();
+      expect(ours.map((r) => '${r['uri'] ?? r['location']}'), ['/target-top?eventId=ev1']);
+      expect(ours.single['replace'], isTrue);
+      expect(find.text('お探しのページは見つかりませんでした。'), findsOneWidget, reason: '移動先の画面を表示する');
     });
   });
 

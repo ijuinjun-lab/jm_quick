@@ -9,7 +9,6 @@ import 'package:jm_quick/models/event_status.dart';
 import 'package:jm_quick/services/csv_import_service.dart';
 import 'package:jm_quick/services/participant_csv_export_service.dart';
 import 'package:jm_quick/models/demo_models.dart';
-import 'package:jm_quick/pages/demo_admin_page.dart';
 import 'package:jm_quick/widgets/common.dart';
 
 void main() {
@@ -19,14 +18,6 @@ void main() {
     expect(first, startsWith('pub_'));
     expect(first.length, greaterThanOrEqualTo(35));
     expect(second, isNot(first));
-  });
-
-  test('当日参加QRはイベント固有の本人入力ページへ遷移する', () {
-    expect(walkInPathForEvent('event-A'), '/e/event-A/walk-in');
-    expect(
-      walkInPathForEvent('イベント A'),
-      '/e/%E3%82%A4%E3%83%99%E3%83%B3%E3%83%88%20A/walk-in',
-    );
   });
 
   test('参加予定確認メール送信日時は開催日前日と指定時刻から計算する', () {

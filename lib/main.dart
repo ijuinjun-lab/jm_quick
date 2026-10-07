@@ -1,5 +1,6 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
 import 'confirmed/assignment_pages.dart';
@@ -14,9 +15,6 @@ import 'confirmed/qr_scanner_page.dart';
 import 'confirmed/reception_route.dart';
 import 'confirmed/reception_staff_device_page.dart';
 import 'firebase_options.dart';
-import 'pages/demo_admin_page.dart';
-import 'pages/event_list_page.dart';
-import 'pages/legacy_admin_gate.dart';
 import 'pages/participant_page.dart';
 import 'pages/reception_page.dart';
 import 'pages/walk_in_page.dart';
@@ -76,9 +74,10 @@ class JmQuickApp extends StatelessWidget {
 /// (widgetを実際に構築するだけでは、まだFirebaseへは触れない。ビルド・マウントして初めて各画面が
 /// AuthClient等を通じてFirebaseへ触れる)。
 Widget resolveRoute(Uri uri) => switch (uri.path) {
-  // 従来方式の管理画面(Phase 10C): admin(Firebase Auth + accessRoles)としてログインするまで、何も取得・表示しない。
-  '/admin' || '/demo-admin' => LegacyAdminGate(
-    builder: (_, api) => EventListPage(api: api),
+  // 旧管理画面(/admin・/admin/…・/demo-admin)は廃止した。管理の入口は/consoleだけ。古いブックマーク・履歴から開いた場合も、
+  // 旧画面は表示せず新しい管理画面へ移す(Hostingも/admin・/demo-adminを/consoleへ302で転送する)。
+  _ when isLegacyAdminPath(uri) => LegacyAdminRedirect(
+    target: legacyAdminRedirectTarget(uri),
   ),
   // JM Quickのトップ(https://jm-quick.web.app/ を直接開いた場合)と、新方式(confirmed)の正式入口。
   // 従来、トップ(/)はどのルートにも一致せず、未知のURLと同じ「お探しのページは見つかりませんでした」
@@ -128,14 +127,6 @@ Widget resolveRoute(Uri uri) => switch (uri.path) {
   ),
   _
       when uri.pathSegments.length == 3 &&
-          uri.pathSegments[0] == 'admin' &&
-          uri.pathSegments[1] == 'events' =>
-    LegacyAdminGate(
-      builder: (_, api) =>
-          DemoAdminPage(eventId: uri.pathSegments[2], api: api),
-    ),
-  _
-      when uri.pathSegments.length == 3 &&
           uri.pathSegments[0] == 'e' &&
           uri.pathSegments[2] == 'walk-in' =>
     WalkInPage(eventId: uri.pathSegments[1]),
@@ -152,6 +143,50 @@ Widget resolveRoute(Uri uri) => switch (uri.path) {
     ),
   _ => const _HomePage(),
 };
+
+/// 旧管理画面のURL(`/admin`・`/admin/…`・`/demo-admin`・`/demo-admin/…`)か。
+bool isLegacyAdminPath(Uri uri) =>
+    uri.pathSegments.isNotEmpty &&
+    (uri.pathSegments.first == 'admin' ||
+        uri.pathSegments.first == 'demo-admin');
+
+/// 旧管理画面のURLの移動先。旧イベント管理(`/admin/events/{eventId}`)は、そのイベントの新しい管理画面
+/// (`/console?eventId=…`。新方式でないイベントはサーバーが拒否し、画面に理由が出る)。それ以外は管理トップ(`/console`)。
+Uri legacyAdminRedirectTarget(Uri uri) {
+  final segments = uri.pathSegments;
+  if (segments.length == 3 &&
+      segments[0] == 'admin' &&
+      segments[1] == 'events' &&
+      segments[2].trim().isNotEmpty) {
+    return Uri(path: '/console', queryParameters: {'eventId': segments[2]});
+  }
+  return Uri(path: '/console');
+}
+
+/// 旧管理画面のURLで開かれたときに、新しい管理画面([target])を表示し、ブラウザのURLも[target]へ置き換える
+/// (履歴は増やさない)。旧画面・旧APIの取得は一切しない。認証・権限は/consoleの画面(AuthGate)のまま。
+class LegacyAdminRedirect extends StatefulWidget {
+  const LegacyAdminRedirect({super.key, required this.target});
+  final Uri target;
+
+  @override
+  State<LegacyAdminRedirect> createState() => _LegacyAdminRedirectState();
+}
+
+class _LegacyAdminRedirectState extends State<LegacyAdminRedirect> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // 起動時の途中のルート(画面の下に積まれたもの)はURLを変えない。表示中のルートだけが置き換える。
+      if (!mounted || ModalRoute.of(context)?.isCurrent == false) return;
+      SystemNavigator.routeInformationUpdated(uri: widget.target, replace: true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => resolveRoute(widget.target);
+}
 
 class _HomePage extends StatelessWidget {
   const _HomePage();

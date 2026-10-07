@@ -39,24 +39,6 @@ class InfoRow extends StatelessWidget {
   );
 }
 
-/// 従来方式専用の画面・操作を、新方式(flow=confirmed)などlegacyでないイベントで開いたときの案内。
-class NonLegacyFlowNotice extends StatelessWidget {
-  const NonLegacyFlowNotice({
-    super.key,
-    this.message =
-        'このイベントは新方式のイベントです。この画面の従来機能（正式登録・参加予定確認・受付・当日参加登録など）は使用できません。'
-        '新方式の専用機能が提供されるまでお待ちください。',
-  });
-  final String message;
-  @override
-  Widget build(BuildContext context) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(20),
-      child: Text(message, textAlign: TextAlign.center),
-    ),
-  );
-}
-
 /// Phase 11D: イベント固有の画面(当選メール設定・当選メール送信・前日リマインド等)が、
 /// イベント管理画面(`/console?eventId=…`)から渡されるeventIdを持たずに開かれた場合の案内。
 /// eventIdを推測したり、最初のイベントを自動選択したりしない(利用者にIDを入力させる欄も出さない)。

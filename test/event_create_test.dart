@@ -16,11 +16,7 @@ import 'package:jm_quick/confirmed/console_page.dart';
 import 'package:jm_quick/confirmed/event_create_page.dart';
 import 'package:jm_quick/confirmed/event_create_service.dart';
 import 'package:jm_quick/confirmed/login_page.dart';
-import 'package:jm_quick/pages/event_list_page.dart';
-import 'package:jm_quick/services/demo_repository.dart';
-import 'package:jm_quick/services/legacy_api.dart';
 
-import 'app_check_fake.dart';
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'import_page_test.dart' show FakeImportService;
 import 'package:jm_quick/confirmed/import_models.dart' show ImportEventSummary;
@@ -447,28 +443,6 @@ void main() {
         );
       },
     );
-
-    testWidgets('従来方式の「新しいイベントを作成」とは別の入口(「新方式のイベントを作成」)が並ぶ', (tester) async {
-      await tester.binding.setSurfaceSize(const Size(900, 1200));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      final repo = DemoRepository(
-        pollInterval: const Duration(minutes: 5),
-        api: LegacyApiClient(
-          authClient: FakeAuthClient(signedIn: true),
-          appCheck: FakeAppCheck(),
-          httpClient: MockClient(
-            (_) async => _json({
-              'result': {'events': []},
-            }, 200),
-          ),
-        ),
-      );
-      await tester.pumpWidget(_app(EventListPage(repository: repo)));
-      await tester.pumpAndSettle();
-      expect(find.text('新しいイベントを作成'), findsOneWidget);
-      expect(find.text('新方式のイベントを作成'), findsOneWidget);
-      await tester.pumpWidget(const SizedBox());
-    });
   });
 
   group('作成フォーム', () {
