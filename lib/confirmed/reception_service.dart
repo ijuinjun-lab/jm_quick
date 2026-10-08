@@ -55,11 +55,38 @@ class ReceptionProgram {
   final int? attendedCount;
 }
 
+/// 参加者のHEBEL属性(受付での確認用。サーバーがparticipant正本から返す。QRには含まれない)。
+/// [label]はサーバーが返す表示名。[rawValue]は未知の値のときだけの原文。
+class ReceptionHebelResidence {
+  const ReceptionHebelResidence({
+    required this.category,
+    required this.label,
+    this.rawValue,
+  });
+
+  static ReceptionHebelResidence? fromJson(Object? json) {
+    if (json is! Map || json['category'] is! String) return null;
+    final category = json['category'] as String;
+    final label = json['label'];
+    return ReceptionHebelResidence(
+      category: category,
+      label: label is String && label.trim().isNotEmpty ? label : category,
+      rawValue: json['rawValue'] as String?,
+    );
+  }
+
+  final String category;
+  final String label;
+  final String? rawValue;
+  bool get unknown => category == 'unknown';
+}
+
 class ReceptionView {
   const ReceptionView({
     required this.eventName,
     required this.participantName,
     required this.programs,
+    this.hebelResidence,
   });
 
   factory ReceptionView.fromJson(Map<String, dynamic> json) {
@@ -67,6 +94,7 @@ class ReceptionView {
     return ReceptionView(
       eventName: json['eventName'] as String? ?? '',
       participantName: json['participantName'] as String? ?? '',
+      hebelResidence: ReceptionHebelResidence.fromJson(json['hebelResidence']),
       programs: programs is List
           ? programs
                 .whereType<Map>()
@@ -82,6 +110,9 @@ class ReceptionView {
   final String eventName;
   final String participantName;
   final List<ReceptionProgram> programs;
+
+  /// HEBEL属性。HEBEL属性の列を取り込んでいない参加者(既存のparticipant等)はnull(表示しない)。
+  final ReceptionHebelResidence? hebelResidence;
 }
 
 class CheckInResult {

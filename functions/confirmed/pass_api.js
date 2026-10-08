@@ -10,6 +10,7 @@
 // ■ QRの文字列は Phase 6 の receptionQrPayload が唯一の正本(ここでは生成規則を持たず、その関数を呼ぶだけ)。
 // ■ program名・時間・plannedCount・表示順は、当選メールと同じ buildProgramItems で決める(メールと参加証が食い違わない)。
 // ■ 参加者へ返さない: メールアドレス・かな・sourceReference・importBatchId・監査情報・publicId以外の内部ID。
+// ■ HEBEL属性(participant.hebelResidence)は受付スタッフの画面(getReceptionView)だけに返す。参加証・QRには入れない。
 // ■ 有効な参加証の条件: participantが存在 / schemaVersion 2 / status active / publicId完全一致 / eventがflow=confirmed /
 //   participant.eventId == 指定のeventId / importBatchIdがあるなら、そのbatchがcommittedで同じevent。
 //   条件を満たさない理由は、参加者向けAPIでは常に同じ応答(存在・publicId・batch状態を推測させない)。
@@ -22,6 +23,7 @@ const {isValidParticipantId, isValidProgramId, programAttendanceId, MAX_PLANNED_
 const {loadAttendances} = require("./winner_mail_message");
 const {receptionQrPayload, webPassUrl} = require("./pass_urls");
 const {toDate, formatEventDateTime, normalizePrograms, buildProgramItems} = require("./mail_view_model");
+const {hebelResidenceView} = require("./hebel_residence");
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const PUBLIC_ID_PATTERN = /^pub_[A-Za-z0-9_-]{20,128}$/;
@@ -235,10 +237,13 @@ function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, l
       log.warn("reception view denied", {reason: list.problem || "display-data-missing", uid: identity.uid});
       throw staffProblem(list.problem || "display-data-missing");
     }
+    // HEBEL属性はparticipant正本から読む(QRには含まれない)。フィールドの無い既存のparticipantでは返さない。
+    const hebelResidence = hebelResidenceView(participant.hebelResidence);
     return {
       eventId: targetEventId,
       eventName,
       participantName: name,
+      ...(hebelResidence ? {hebelResidence} : {}),
       programs: list.items.map((item) => toEntry(item, {withStaffFields: true})),
     };
   }

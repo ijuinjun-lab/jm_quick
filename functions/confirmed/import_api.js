@@ -113,7 +113,8 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
     const excludeBatchId = resuming ? request.batchId : null;
     const existingHashes = existingEmailHashes({eventId: request.eventId, ...state, excludeBatchId});
     const validation = validateImportPlan({eventId: request.eventId, event: context.event, records: plan.records, existingHashes,
-      excluded: excludedSetOf(request), corrected: correctedSetOf(request), planRows: toPlanRows(request)});
+      excluded: excludedSetOf(request), corrected: correctedSetOf(request), planRows: toPlanRows(request),
+      hebelResidenceMapped: Boolean(request.normalizedMapping.participant.hebelResidenceColumn)});
     const expectedImportSequence = (eventSnap.data().importSequence || 0) + 1;
     const batches = [...state.batches].sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
     return {

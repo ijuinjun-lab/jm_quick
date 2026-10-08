@@ -100,6 +100,7 @@ function toRecord({eventId, batchId}, result) {
     participantId,
     participant: result.participant,
     attendances,
+    ...(result.hebelResidence ? {hebelResidence: result.hebelResidence} : {}),
     excludedByOperator: false,
   };
 }

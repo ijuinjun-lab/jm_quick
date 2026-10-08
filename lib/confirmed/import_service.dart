@@ -142,9 +142,9 @@ class CallableImportService implements ImportService {
   static const _messages = {
     'invalid-mapping': '列の対応(mapping)に問題があります。選択した列と値を確認してください。',
     'program-not-in-event': '列の対応に、このイベントに定義されていないprogramが含まれています。',
-    'column-missing': '指定した列がCSVにありません。',
+    'column-missing': '指定した列がファイルにありません。',
     'unexpected-column': '列の指定に不整合があります。画面を読み込み直してください。',
-    'record-accounting-mismatch': 'CSVの行数の確認が一致しませんでした。画面を読み込み直して、もう一度お試しください。',
+    'record-accounting-mismatch': 'ファイルの行数の確認が一致しませんでした。画面を読み込み直して、もう一度お試しください。',
     'event-start-missing': 'イベントの開催日時が未設定のため、時間枠を解釈できません。',
     'batch-content-mismatch':
         '同じファイル・同じ列の対応の取込が、異なる内容(ファイル名または承認した行)で既に存在します。内容を確認してください。',
@@ -152,13 +152,13 @@ class CallableImportService implements ImportService {
     'commit-interrupted':
         '取込が途中で止まりました。同じ内容でもう一度「取込を確定」すると、続きから安全に完了できます(二重には作られません)。',
     'conservation-violated':
-        '取込結果が元のCSVの全行と一致しなかったため、取込を完了させませんでした。管理者へ連絡してください。',
+        '取込結果が元のファイルの全行と一致しなかったため、取込を完了させませんでした。管理者へ連絡してください。',
     'error-row-cannot-be-approved': 'エラーの行は承認できません。',
     'approval-not-review': '承認できない行が含まれています。',
     'existing-email-duplicates-unacknowledged':
         'このイベントの既存の参加者とメールアドレスが同じ参加者が含まれています。検証からやり直し、重複を確認してください。',
     'csv-email-duplicates-unacknowledged':
-        'CSV内に同じメールアドレスの行があります。検証からやり直し、重複を確認してください。',
+        'ファイル内に同じメールアドレスの行があります。検証からやり直し、重複を確認してください。',
     'import-state-changed': '取込状況が変更されました。再度検証してください。',
     'validation-required': '検証が済んでいないため取り込めません。検証からやり直してください。',
     'import-has-errors': '未解決のエラーの行があるため取り込めません。検証画面で修正するか、今回の取込から除外してください。',

@@ -22,7 +22,8 @@ class CsvParseException implements Exception {
   String toString() => message;
 }
 
-/// 読み込んだCSV。headersは先頭行(前後の空白を除いた列名)、recordsはデータ行(元のセル値のまま)。
+/// 読み込んだ表(CSV、またはExcelのシート1つ。import_file.dartが形式ごとに読み取ってこの形にそろえる)。
+/// headersは先頭行(前後の空白を除いた列名)、recordsはデータ行(元のセル値のまま)。
 class CsvTable {
   const CsvTable({required this.headers, required this.records});
   final List<String> headers;
@@ -107,14 +108,18 @@ String canonicalJson(Object? value) {
 ///   同じ番号での再送(二重クリック・応答が届かなかった後の再操作)は同じbatchIdになり、冪等性はそのまま働く。
 /// - [decisions]: 検証画面での管理者の対処(修正・除外)。ある場合だけ識別に含める(対処の無い取込のbatchIdは従来と同じ)。
 ///   対処を変えた取込は別の取込として扱われる(同じbatchIdで内容が違う、という衝突を起こさない)。
+/// - [sheetName]: Excelから取り込む場合のシート名(同じファイルの別のシートを、別の取込として扱う)。
+///   CSVでは指定しない(CSVのbatchIdは従来と同じ)。
 String deriveBatchId({
   required String eventId,
   required String fileHash,
   required Map<String, dynamic> mappingJson,
   int? newImportSequence,
   Map<String, dynamic>? decisions,
+  String? sheetName,
 }) {
   var source = '$eventId\n$fileHash\n${canonicalJson(mappingJson)}';
+  if (sheetName != null) source = '$source\nsheet:$sheetName';
   if (newImportSequence != null) source = '$source\nnew-import:$newImportSequence';
   if (decisions != null && decisions.isNotEmpty) {
     source = '$source\ndecisions:${canonicalJson(decisions)}';
@@ -179,6 +184,9 @@ class ImportMapping {
   String? kanaColumn;
   String? externalIdColumn;
   String? registeredAtColumn;
+
+  /// HEBEL属性の列(任意)。指定したときだけ送る(指定しないmappingは従来と同じ)。
+  String? hebelResidenceColumn;
   final List<RowCheck> rowChecks = [];
   final List<ProgramMapping> programs;
 
@@ -193,6 +201,8 @@ class ImportMapping {
       if (kanaColumn != null) 'kanaColumn': kanaColumn,
       'emailColumn': emailColumn,
       if (registeredAtColumn != null) 'registeredAtColumn': registeredAtColumn,
+      if (hebelResidenceColumn != null)
+        'hebelResidenceColumn': hebelResidenceColumn,
     },
     if (rowChecks.any((c) => c.column != null && c.allowedValues.isNotEmpty))
       'rowChecks': [
@@ -219,6 +229,7 @@ class ImportMapping {
     add(kanaColumn);
     add(emailColumn);
     add(registeredAtColumn);
+    add(hebelResidenceColumn);
     for (final c in rowChecks) {
       if (c.column != null && c.allowedValues.isNotEmpty) add(c.column);
     }
@@ -243,6 +254,7 @@ class ImportMapping {
       kanaColumn,
       externalIdColumn,
       registeredAtColumn,
+      hebelResidenceColumn,
     ].whereType<String>().toList();
     if (participant.toSet().length != participant.length) {
       issues.add('参加者の項目(氏名・メールアドレス等)に、同じ列を重複して選ぶことはできません。');
@@ -275,7 +287,8 @@ class ImportRequest {
   final int totalRecords;
 }
 
-/// CSVとmappingから、サーバーへ送るリクエストを組み立てる。
+/// 共通の表(CSV・Excelのシートを読み取った[CsvTable])とmappingから、サーバーへ送るリクエストを組み立てる。
+/// [sheetName]はExcelのシート名(batchIdの識別にだけ使う。CSVはnull)。
 /// mappingが読む列だけを送り(それ以外の列は送らない)、全項目が空のレコードはblankRecordNumbersに入れ、
 /// 全レコード(2〜totalRecords+1)を過不足なく数える。人物の同一性は見ない(同じメール・氏名の行も別の行)。
 ImportRequest buildImportRequest({
@@ -286,6 +299,7 @@ ImportRequest buildImportRequest({
   required ImportMapping mapping,
   int? newImportSequence,
   ImportDecisions decisions = const ImportDecisions(),
+  String? sheetName,
 }) {
   final columns = mapping.mappedColumns();
   if (columns.length > importMaxHeaders) {
@@ -297,9 +311,9 @@ ImportRequest buildImportRequest({
       for (var i = 0; i < table.headers.length; i++)
         if (table.headers[i] == column) i,
     ];
-    if (found.isEmpty) throw CsvParseException('列「$column」がCSVにありません。');
+    if (found.isEmpty) throw CsvParseException('列「$column」がファイルにありません。');
     if (found.length > 1) {
-      throw CsvParseException('列「$column」と同じ名前の列がCSVに複数あるため、指定できません。');
+      throw CsvParseException('列「$column」と同じ名前の列がファイルに複数あるため、指定できません。');
     }
     indexes.add(found.single);
   }
@@ -337,6 +351,7 @@ ImportRequest buildImportRequest({
     mappingJson: mappingJson,
     newImportSequence: newImportSequence,
     decisions: decisions.toJson(),
+    sheetName: sheetName,
   );
   return ImportRequest(
     fileName: fileName,
@@ -638,8 +653,13 @@ class ValidationRow {
     this.excluded = false,
     this.corrected = false,
     this.approvalKeys = const {},
+    this.hebelResidence,
   });
   final int sourceRowNumber;
+
+  /// HEBEL属性の分類(サーバーの値: hebelHaus / hebelMaison / none / unset / unknown)。
+  /// HEBEL属性の列が無いファイルではnull。表示名は[ImportValidation.hebelResidenceSummary]の label を使う。
+  final String? hebelResidence;
 
   /// 許可が必要な警告の種類(review / existingDuplicate / csvDuplicate) → 許可の鍵(サーバーが行の最終的な値と
   /// 警告の内容から作る)。commitには許可した警告の鍵を送り、サーバーが現在の鍵と照合する(修正等で変われば無効)。
@@ -692,6 +712,7 @@ class ImportValidation {
     this.excludedRowCount = 0,
     this.correctedRowCount = 0,
     this.importRowCount = 0,
+    this.hebelResidenceSummary = const [],
   });
 
   factory ImportValidation.fromJson(Map<String, dynamic> json) {
@@ -708,6 +729,15 @@ class ImportValidation {
     List<int> numbers(Object? value) =>
         value is List ? [for (final n in value) number(n)] : const [];
     return ImportValidation(
+      hebelResidenceSummary: [
+        for (final h in maps(json['hebelResidenceSummary']))
+          if (h['category'] is String)
+            (
+              category: h['category'] as String,
+              label: h['label'] as String? ?? h['category'] as String,
+              count: number(h['count']),
+            ),
+      ],
       errorRows: numbers(json['errorRows']),
       reviewRows: numbers(json['reviewRows']),
       ignoredCountRows: numbers(json['ignoredCountRows']),
@@ -770,6 +800,7 @@ class ImportValidation {
                 c.toString(),
             ],
             participationType: r['participationType'] as String?,
+            hebelResidence: r['hebelResidence'] as String?,
             excluded: r['excluded'] == true,
             corrected: r['corrected'] == true,
             duplicateRows: [
@@ -836,6 +867,19 @@ class ImportValidation {
   final int importRowCount;
   final List<Map<String, dynamic>> participationTypes;
   final List<ValidationRow> rows;
+
+  /// HEBEL属性の分類別の件数(今回の取込から除外していない行。サーバーが固定の順序で全分類を返す)。
+  /// HEBEL属性の列が無いファイルでは空。
+  final List<({String category, String label, int count})>
+  hebelResidenceSummary;
+
+  /// HEBEL属性の分類の表示名(サーバーが返した名前。未知の分類はそのまま)。
+  String hebelResidenceLabel(String category) =>
+      hebelResidenceSummary
+          .where((h) => h.category == category)
+          .firstOrNull
+          ?.label ??
+      category;
 
   bool get hasEmailDuplicates =>
       existingEmailDuplicateCount > 0 || csvEmailDuplicateCount > 0;
@@ -935,7 +979,7 @@ const Map<String, String> importIssueLabels = {
   'slot-unparsed': '時間枠を解釈できません(未知の時間枠)',
   'slot-zero-length': '時間枠の開始と終了が同じです',
   'slot-reversed': '時間枠の終了が開始より前です',
-  'email-duplicate-in-csv': 'CSV内でメールアドレスが重複しています',
+  'email-duplicate-in-csv': 'ファイル内でメールアドレスが重複しています',
   'email-duplicate-existing': '既存の有効な参加者とメールアドレスが重複しています',
   'not-attending-count-ignored': '不参加のprogramに人数が残っています(人数は無視されます)',
   'participation-type-undetermined': '参加タイプ(7タイプ)を判定できません',
@@ -945,8 +989,9 @@ const Map<String, String> importIssueLabels = {
   'too-long': '値が長すぎます',
   'zero-length': '人数が0です',
   'registered-at-unparsed': '登録日時を解釈できませんでした',
-  'column-missing': '指定した列がCSVにありません',
-  'column-ambiguous': '指定した列名がCSVに複数あります',
+  'hebel-residence-unknown': 'HEBEL属性が未知の値です(申込フォームの選択肢と一致しません)',
+  'column-missing': '指定した列がファイルにありません',
+  'column-ambiguous': '指定した列名がファイルに複数あります',
   'internal-error': '内容を判定できませんでした',
 };
 

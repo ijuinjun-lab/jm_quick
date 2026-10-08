@@ -162,6 +162,8 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       email: p.email,
       sourceReference: p.sourceReference,
       sourceRegisteredAt: p.sourceRegisteredAt === null ? null : new Date(p.sourceRegisteredAt),
+      // HEBEL属性(受付の確認用)。列を指定した取込だけ持つ(無いparticipantは従来どおり)。
+      ...(p.hebelResidence ? {hebelResidence: {category: p.hebelResidence.category, rawValue: p.hebelResidence.rawValue}} : {}),
       schemaVersion: p.schemaVersion,
       status: p.status,
       registrationType: "winner",

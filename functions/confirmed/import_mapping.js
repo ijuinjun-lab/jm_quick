@@ -12,6 +12,7 @@
 //       nameColumn, emailColumn,       // 必須
 //       externalIdColumn?,             // 参照情報(sourceReference)。同一性判定には使わない
 //       kanaColumn?, registeredAtColumn?
+//       hebelResidenceColumn?          // HEBEL属性(受付の確認用。hebel_residence.js)。省略時は属性なし(後方互換)
 //     },
 //     rowChecks?: [{column, allowedValues[]}],   // 行の意味を確認する列(例: 区分)。外れた行はreview
 //     programs: [{
@@ -44,7 +45,8 @@ const MAX_VALUE_LENGTH = 200;
 const MAX_VALUES = 50;
 const MAX_PROGRAMS = 50;
 const TOP_KEYS = ["version", "participant", "rowChecks", "programs"];
-const PARTICIPANT_KEYS = ["externalIdColumn", "nameColumn", "kanaColumn", "emailColumn", "registeredAtColumn"];
+const PARTICIPANT_KEYS = ["externalIdColumn", "nameColumn", "kanaColumn", "emailColumn", "registeredAtColumn",
+  "hebelResidenceColumn"];
 const PROGRAM_KEYS = ["programId", "participationColumn", "attendingValues", "notAttendingValues",
   "emptyMeans", "slotColumn", "slotFormat", "countColumn", "ignoreCountWhenNotAttending"];
 const ROW_CHECK_KEYS = ["column", "allowedValues"];
@@ -108,7 +110,7 @@ function validateImportMapping(mapping, {eventProgramIds} = {}) {
         errors.push({code: "invalid-column", path: `participant.${key}`});
       }
     }
-    for (const key of ["externalIdColumn", "kanaColumn", "registeredAtColumn"]) {
+    for (const key of ["externalIdColumn", "kanaColumn", "registeredAtColumn", "hebelResidenceColumn"]) {
       checkOptionalColumn(participant[key], `participant.${key}`, errors);
     }
     // 参加者の項目は別々の列でなければならない(同じ列を氏名とメールに使う等は設定ミス)。
@@ -213,6 +215,9 @@ function normalizeImportMapping(mapping, options) {
       kanaColumn: text(p.kanaColumn),
       emailColumn: text(p.emailColumn),
       registeredAtColumn: text(p.registeredAtColumn),
+      // 指定したときだけ持つ(指定の無いmappingの正規化結果=既存の取込回のハッシュ・指紋は従来と同じ)。
+      ...(p.hebelResidenceColumn === undefined || p.hebelResidenceColumn === null ?
+        {} : {hebelResidenceColumn: text(p.hebelResidenceColumn)}),
     },
     rowChecks: (mapping.rowChecks || []).map((c) => ({column: c.column.trim(), allowedValues: list(c.allowedValues)})),
     programs: mapping.programs.map((g) => ({

@@ -13,6 +13,7 @@
 
 const {MAX_PLANNED_COUNT, MAX_SLOT_LABEL_LENGTH} = require("../programs");
 const {normalizeImportMapping, mappedColumns} = require("./import_mapping");
+const {HEBEL_RESIDENCE, classifyHebelResidence} = require("./hebel_residence");
 
 const STATUS = Object.freeze({READY: "ready", REVIEW: "review", ERROR: "error"});
 const SCHEMA_VERSION = 2;
@@ -158,6 +159,12 @@ function planRow(row, mapping, eventDate) {
   }
   for (const code of row.structuralIssues || []) issues.push(makeIssue(code));
 
+  // HEBEL属性(列を指定したmappingだけ)。未知の値は丸めず、確認が必要(review)にする。空欄は未設定(問題にしない)。
+  const hebelResidence = p.hebelResidenceColumn ? classifyHebelResidence(cells[p.hebelResidenceColumn]) : null;
+  if (hebelResidence && hebelResidence.category === HEBEL_RESIDENCE.UNKNOWN) {
+    issues.push(makeIssue("hebel-residence-unknown", {column: p.hebelResidenceColumn}));
+  }
+
   const attendances = [];
   for (const program of mapping.programs) {
     const count = parseCount(cells[program.countColumn]);
@@ -215,9 +222,13 @@ function planRow(row, mapping, eventDate) {
       sourceRegisteredAt,
       schemaVersion: SCHEMA_VERSION,
       status: PARTICIPANT_STATUS_ACTIVE,
+      ...(hebelResidence ? {hebelResidence} : {}),
     };
   }
-  return {sourceRowNumber: row.sourceRowNumber, status: statusFromIssues(issues), issues, notices, participant, attendances};
+  return {
+    sourceRowNumber: row.sourceRowNumber, status: statusFromIssues(issues), issues, notices, participant, attendances,
+    ...(hebelResidence ? {hebelResidence} : {}),
+  };
 }
 
 // 例外が起きても、その行をerrorとして結果に残す(行を落とさない)。

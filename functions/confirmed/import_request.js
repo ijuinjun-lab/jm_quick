@@ -61,9 +61,10 @@ function parseDecisions(data, path, parseItem) {
   return items.sort((a, b) => a.sourceRowNumber - b.sourceRowNumber);
 }
 
-// 修正できる列: 参加者の氏名・メールと、各programの人数・参加・時間枠の列(検証で問題になる値だけ。汎用のCSV編集はしない)。
+// 修正できる列: 参加者の氏名・メール・HEBEL属性と、各programの人数・参加・時間枠の列(検証で問題になる値だけ。汎用のCSV編集はしない)。
 function correctableColumns(mapping) {
   const columns = new Set([mapping.participant.nameColumn, mapping.participant.emailColumn]);
+  if (mapping.participant.hebelResidenceColumn) columns.add(mapping.participant.hebelResidenceColumn);
   for (const program of mapping.programs) {
     for (const column of [program.countColumn, program.participationColumn, program.slotColumn]) if (column) columns.add(column);
   }

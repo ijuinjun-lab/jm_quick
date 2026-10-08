@@ -530,10 +530,10 @@ void main() {
       expect(find.byType(ConfirmedImportPage), findsOneWidget);
       await open([_managerA], _evB);
       expect(find.byType(ConfirmedImportPage), findsNothing);
-      expect(find.text('このイベントのCSV取込を行う権限がありません。'), findsOneWidget);
+      expect(find.text('このイベントの参加者ファイルの取込を行う権限がありません。'), findsOneWidget);
       await open([_staffA], _evA);
       expect(find.byType(ConfirmedImportPage), findsNothing);
-      expect(find.text('このイベントのCSV取込を行う権限がありません。'), findsOneWidget);
+      expect(find.text('このイベントの参加者ファイルの取込を行う権限がありません。'), findsOneWidget);
     });
 
     testWidgets('イベント管理者設定(/console/managers)はシステム管理者専用(イベント管理者には権限なし)', (

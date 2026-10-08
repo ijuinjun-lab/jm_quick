@@ -20,6 +20,7 @@ class ConfirmedImportProfile {
     required this.kanaColumn,
     required this.emailColumn,
     this.registeredAtColumn,
+    this.hebelResidenceHeaders = const [],
     required this.programs,
   });
 
@@ -29,7 +30,28 @@ class ConfirmedImportProfile {
   final String kanaColumn;
   final String emailColumn;
   final String? registeredAtColumn;
+
+  /// HEBEL属性(受付の確認用)の列名の候補。任意の列で、[requiredHeaders]には含めない
+  /// (この列が無いファイルは、従来どおり取り込める。HEBEL属性は「未設定」= participantに保存しない)。
+  /// 列名は[normalizeHeaderForMatch]で正規化して比べる(実ファイルの列名に「&#160;」等が含まれるため)。
+  final List<String> hebelResidenceHeaders;
   final List<ConfirmedImportProfileProgram> programs;
+
+  /// ファイルのheader一覧から、HEBEL属性の列(実際の列名)を探す。無ければcolumn=null。
+  /// 候補に一致する列が複数あれば ambiguous=true(どれを使うか決められないため、取込させない)。
+  ({String? column, bool ambiguous}) resolveHebelResidenceColumn(
+    List<String> headers,
+  ) {
+    final wanted = hebelResidenceHeaders.map(normalizeHeaderForMatch).toSet();
+    if (wanted.isEmpty) return (column: null, ambiguous: false);
+    final found = [
+      for (final h in headers)
+        if (h.trim().isNotEmpty && wanted.contains(normalizeHeaderForMatch(h)))
+          h.trim(),
+    ];
+    if (found.length > 1) return (column: null, ambiguous: true);
+    return (column: found.firstOrNull, ambiguous: false);
+  }
 
   /// このprofileが実際に読む、すべてのCSV列名(重複なし)。
   List<String> get requiredHeaders {
@@ -87,6 +109,24 @@ class ConfirmedImportProfileProgram {
   }.toList();
 }
 
+/// 列名を比べるための正規化(列名そのものは変えない。サーバーへは実際の列名を送る):
+/// ノーブレークスペース(文字・「&#160;」「&nbsp;」の表記)・全角スペースを半角スペースに、全角英数字を半角に、
+/// 連続する空白を1つにして前後を除き、英字の大小を区別しない。
+String normalizeHeaderForMatch(String header) {
+  final replaced = header.replaceAll(
+    RegExp(r'&#160;|&nbsp;|\u00a0|\u3000', caseSensitive: false),
+    ' ',
+  );
+  final buffer = StringBuffer();
+  for (final rune in replaced.runes) {
+    // 全角の英数字・記号(！〜～)を半角へ
+    buffer.writeCharCode(
+      rune >= 0xFF01 && rune <= 0xFF5E ? rune - 0xFEE0 : rune,
+    );
+  }
+  return buffer.toString().replaceAll(RegExp(r'\s+'), ' ').trim().toUpperCase();
+}
+
 /// 今回(2026年度)の当選・参加確定者CSV(実CSVで確認した90行・28列の形式)向けprofile。
 ///
 /// 実CSVから確認した実際の列名をそのまま使う: 氏名・かな・メールアドレス・登録日時、
@@ -99,6 +139,9 @@ class ConfirmedImportProfileProgram {
 ///   正式対応の一覧には含まれていないため、このprofileでは取り込まない。
 /// - 備考は、現在のparticipant/programAttendanceスキーマに対応する保存先が無いため、今回は取り込まない
 ///   (新しいフィールドを追加していない)。
+/// - 「HEBEL HAUSにお住まいですか」(Excel版の実ファイルの列名は「HEBEL&#160;HAUSにお住まいですか」)は、
+///   HEBEL属性として任意で取り込む(受付画面での確認用。分類はサーバー functions/confirmed/hebel_residence.js)。
+///   この列名が無いファイル(列名が異なる既存のCSV等)では、HEBEL属性を取り込まない(未設定)。
 ///
 /// 参加判定:
 /// - program-1・program-2: 参加時間の列(午前/午後参加時間)を参加列としても使う。「参加を希望しない」
@@ -135,6 +178,7 @@ const sipposample2026Profile = ConfirmedImportProfile(
   kanaColumn: 'かな',
   emailColumn: 'メールアドレス',
   registeredAtColumn: '登録日時',
+  hebelResidenceHeaders: ['HEBEL HAUSにお住まいですか'],
   programs: [
     ConfirmedImportProfileProgram(
       programId: 'program-1',
@@ -186,10 +230,13 @@ List<String> missingProfileProgramsInEvent(
 
 /// profileとイベントのprogram一覧から、サーバーへ送る[ImportMapping]を自動的に組み立てる。
 /// 利用者はCSVの列を一切選ばない。呼び出す前に[missingProfileProgramsInEvent]が空であることを確認すること。
+/// [hebelResidenceColumn]: ファイルの実際の列名([ConfirmedImportProfile.resolveHebelResidenceColumn]の結果)。
+/// 省略時(列が無いファイル)はHEBEL属性を取り込まない(mappingも従来と同じ)。
 ImportMapping buildMappingFromProfile(
   ConfirmedImportProfile profile,
-  List<({String programId, String name, int order})> eventPrograms,
-) {
+  List<({String programId, String name, int order})> eventPrograms, {
+  String? hebelResidenceColumn,
+}) {
   final nameById = {for (final p in eventPrograms) p.programId: p.name};
   final mapping = ImportMapping(
     programs: [
@@ -211,7 +258,8 @@ ImportMapping buildMappingFromProfile(
     ..nameColumn = profile.nameColumn
     ..kanaColumn = profile.kanaColumn
     ..emailColumn = profile.emailColumn
-    ..registeredAtColumn = profile.registeredAtColumn;
+    ..registeredAtColumn = profile.registeredAtColumn
+    ..hebelResidenceColumn = hebelResidenceColumn;
   return mapping;
 }
 

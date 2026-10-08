@@ -6,6 +6,7 @@
 //   - CSV内のメール重複 / このイベントの既存の有効な参加者(取込回が作る・作った参加者を含む)とのメール重複(警告)
 //   - 不参加のprogramに残っていて無視される人数(planRowのnotice。参考情報: 見せるだけで、許可は要らない)
 //   - 参加タイプ(participationMappingのあるイベントだけ)を判定できない行(警告)
+//   - HEBEL属性(列を指定した取込だけ): 行ごとの分類と分類別の件数(未知の値は計画がreviewにしている)
 // ■ メールの比較は planRow が作った participant.email(import_rows.js の normalizeEmail: trim+小文字化)。
 //   既存参加者側も同じ normalizeEmail を通し、イベントIDと組にしたハッシュ(emailHash)で比べる(独自の正規化はしない)。
 // ■ 検証の指紋(fingerprintOf): CSVの内容・列の対応・イベント・次の取込回の番号・重複している行から、サーバーが毎回同じ値を
@@ -19,6 +20,7 @@
 const {createHash} = require("node:crypto");
 const {normalizeEmail} = require("./import_rows");
 const {participationType, rolesFor, typeSummary} = require("./participation_types");
+const {HEBEL_RESIDENCE, hebelResidenceSummary} = require("./hebel_residence");
 
 const RESULT = Object.freeze({OK: "ok", WARNING: "warning", ERROR: "error", INFO: "info"});
 const EXISTING_DUPLICATE = "email-duplicate-existing";
@@ -142,7 +144,9 @@ function approvalKeysOf({eventId, records, planRows, dup, excluded = new Set()})
 }
 
 // excluded: 今回の取込から除外した行番号(Set) / corrected: 修正した行番号(Set) / planRows: 最終的な値(許可の鍵に使う)。
-function validateImportPlan({eventId, event, records, existingHashes, excluded = new Set(), corrected = new Set(), planRows = []}) {
+// hebelResidenceMapped: HEBEL属性の列を指定した取込か(trueのときだけ、行ごとの分類と集計を返す)。
+function validateImportPlan({eventId, event, records, existingHashes, excluded = new Set(), corrected = new Set(), planRows = [],
+  hebelResidenceMapped = false}) {
   const dup = duplicateRows({eventId, records, existingHashes, excluded});
   const {existingDuplicateRows, csvDuplicateRows, rowsByEmail} = dup;
   const approvalKeys = approvalKeysOf({eventId, records, planRows, dup, excluded});
@@ -177,6 +181,7 @@ function validateImportPlan({eventId, event, records, existingHashes, excluded =
       ...(isExcluded ? {excluded: true} : {}), ...(corrected.has(record.sourceRowNumber) ? {corrected: true} : {}),
       programIds: record.attendances.map((a) => a.programId),
       ...(typed ? {participationType: type} : {}),
+      ...(hebelResidenceMapped ? {hebelResidence: hebelCategoryOf(record)} : {}),
       ...(others.length > 0 ? {duplicateRows: others} : {}),
       ...(approvalKeys.has(record.sourceRowNumber) ? {approvalKeys: approvalKeys.get(record.sourceRowNumber)} : {}),
     };
@@ -201,8 +206,17 @@ function validateImportPlan({eventId, event, records, existingHashes, excluded =
     correctedRowCount: rows.filter((r) => r.corrected).length,
     importRowCount: rows.filter((r) => !r.excluded).length,
     ...(typed ? {participationTypes: typeSummary(eventId, records.filter((r) => !excluded.has(r.sourceRowNumber)), event)} : {}),
+    // 分類別の件数は、今回の取込から除外していない行だけで数える(未設定=空欄、未知=確認が必要)。
+    ...(hebelResidenceMapped ? {
+      hebelResidenceSummary: hebelResidenceSummary(rows.filter((r) => !r.excluded).map((r) => r.hebelResidence)),
+    } : {}),
     rows,
   };
+}
+
+// 計画の行のHEBEL属性の分類。計画が分類を持たない行(内部エラーの行)は判定できていないため「未知」として見せる。
+function hebelCategoryOf(record) {
+  return record.hebelResidence ? record.hebelResidence.category : HEBEL_RESIDENCE.UNKNOWN;
 }
 
 // 新しい取込回が作る参加者のメール(ハッシュ)。取込回へ保存し、取込中に別の取込が同じメールを作らないかの確認に使う。

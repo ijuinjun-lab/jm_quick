@@ -9,20 +9,21 @@ import 'access_service.dart';
 import 'assignment_pages.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
+import 'import_file.dart';
 import 'import_models.dart';
 import 'import_profile.dart';
 import 'import_service.dart';
 
-/// 選択されたCSV(ファイル名と内容)。
+/// 選択された参加者ファイル(ファイル名と内容。CSV / Excel(.xlsx))。
 typedef PickedCsv = ({String name, Uint8List bytes});
 
-/// CSVファイルの選択(既定はブラウザのファイル選択。テストでは差し替える)。キャンセルはnull。
+/// 参加者ファイルの選択(既定はブラウザのファイル選択。テストでは差し替える)。キャンセルはnull。
 typedef CsvPicker = Future<PickedCsv?> Function();
 
 Future<PickedCsv?> pickCsvWithFilePicker() async {
   final result = await FilePicker.platform.pickFiles(
     type: FileType.custom,
-    allowedExtensions: const ['csv'],
+    allowedExtensions: const ['xlsx', 'csv'],
     withData: true,
   );
   final file = result?.files.single;
@@ -30,7 +31,7 @@ Future<PickedCsv?> pickCsvWithFilePicker() async {
   return (name: file.name, bytes: file.bytes!);
 }
 
-/// 新方式イベントへの参加者CSV取込の入口(`/console/import?eventId=…`)。システム管理者、または
+/// 新方式イベントへの参加者ファイル(CSV / Excel)取込の入口(`/console/import?eventId=…`)。システム管理者、または
 /// Phase 3からそのイベントのイベント管理者としてログインした場合だけ表示される。
 /// スタッフ・担当外・権限なし・未ログインでは表示されない(サーバー側も対象イベントのイベント管理者以上に限る)。
 class ConfirmedImportRoute extends StatelessWidget {
@@ -66,8 +67,8 @@ class ConfirmedImportRoute extends StatelessWidget {
       );
       if (!isManager) {
         return EventScopeDenied(
-          title: '参加者CSVの取込',
-          message: 'このイベントのCSV取込を行う権限がありません。',
+          title: '参加者ファイルの取込',
+          message: 'このイベントの参加者ファイルの取込を行う権限がありません。',
           signOut: signOut,
         );
       }
@@ -78,7 +79,7 @@ class ConfirmedImportRoute extends StatelessWidget {
       );
     },
     staffBuilder: (context, signOut) => PageFrame(
-      title: '参加者CSVの取込',
+      title: '参加者ファイルの取込',
       child: Card(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -86,7 +87,7 @@ class ConfirmedImportRoute extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
-                'CSVの取込は管理者のみ利用できます',
+                '参加者ファイルの取込は管理者のみ利用できます',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               ),
@@ -105,8 +106,10 @@ class ConfirmedImportRoute extends StatelessWidget {
   );
 }
 
-/// 参加者CSVの取込画面。
-///   イベント → CSVファイル選択 → 自動解析 → 検証 → プレビュー → 内容確認 → 「取込を確定」→ 完了
+/// 参加者ファイル(CSV / Excel(.xlsx))の取込画面。
+///   イベント → ファイル選択(Excelはシートの決定)→ 自動解析 → 検証 → プレビュー → 内容確認 → 「取込を確定」→ 完了
+/// ファイルの形式ごとの違いは読み取り(import_file.dart)だけで、読み取った後は共通の表([CsvTable])として、
+/// 同じ検証・対処(修正・除外・許可)・プレビュー・取込を使う。
 /// 検証(validateConfirmedImport。何も書き込まない)で、エラー・警告・項目別の件数と問題の行を確認する。
 /// エラーが0件で、必要な確認(メール重複の許可・取込済みの内容を新しい取込回として取り込むこと)を管理者が済ませた
 /// 場合だけプレビューへ進める。CSV・列の対応が変わったら検証は無効になる(再検証が必要)。
@@ -147,6 +150,13 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   List<String> eventProgramMismatch = [];
 
   PickedCsv? file;
+
+  /// 読み取ったファイル(形式・シート)。Excelで候補のシートが複数ある間は[sheet]・[table]はnull(管理者が選ぶ)。
+  ParsedImportFile? parsedFile;
+  ImportSheet? sheet;
+  List<ImportSheet> sheetCandidates = [];
+
+  /// 共通の表(CSV、または選んだExcelのシート)。
   CsvTable? table;
   String? fileError;
   String? formatError;
@@ -325,6 +335,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   // ---- ファイル ----------------------------------------------------------------------------------
   void _resetFile() {
     file = null;
+    parsedFile = null;
+    sheet = null;
+    sheetCandidates = [];
     table = null;
     fileError = null;
     formatError = null;
@@ -361,7 +374,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     try {
       picked = await widget.picker();
     } catch (_) {
-      if (mounted) setState(() => fileError = 'CSVファイルを開けませんでした。もう一度お試しください。');
+      if (mounted) setState(() => fileError = 'ファイルを開けませんでした。もう一度お試しください。');
       return;
     }
     if (picked == null || !mounted) return;
@@ -369,25 +382,72 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       _resetFile();
       file = picked;
       try {
-        final parsed = parseCsvBytes(picked!.bytes);
-        table = parsed;
-        _applyProfile(parsed);
-      } on CsvParseException catch (e) {
+        final parsed = parseImportFile(picked!.name, picked.bytes);
+        parsedFile = parsed;
+        final selection = selectImportSheet(parsed, widget.profile);
+        if (selection.selected != null) {
+          _useSheet(selection.selected!);
+        } else if (selection.candidates.isNotEmpty) {
+          // 候補が複数あるときは、先頭のシートを勝手に使わない(管理者が選ぶ)。
+          sheetCandidates = selection.candidates;
+        } else {
+          fileError = selection.problem;
+        }
+      } on ImportFileException catch (e) {
         fileError = e.message;
       }
     });
   }
 
-  // 通常運用ではCSVの列を利用者に選ばせない。CSVのheaderが今年度の正式フォーマットと一致しない場合は、
-  // 検証(サーバーへの問い合わせ)を試みる前に、ここで明確に拒否する。
+  void _useSheet(ImportSheet selected) {
+    sheet = selected;
+    final parsed = selected.table;
+    if (parsed == null) {
+      fileError = 'シート「${selected.name ?? ''}」にデータがありません。';
+      return;
+    }
+    table = parsed;
+    _applyProfile(parsed);
+  }
+
+  /// Excelの候補のシートから、管理者が選んだシートを使う(選び直したら、検証・対処・プレビューはやり直し)。
+  void _chooseSheet(ImportSheet selected) {
+    if (busy) return;
+    setState(() {
+      formatError = null;
+      fileError = null;
+      missingHeadersList = [];
+      mapping = null;
+      table = null;
+      _invalidateValidation();
+      _clearDecisions();
+      result = null;
+      commitError = null;
+      commitAmbiguous = false;
+      _useSheet(selected);
+    });
+  }
+
+  // 通常運用ではファイルの列を利用者に選ばせない。headerが今年度の正式フォーマットと一致しない場合は、
+  // 検証(サーバーへの問い合わせ)を試みる前に、ここで明確に拒否する(CSV・Excelで同じ規則)。
+  // HEBEL属性の列は任意(無ければ取り込まない)。候補に一致する列が複数あれば、どれを使うか決められないため拒否する。
   void _applyProfile(CsvTable parsed) {
     final missing = widget.profile.missingHeaders(parsed.headers);
     if (missing.isNotEmpty) {
-      formatError = 'このCSVは対応している参加者リストの形式ではありません。';
+      formatError = 'このファイルは対応している参加者リストの形式ではありません。';
       missingHeadersList = missing;
       return;
     }
-    mapping = buildMappingFromProfile(widget.profile, event!.programs);
+    final hebel = widget.profile.resolveHebelResidenceColumn(parsed.headers);
+    if (hebel.ambiguous) {
+      formatError = 'HEBEL属性(「${widget.profile.hebelResidenceHeaders.join('」「')}」)の列が複数あるため、どの列を使うか決められません。列を1つにしてから選び直してください。';
+      return;
+    }
+    mapping = buildMappingFromProfile(
+      widget.profile,
+      event!.programs,
+      hebelResidenceColumn: hebel.column,
+    );
   }
 
   ImportRequest _buildRequest({int? newImportSequence}) => buildImportRequest(
@@ -398,12 +458,81 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     mapping: mapping!,
     newImportSequence: newImportSequence,
     decisions: _decisions,
+    sheetName: parsedFile?.format == ImportFileFormat.xlsx ? sheet?.name : null,
   );
 
   /// 検証した内容(CSV・列の対応・修正・除外)。プレビュー時にこれと異なれば再検証が必要。
   static String _fingerprintOf(ImportRequest request) =>
       '${request.json['fileHash']}\n${canonicalJson(request.json['mapping'])}\n'
       '${canonicalJson({'c': request.json['corrections'], 'e': request.json['excludedRows']})}';
+
+  /// Excelの読み取りについての注記(結合セル・数式・列名の行の位置・読まなかった非表示のシート)。
+  List<Widget> _sheetNotices() {
+    final f = parsedFile;
+    final s = sheet;
+    if (f == null || f.format != ImportFileFormat.xlsx || s == null) return const [];
+    const color = Color(0xfffff1cf);
+    final hidden = f.sheets.where((x) => x.hidden).map((x) => '「${x.name}」').toList();
+    return [
+      if (s.mergedRangeCount > 0)
+        _notice(
+          'このシートには結合セルが${s.mergedRangeCount}か所あります。結合したセルは左上のセルの値だけを読み取ります(他は空欄として扱います)。',
+          color: color,
+          key: const Key('sheet-merged-notice'),
+        ),
+      if (s.formulaCellCount > 0)
+        _notice(
+          'このシートには数式のセルが${s.formulaCellCount}個あります。Excelに保存されている計算結果の値を読み取ります。',
+          color: color,
+          key: const Key('sheet-formula-notice'),
+        ),
+      if (s.headerRowNumber != 1)
+        _notice(
+          '列名の行はシートの${s.headerRowNumber}行目です。検証画面の「n行目」は、列名の行を1行目として数えた番号です'
+          '(シートの行番号 = n + ${s.headerRowNumber - 1})。',
+          color: color,
+          key: const Key('sheet-header-row-notice'),
+        ),
+      if (hidden.isNotEmpty)
+        _notice(
+          '非表示のシート(${hidden.join('、')})は読み取りの対象にしていません。',
+          color: const Color(0xffeef3f8),
+          key: const Key('sheet-hidden-notice'),
+        ),
+    ];
+  }
+
+  /// Excelに参加者リストの形式に合うシートが複数あるとき、管理者に取り込むシートを選ばせる。
+  Widget _sheetChooser() => Container(
+    key: const Key('sheet-chooser'),
+    margin: const EdgeInsets.only(top: 8),
+    padding: const EdgeInsets.all(10),
+    color: const Color(0xfffff1cf),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'このExcelには、参加者リストの形式に合うシートが複数あります。取り込むシートを選んでください。',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        for (final candidate in sheetCandidates)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: OutlinedButton(
+                key: ValueKey('choose-sheet-${candidate.name}'),
+                onPressed: busy ? null : () => _chooseSheet(candidate),
+                child: Text(
+                  '${identical(candidate, sheet) ? '✓ ' : ''}「${candidate.name}」'
+                  '(データ${candidate.table?.records.length ?? 0}行)',
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
 
   // ---- 検証 ---------------------------------------------------------------------------------------
   /// 検証(修正・除外を含めた最終的な内容で、サーバーが判定する)。
@@ -522,7 +651,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     if (_fingerprintOf(request) != validatedFingerprint) {
       setState(() {
         _invalidateValidation();
-        validationError = 'CSVまたは列の対応が検証時から変わりました。もう一度検証してください。';
+        validationError = 'ファイルまたは列の対応が検証時から変わりました。もう一度検証してください。';
       });
       return;
     }
@@ -631,8 +760,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               _confirmRow('イベント名', event!.eventName),
-              _confirmRow('CSVファイル名', request.fileName),
-              _confirmRow('CSV総行数', '${p.totalRecords}行'),
+              _confirmRow('ファイル名', request.fileName),
+              if (sheet?.name != null) _confirmRow('シート', sheet!.name!),
+              _confirmRow('総行数', '${p.totalRecords}行'),
               _confirmRow('取込予定', '$_importCount件'),
               _confirmRow('修正した行', '${corrections.keys.map((k) => k.$1).toSet().length}件'),
               _confirmRow('今回の取込から除外した行', '${exclusions.length}件(取り込まれません)'),
@@ -744,7 +874,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (v.existingDuplicateRowList.isNotEmpty && ackExistingDuplicates)
         '既存参加者とのメール重複${v.existingDuplicateRowList.length}件を許可して、別参加者として取り込みます',
       if (v.csvDuplicateRowList.isNotEmpty && ackCsvDuplicates)
-        'CSV内のメール重複${v.csvDuplicateRowList.length}件を許可して、別参加者として取り込みます',
+        'ファイル内のメール重複${v.csvDuplicateRowList.length}件を許可して、別参加者として取り込みます',
       if (approved.isNotEmpty) '確認が必要な行${approved.length}件を許可して取り込みます',
     ];
   }
@@ -796,7 +926,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
 
   // CSVのheaderが今年度の正式フォーマットと一致しない(通常のUIで列mappingをさせる設計はもう無いため、
   // ここで拒否するのが唯一の対応窓口)。不足している列名はadminへ表示してよい(個人情報ではない)。
-  Widget _formatErrorSection() => _section('対応していないCSVです', [
+  Widget _formatErrorSection() => _section('対応していないファイルです', [
     _notice(formatError!, key: const Key('format-error')),
     if (missingHeadersList.isNotEmpty) ...[
       const SizedBox(height: 6),
@@ -808,12 +938,18 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
 
   Widget _autoAnalysisSection() => _section('自動解析結果', [
     const Text(
-      'CSVの列を自動で認識しました(列を選ぶ操作は不要です)。',
+      'ファイルの列を自動で認識しました(列を選ぶ操作は不要です)。',
       key: Key('auto-mapping-ok'),
     ),
     const SizedBox(height: 8),
     for (final g in mapping!.programs)
       Text('・${g.name}: 参加判定と人数を自動で読み取ります', key: ValueKey('auto-program-${g.programId}')),
+    Text(
+      mapping!.hebelResidenceColumn != null
+          ? '・HEBEL属性: 「${mapping!.hebelResidenceColumn}」列から読み取ります(受付画面での確認用)'
+          : '・HEBEL属性: このファイルには列がありません(取り込みません。受付画面には表示されません)',
+      key: const Key('auto-hebel-residence'),
+    ),
   ]);
 
   /// programId → 表示名。programIdそのものは利用者へ表示しない(内部の識別子のため)。
@@ -901,7 +1037,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           padding: const EdgeInsets.all(12),
           color: const Color(0xffeef3f8),
           child: Text(
-            '原本CSV: ${summary.originalRows}件　修正: ${summary.correctedRows}件　'
+            '原本: ${summary.originalRows}件　修正: ${summary.correctedRows}件　'
             '除外: ${summary.excludedRows}件　取込予定: ${summary.importRows}件',
             style: const TextStyle(fontWeight: FontWeight.bold),
           ),
@@ -937,7 +1073,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           '注意: 「$column」はキャンセル待ちの列の可能性があります。当選者の取込に使う列か確認してください。',
           color: const Color(0xfffff1cf),
         ),
-      InfoRow('CSV総行数', '${p.totalRecords}行'),
+      InfoRow('総行数', '${p.totalRecords}行'),
       InfoRow('空の行', '${p.blankRecordCount}行'),
       InfoRow('取込対象', '${ready.length}件'),
       InfoRow('確認が必要(検証画面で許可済み)', '${review.length}件'),
@@ -1063,7 +1199,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (_importCount == 0)
         const Padding(
           padding: EdgeInsets.only(top: 6),
-          child: Text('取り込める行がありません。CSVの内容を見直してください。'),
+          child: Text('取り込める行がありません。ファイルの内容を見直してください。'),
         ),
       if (commitError != null)
         _notice(commitError!, key: const Key('commit-error')),
@@ -1107,14 +1243,17 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     switch (f.code) {
       case 'email-duplicate-in-csv':
         return row.duplicateRows.isEmpty
-            ? 'CSV内に同じメールアドレスの行があります。'
-            : 'CSV内の${row.duplicateRows.join('、')}行目と同じメールアドレスです。';
+            ? 'ファイル内に同じメールアドレスの行があります。'
+            : 'ファイル内の${row.duplicateRows.join('、')}行目と同じメールアドレスです。';
       case 'email-duplicate-existing':
         return 'このイベントの既存の有効な参加者と同じメールアドレスです。';
       case 'not-attending-count-ignored':
         return '$program：不参加ですが人数欄に${countText()}が残っています。人数は無視されます。';
       case 'not-attending-count-present':
         return '$program：不参加ですが人数欄に${countText()}が残っています(確認が必要)。';
+      case 'hebel-residence-unknown':
+        return 'HEBEL属性：「${_cellAt(row.sourceRowNumber, mapping?.hebelResidenceColumn)}」は申込フォームの選択肢と一致しません'
+            '(未知のHEBEL属性。修正するか、許可すると原文のまま「未知」として取り込みます)。';
     }
     final label = importIssueLabel(f.code);
     return program == null ? label : '$program：$label';
@@ -1145,6 +1284,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           add(m.emailColumn);
         case 'name-missing':
           add(m.nameColumn);
+        case 'hebel-residence-unknown':
+          add(m.hebelResidenceColumn);
         case 'count-invalid' || 'attending-count-missing' || 'not-attending-count-present' || 'not-attending-count-ignored':
           add(programOf(f.programId)?.countColumn);
         case 'participation-empty' || 'participation-unknown':
@@ -1249,7 +1390,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     const warnColor = Color(0xfffff1cf);
     final pendingReview = v.pendingReviewRows;
     return _section('検証結果(まだ取り込まれていません)', [
-      InfoRow('総行数', '${v.totalRows}件(CSV ${v.totalRecords}行・空の行${v.blankRecordCount}行を除く)', key: const Key('validation-total')),
+      InfoRow('総行数', '${v.totalRows}件(ファイル ${v.totalRecords}行・空の行${v.blankRecordCount}行を除く)', key: const Key('validation-total')),
       InfoRow('正常', '${v.okCount}件', key: const Key('validation-ok')),
       InfoRow('警告', '${v.warningCount}件', key: const Key('validation-warning')),
       InfoRow('エラー', '${v.errorCount}件', key: const Key('validation-error-count')),
@@ -1288,6 +1429,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           InfoRow('${type['label']}', '${type['count']}件'),
         InfoRow('タイプ判定不能', '${v.findingCounts['participation-type-undetermined'] ?? 0}件'),
       ],
+      if (v.hebelResidenceSummary.isNotEmpty) _hebelResidenceSummary(v, m),
       if (v.importedBatches.isNotEmpty)
         _notice(
           '既に取り込まれている回: ${v.importedBatches.map((b) => '第${b.sequence}回${b.status == 'committed' ? '' : '(未完了)'}').join('、')}\n'
@@ -1303,7 +1445,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         ),
       if (v.alreadyImported) ...[
         _notice(
-          'このCSV(同じ内容・同じ列の対応)は、既に第${v.existingSequence ?? '?'}回として取り込まれています。'
+          'このファイル(同じ内容・同じ列の対応)は、既に第${v.existingSequence ?? '?'}回として取り込まれています。'
           'もう一度取り込む場合は、新しい取込回(第${v.nextImportSequence}回)として、別の参加者が作られます。'
           '第${v.existingSequence ?? '?'}回の参加者・送信履歴は変更されません。',
           color: warnColor,
@@ -1359,7 +1501,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
             if (v.existingDuplicateRowList.isNotEmpty)
               'このイベントの既存の有効な参加者(${v.existingActiveParticipantCount}件)とメールアドレスが重複する行: ${v.existingDuplicateRowList.length}件',
             if (v.csvDuplicateRowList.isNotEmpty)
-              'CSV内でメールアドレスが重複する行: ${v.csvDuplicateRowList.length}件',
+              'ファイル内でメールアドレスが重複する行: ${v.csvDuplicateRowList.length}件',
             '取り込むと、同じメールアドレスの参加者が複数、有効(active)になります。'
                 'イベント全体への配信・前日リマインド・受付名簿等でも別参加者として扱われ、同じアドレスへ複数通届くことがあります。',
           ].join('\n'),
@@ -1387,7 +1529,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (v.csvDuplicateRowList.isNotEmpty)
         _bulkPanel(
           key: const Key('csv-duplicates-panel'),
-          text: 'CSV内のメール重複: ${v.csvDuplicateRowList.length}件',
+          text: 'ファイル内のメール重複: ${v.csvDuplicateRowList.length}件',
           rows: v.csvDuplicateRowList,
           allow: CheckboxListTile(
             key: const Key('ack-csv-duplicates'),
@@ -1400,7 +1542,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                 : (value) => setState(() => _setAllowed(v.csvDuplicateRowList, _csvDuplicate, value == true)),
           ),
           excludeKey: 'exclude-all-csv-duplicates',
-          excludeLabel: 'CSV内のメール重複',
+          excludeLabel: 'ファイル内のメール重複',
         ),
       // 参考情報: 見せるだけ(参加扱いにはせず、人数は無視する)。許可は要らず、プレビュー・取込を妨げない。
       if (v.ignoredCountRowList.isNotEmpty)
@@ -1419,9 +1561,67 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         ),
         for (final r in shown.take(_shownProblemRows)) _validationRow(v, m, r),
         if (shown.length > _shownProblemRows)
-          Text('ほか${shown.length - _shownProblemRows}件(CSVを修正して再検証してください)'),
+          Text('ほか${shown.length - _shownProblemRows}件(ファイルを修正して再検証してください)'),
       ],
     ]);
+  }
+
+  /// HEBEL属性の分類別の件数(サーバーの集計。今回の取込から除外した行は含まない)と、行ごとの分類。
+  /// 未知の値は件数を強調し、行の一覧では原文を示す(丸めない)。
+  Widget _hebelResidenceSummary(ImportValidation v, ImportMapping m) {
+    const unknown = 'unknown';
+    final unknownCount = v.hebelResidenceSummary.where((h) => h.category == unknown).firstOrNull?.count ?? 0;
+    final rows = v.rows.where((r) => !r.excluded && r.hebelResidence != null).toList()
+      ..sort((a, b) => a.sourceRowNumber - b.sourceRowNumber);
+    return Container(
+      key: const Key('hebel-residence-summary'),
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      color: unknownCount > 0 ? const Color(0xffffe8e8) : const Color(0xffeef3f8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text('HEBEL属性（取込予定の行・受付画面での確認用）', style: TextStyle(fontWeight: FontWeight.bold)),
+          for (final h in v.hebelResidenceSummary)
+            InfoRow(
+              h.label,
+              '${h.count}件',
+              key: ValueKey('hebel-residence-count-${h.category}'),
+            ),
+          if (unknownCount > 0)
+            Text(
+              '未知のHEBEL属性が$unknownCount件あります。各行で修正するか、確認のうえ許可してください(許可すると原文のまま「未知」として取り込みます)。',
+              key: const Key('hebel-residence-unknown-notice'),
+              style: const TextStyle(color: Color(0xffb42318), fontWeight: FontWeight.bold),
+            ),
+          ExpansionTile(
+            key: const Key('hebel-residence-rows'),
+            tilePadding: EdgeInsets.zero,
+            title: Text('行ごとのHEBEL属性(${rows.length}件)'),
+            children: [
+              SizedBox(
+                height: 240,
+                child: ListView.builder(
+                  itemCount: rows.length,
+                  itemBuilder: (context, i) {
+                    final r = rows[i];
+                    final n = r.sourceRowNumber;
+                    final raw = _cellAt(n, m.hebelResidenceColumn);
+                    final isUnknown = r.hebelResidence == unknown;
+                    return Text(
+                      '$n行目　${_cellAt(n, m.nameColumn)}　${v.hebelResidenceLabel(r.hebelResidence!)}'
+                      '${isUnknown ? '(原文:「$raw」)' : ''}',
+                      key: ValueKey('hebel-residence-row-$n'),
+                      style: isUnknown ? const TextStyle(color: Color(0xffb42318)) : null,
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _validationRow(ImportValidation v, ImportMapping m, ValidationRow r) {
@@ -1597,7 +1797,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   // eventIdを持たずに開かれた場合(直リンク等)。イベントIDの入力・選択は求めず、
   // 管理画面からやり直す案内だけを表示する。
   Widget _missingEventSection() => _section('取り込み先のイベントが分かりません', [
-    const Text('イベント管理画面からCSV取込を選択してください。', key: Key('no-event-id-notice')),
+    const Text('イベント管理画面から参加者の取込を選択してください。', key: Key('no-event-id-notice')),
     const SizedBox(height: 12),
     OutlinedButton(
       key: const Key('back-to-console'),
@@ -1609,10 +1809,10 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   @override
   Widget build(BuildContext context) {
     if (!_eventFixed) {
-      return PageFrame(title: '参加者CSVの取込', child: _missingEventSection());
+      return PageFrame(title: '参加者ファイルの取込', child: _missingEventSection());
     }
     return PageFrame(
-      title: '参加者CSVの取込',
+      title: '参加者ファイルの取込',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1638,26 +1838,35 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
               const Text('参加者は、このイベントへ取り込まれます。取り込むだけでは、メールは送信されません。'),
               if (eventProgramMismatch.isNotEmpty)
                 _notice(
-                  'このイベントには、CSVで想定しているprogramがありません(${eventProgramMismatch.join('、')})。イベントの設定をご確認ください。',
+                  'このイベントには、参加者リストで想定しているprogramがありません(${eventProgramMismatch.join('、')})。イベントの設定をご確認ください。',
                   key: const Key('event-program-mismatch'),
                 ),
             ],
           ]),
           if (event != null && eventProgramMismatch.isEmpty)
-            _section('CSVファイル', [
-              const Text('UTF-8(BOMあり・なし)のCSVを選択してください。列は自動で解析します(選ぶ操作は不要です)。'),
+            _section('参加者ファイル', [
+              const Text('対応形式: Excel（.xlsx）/ CSV（.csv、UTF-8(BOMあり・なし)）'),
+              const Text('列は自動で解析します(選ぶ操作は不要です)。'),
               const SizedBox(height: 8),
               OutlinedButton.icon(
                 key: const Key('pick-file'),
                 onPressed: busy ? null : _pickFile,
                 icon: const Icon(Icons.upload_file),
-                label: Text(file == null ? 'CSVファイルを選択' : 'ファイルを選び直す'),
+                label: Text(file == null ? '参加者ファイルを選択' : 'ファイルを選び直す'),
               ),
-              if (file != null && table != null) ...[
+              if (file != null && parsedFile != null) ...[
                 const SizedBox(height: 8),
                 Text('選択中: ${file!.name}'),
-                Text('${table!.records.length}行 / ${table!.headers.length}列'),
+                Text('形式: ${parsedFile!.format.label}', key: const Key('file-format')),
+                if (sheet?.name != null) Text('シート: ${sheet!.name}', key: const Key('file-sheet')),
+                if (table != null)
+                  Text(
+                    'データ行数: ${table!.records.length}行(列数: ${table!.headers.length}列)',
+                    key: const Key('file-rows'),
+                  ),
+                ..._sheetNotices(),
               ],
+              if (sheetCandidates.isNotEmpty) _sheetChooser(),
               if (fileError != null)
                 _notice(fileError!, key: const Key('file-error')),
             ]),

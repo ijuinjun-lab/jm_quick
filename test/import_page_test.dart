@@ -310,7 +310,7 @@ void main() {
       expect(find.text(label), findsNWidgets(2));
       expect(find.textContaining('参加タイプ: $label'), findsOneWidget);
     }
-    for (final label in ['CSV総行数', '空の行', '確認が必要(検証画面で許可済み)', 'program別予定', 'タイプ未確定']) {
+    for (final label in ['総行数', '空の行', '確認が必要(検証画面で許可済み)', 'program別予定', 'タイプ未確定']) {
       expect(find.text(label), findsWidgets);
     }
   });
@@ -355,7 +355,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('CSVの取込は管理者のみ利用できます'), findsOneWidget);
+      expect(find.text('参加者ファイルの取込は管理者のみ利用できます'), findsOneWidget);
       expect(find.byKey(const Key('pick-file')), findsNothing);
       expect(service.eventCalls, isEmpty, reason: 'staff・未認証ではイベントの読み込みもしない');
       await tester.pumpWidget(const SizedBox());
@@ -394,7 +394,7 @@ void main() {
         expect(find.byKey(const Key('event-id')), findsNothing);
         expect(find.byKey(const Key('load-event')), findsNothing);
         expect(find.byKey(const Key('no-event-id-notice')), findsOneWidget);
-        expect(find.text('イベント管理画面からCSV取込を選択してください。'), findsOneWidget);
+        expect(find.text('イベント管理画面から参加者の取込を選択してください。'), findsOneWidget);
         expect(find.byKey(const Key('back-to-console')), findsOneWidget);
         expect(find.byKey(const Key('pick-file')), findsNothing);
         expect(service.eventCalls, isEmpty, reason: 'eventIdが無ければイベントを問い合わせない');
@@ -444,7 +444,7 @@ void main() {
         await _open(tester, service); // pickは既定(_csv)。ここではpick-fileを一切タップしない。
         expect(service.eventCalls, ['evfixture0123456789']);
         expect(find.text('選択中: 架空取込.csv'), findsOneWidget);
-        expect(find.text('5行 / ${_headers.length}列'), findsOneWidget);
+        expect(find.text('データ行数: 5行(列数: ${_headers.length}列)'), findsOneWidget);
         expect(find.text('PHASE11 STEP3 TEST(架空)'), findsOneWidget);
         expect(find.textContaining('架空プログラムA'), findsWidgets);
         // CSVの列は自動で認識され、選ぶ操作は不要(mapping UIを表示しない)
@@ -470,7 +470,7 @@ void main() {
       );
       expect(calls, 1, reason: 'イベント読込直後に自動で1回だけ開く');
       expect(find.byKey(const Key('pick-file')), findsOneWidget);
-      expect(find.text('CSVファイルを選択'), findsOneWidget);
+      expect(find.text('参加者ファイルを選択'), findsOneWidget);
       expect(
         find.text('PHASE11 STEP3 TEST(架空)'),
         findsOneWidget,
@@ -546,7 +546,7 @@ void main() {
           reason: 'プレビュー前は確定できない',
         );
         expect(find.text('選択中: 架空取込.csv'), findsOneWidget);
-        expect(find.text('5行 / ${_headers.length}列'), findsOneWidget);
+        expect(find.text('データ行数: 5行(列数: ${_headers.length}列)'), findsOneWidget);
         await _preview_(tester);
         expect(service.previews.length, 1);
         expect(service.commits, isEmpty, reason: 'プレビューでは何も確定しない');
@@ -1105,14 +1105,14 @@ void main() {
       await _validate(tester);
       expect(rowText(2, '2行目　警告'), findsOneWidget);
       expect(rowText(2, '架空参加者1　sippo1@example.invalid'), findsOneWidget);
-      expect(rowText(2, 'CSV内の5行目と同じメールアドレスです。'), findsOneWidget);
+      expect(rowText(2, 'ファイル内の5行目と同じメールアドレスです。'), findsOneWidget);
       expect(rowText(3, '3行目　エラー'), findsOneWidget);
       expect(rowText(3, '[エラー] 架空プログラムA：人数が不正です'), findsOneWidget);
       expect(rowText(3, '架空プログラムB：時間枠を解釈できません(未知の時間枠)'), findsOneWidget);
       expect(rowText(3, '既存の有効な参加者と同じメールアドレスです'), findsOneWidget);
       expect(rowText(6, '架空プログラムA：不参加ですが人数欄に2が残っています。人数は無視されます。'), findsOneWidget);
       expect(find.byKey(const ValueKey('finding-count-email-duplicate-in-csv')), findsOneWidget);
-      expect(find.textContaining('CSV内でメールアドレスが重複しています: 2件'), findsOneWidget);
+      expect(find.textContaining('ファイル内でメールアドレスが重複しています: 2件'), findsOneWidget);
       expect(find.textContaining('人数が不正です: 1件'), findsOneWidget);
       // エラーがあるのでプレビューへ進めない(確認をしても同じ)
       expect(find.byKey(const Key('validation-blocked')), findsOneWidget);
@@ -1136,7 +1136,7 @@ void main() {
       expect(find.textContaining('既存の有効な参加者(4件)とメールアドレスが重複する行: 4件'), findsOneWidget);
       expect(find.textContaining('前日リマインド・受付名簿等でも別参加者として扱われ'), findsOneWidget);
       expect(previewEnabled(tester), isFalse);
-      expect(find.byKey(const Key('ack-csv-duplicates')), findsNothing, reason: 'CSV内の重複が無ければ、その確認は出さない');
+      expect(find.byKey(const Key('ack-csv-duplicates')), findsNothing, reason: 'ファイル内の重複が無ければ、その確認は出さない');
       await tester.ensureVisible(find.byKey(const Key('ack-existing-duplicates')));
       await tester.tap(find.byKey(const Key('ack-existing-duplicates')));
       await tester.pumpAndSettle();
@@ -1210,7 +1210,7 @@ void main() {
       await tester.ensureVisible(find.byKey(const Key('ack-csv-duplicates')));
       await tester.tap(find.byKey(const Key('ack-csv-duplicates')));
       await tester.pumpAndSettle();
-      expect(previewEnabled(tester), isFalse, reason: 'CSV内の重複の確認だけでは、既存参加者との重複は許可されない');
+      expect(previewEnabled(tester), isFalse, reason: 'ファイル内の重複の確認だけでは、既存参加者との重複は許可されない');
       await tester.tap(find.byKey(const Key('ack-existing-duplicates')));
       await tester.pumpAndSettle();
       expect(previewEnabled(tester), isTrue);
@@ -1415,7 +1415,7 @@ void main() {
       await tapKey(tester, const Key('ack-existing-duplicates'));
       expect(find.text('未解決の問題はありません。'), findsOneWidget);
       await tapKey(tester, const Key('run-preview'));
-      expect(find.text('原本CSV: 4件　修正: 1件　除外: 1件　取込予定: 3件'), findsOneWidget);
+      expect(find.text('原本: 4件　修正: 1件　除外: 1件　取込予定: 3件'), findsOneWidget);
       // プレビューから検証画面へ戻って対処を変えられる
       await tapKey(tester, const Key('back-to-validation'));
       expect(find.byKey(const Key('commit')), findsNothing);

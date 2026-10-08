@@ -129,6 +129,7 @@ class _ConfirmedReceptionPageState extends State<ConfirmedReceptionPage> {
         view = ReceptionView(
           eventName: view!.eventName,
           participantName: view!.participantName,
+          hebelResidence: view!.hebelResidence,
           programs: [
             for (final p in view!.programs)
               if (p.programId == program.programId)
@@ -176,6 +177,7 @@ class _ConfirmedReceptionPageState extends State<ConfirmedReceptionPage> {
     view = ReceptionView(
       eventName: view!.eventName,
       participantName: view!.participantName,
+      hebelResidence: view!.hebelResidence,
       programs: [
         for (final p in view!.programs)
           if (p.programId == programId)
@@ -391,6 +393,7 @@ class _ConfirmedReceptionPageState extends State<ConfirmedReceptionPage> {
           textAlign: TextAlign.center,
           style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
         ),
+        if (current.hebelResidence case final hebel?) _HebelResidenceBadge(hebel),
         const SizedBox(height: 12),
         for (final program in current.programs) ...[
           _ProgramCard(
@@ -420,6 +423,31 @@ class _ConfirmedReceptionPageState extends State<ConfirmedReceptionPage> {
       ],
     );
   }
+}
+
+/// HEBEL属性(受付での確認用。受付の操作には影響しない)。未知の値は原文を添えて目立たせる。
+class _HebelResidenceBadge extends StatelessWidget {
+  const _HebelResidenceBadge(this.hebel);
+  final ReceptionHebelResidence hebel;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Container(
+      key: const Key('reception-hebel-residence'),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: hebel.unknown ? const Color(0xffffe8e8) : const Color(0xffeef3f8),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        'HEBEL属性：${hebel.label}'
+        '${hebel.unknown && hebel.rawValue != null ? '（原文：${hebel.rawValue}）' : ''}',
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      ),
+    ),
+  );
 }
 
 class _ProgramCard extends StatefulWidget {
