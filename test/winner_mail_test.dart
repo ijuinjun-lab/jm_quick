@@ -725,6 +725,44 @@ void main() {
       });
     }
 
+    for (final width in [1280.0, 360.0]) {
+      testWidgets('幅${width.toInt()}px: 画面全体で、説明文・ラベル・入力欄・補足文・次の項目が縦に重ならず、間に余白がある', (tester) async {
+        final response = mappedResponse()
+          ..['participationTypes'] = [{'value': 'dogOnly', 'label': '犬のみ'}]
+          ..['previewParticipants'] = [{'participantId': 'p1', 'name': '架空 太郎', 'participationType': 'dogOnly'}]
+          ..['previewParticipantId'] = 'p1';
+        final service = FakeWinnerMailService(settings: WinnerMailSettings.fromJson(response));
+        await tester.pumpWidget(_page(service));
+        await _load(tester);
+        tester.view.physicalSize = Size(width, 6000);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        // 縦に並ぶ項目: 入力欄(ラベル・補足文を含む枠全体)・program欄のラベル・項目の間の説明文
+        final rects = <(String, Rect)>[
+          for (final e in find.byType(InputDecorator).evaluate()) ('入力欄', tester.getRect(find.byWidget(e.widget))),
+          for (final k in ['mapping-label-cat', 'mapping-label-dog', 'mapping-label-talk', 'mapping-save-note', 'sender-address-note', 'preview-saved-note'])
+            (k, tester.getRect(find.byKey(Key(k)))),
+        ]..sort((a, b) => a.$2.top.compareTo(b.$2.top));
+        expect(rects.length, greaterThan(20));
+        for (var i = 1; i < rects.length; i++) {
+          final (prevName, prev) = rects[i - 1];
+          final (name, rect) = rects[i];
+          final sameRow = prev.left < rect.right && rect.left < prev.right;
+          if (!sameRow) continue;
+          // program欄はラベルとプルダウンの間が6px(同じ項目)。それ以外の項目の間は8px以上
+          final minGap = prevName.startsWith('mapping-label') ? 4.0 : 8.0;
+          expect(rect.top - prev.bottom, greaterThanOrEqualTo(minGap), reason: '$prevName($prev) と $name($rect) の間に余白がない');
+        }
+        // 指摘のあった2か所: 説明文と次の項目のラベルが接しない
+        for (final (note, label) in [('mapping-save-note', '送信者名'), ('sender-address-note', 'お問い合わせ先')]) {
+          final noteRect = tester.getRect(find.byKey(Key(note)));
+          final labelRect = tester.getRect(find.text(label));
+          expect(labelRect.top - noteRect.bottom, greaterThanOrEqualTo(12), reason: '$note → $label');
+        }
+        expect(service.updates, isEmpty);
+      });
+    }
+
     testWidgets('プルダウンで選び直せる(保存はしない)', (tester) async {
       final service = FakeWinnerMailService(settings: WinnerMailSettings.fromJson(mappedResponse()));
       await tester.pumpWidget(_page(service));

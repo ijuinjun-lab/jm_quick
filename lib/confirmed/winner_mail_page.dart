@@ -254,7 +254,8 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     int lines = 1,
     String? helper,
   }) => Padding(
-    padding: const EdgeInsets.only(bottom: 12),
+    // 縦の余白は画面全体で統一する: 前の項目(説明文・補足文)との間に上8、次の項目との間に下16。
+    padding: const EdgeInsets.only(top: 8, bottom: 16),
     child: TextField(
       controller: controller,
       minLines: lines,
@@ -265,6 +266,12 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
         alignLabelWithHint: true,
       ),
     ),
+  );
+
+  /// フォームの中の説明文(項目の間に置く1文)。前後の入力欄と重ならないよう、上4・下12の余白を付ける。
+  Widget _note(String text, {Key? key}) => Padding(
+    padding: const EdgeInsets.only(top: 4, bottom: 12),
+    child: Text(text, key: key),
   );
 
   @override
@@ -483,10 +490,10 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
                   ],
                 ),
               ),
-            const Text('下の「保存」で本文と一緒に保存します。CSV取込前に設定してください。'),
+            _note('下の「保存」で本文と一緒に保存します。CSV取込前に設定してください。', key: const Key('mapping-save-note')),
           ],
           _field(senderName, '送信者名'),
-          const Text('送信元メールアドレスは既存メール配信基盤の設定を使用します。'),
+          _note('送信元メールアドレスは既存メール配信基盤の設定を使用します。', key: const Key('sender-address-note')),
           _field(contact, 'お問い合わせ先', lines: 3),
           if (mappingEnabled) ...[
             _field(talkTime, 'トーク開催時間', helper: 'programに開催時間がある場合はそちらを優先します。未設定の時だけ使用します。'),
@@ -556,35 +563,41 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
           ),
           const SizedBox(height: 10),
           // 内部IDの手入力ではなく、サーバーが返す有効・取込済み参加者を氏名で選ぶ。
-          const Text('プレビューには保存済みの設定が使われます。編集後は保存してください。'),
+          _note('プレビューには保存済みの設定が使われます。編集後は保存してください。', key: const Key('preview-saved-note')),
           if (settings!.participationTypes.isNotEmpty) ...[
-            DropdownButtonFormField<String>(
-              key: const Key('mail-type-filter'),
-              initialValue: selectedType ?? '',
-              decoration: const InputDecoration(labelText: '参加タイプ'),
-              items: [
-                const DropdownMenuItem(value: '', child: Text('全タイプ')),
-                for (final type in settings!.participationTypes)
-                  DropdownMenuItem(value: type['value'] as String, child: Text(type['label'] as String)),
-              ],
-              onChanged: busy ? null : (value) => setState(() {
-                selectedType = value == '' ? null : value;
-                selectedParticipant = null;
-                preview = null;
-              }),
+            Padding(
+              padding: const EdgeInsets.only(top: 8, bottom: 16),
+              child: DropdownButtonFormField<String>(
+                key: const Key('mail-type-filter'),
+                initialValue: selectedType ?? '',
+                decoration: const InputDecoration(labelText: '参加タイプ'),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('全タイプ')),
+                  for (final type in settings!.participationTypes)
+                    DropdownMenuItem(value: type['value'] as String, child: Text(type['label'] as String)),
+                ],
+                onChanged: busy ? null : (value) => setState(() {
+                  selectedType = value == '' ? null : value;
+                  selectedParticipant = null;
+                  preview = null;
+                }),
+              ),
             ),
             if (availableParticipants.isNotEmpty)
-              DropdownButtonFormField<String>(
-                key: ValueKey('mail-participant-${selectedType ?? 'all'}'),
-                initialValue: selectedParticipant ?? availableParticipants.first['participantId'] as String,
-                decoration: const InputDecoration(labelText: 'プレビューする参加者'),
-                items: [for (var i = 0; i < availableParticipants.length; i++)
-                  DropdownMenuItem(value: availableParticipants[i]['participantId'] as String,
-                    child: Text('${i + 1}. ${availableParticipants[i]['name']}'))],
-                onChanged: busy ? null : (value) => setState(() { selectedParticipant = value; preview = null; }),
+              Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 16),
+                child: DropdownButtonFormField<String>(
+                  key: ValueKey('mail-participant-${selectedType ?? 'all'}'),
+                  initialValue: selectedParticipant ?? availableParticipants.first['participantId'] as String,
+                  decoration: const InputDecoration(labelText: 'プレビューする参加者'),
+                  items: [for (var i = 0; i < availableParticipants.length; i++)
+                    DropdownMenuItem(value: availableParticipants[i]['participantId'] as String,
+                      child: Text('${i + 1}. ${availableParticipants[i]['name']}'))],
+                  onChanged: busy ? null : (value) => setState(() { selectedParticipant = value; preview = null; }),
+                ),
               )
             else
-              const Text('このタイプの取込済み参加者はいません。'),
+              _note('このタイプの取込済み参加者はいません。'),
           ],
           if (settings!.participationTypes.isNotEmpty ? availableParticipants.isNotEmpty : settings?.previewParticipantId != null)
             Align(
