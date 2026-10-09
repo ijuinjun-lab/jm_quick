@@ -3,8 +3,13 @@
 import 'dart:html' as html;
 import 'dart:typed_data';
 
-void downloadBytes(Uint8List bytes, String fileName) {
-  final blob = html.Blob([bytes], 'text/csv;charset=utf-8');
+/// ブラウザ上でファイルを保存させる(サーバー・Storageには何も保存しない)。[mimeType]の既定はCSV(従来どおり)。
+void downloadBytes(
+  Uint8List bytes,
+  String fileName, {
+  String mimeType = 'text/csv;charset=utf-8',
+}) {
+  final blob = html.Blob([bytes], mimeType);
   final url = html.Url.createObjectUrlFromBlob(blob);
   html.AnchorElement(href: url)
     ..download = fileName

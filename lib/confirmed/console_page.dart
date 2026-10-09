@@ -5,6 +5,8 @@ import 'access_role.dart';
 import 'access_service.dart';
 import 'assignment_pages.dart';
 import 'assignment_service.dart';
+import 'attendance_report_page.dart';
+import 'attendance_report_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
 import 'import_models.dart';
@@ -35,6 +37,7 @@ const List<String> eventConsoleFeatureLabels = [
   'スタッフ管理',
   '受付',
   '受付訂正',
+  '最終実績Excel出力',
 ];
 
 /// 受付スタッフに見せる機能(受付系だけ)。
@@ -62,9 +65,11 @@ class ConfirmedConsolePage extends StatelessWidget {
     ReminderService? reminderService,
     AssignmentService? assignmentService,
     ReceptionStaffKeyIssuer? receptionStaffKeyIssuer,
+    AttendanceReportService? attendanceReportService,
     this.initialEventId,
   }) : authClient = authClient ?? FirebaseAuthClient(),
        _receptionStaffKeyIssuer = receptionStaffKeyIssuer,
+       _attendanceReportService = attendanceReportService,
        _accessService = accessService,
        _eventSummaryService = eventSummaryService,
        _winnerMailService = winnerMailService,
@@ -88,6 +93,9 @@ class ConfirmedConsolePage extends StatelessWidget {
 
   // 受付スタッフ用QRの受付キー(issueReceptionStaffKey)。
   final ReceptionStaffKeyIssuer? _receptionStaffKeyIssuer;
+
+  // 最終実績Excel出力(getConfirmedAttendanceReport。読み取りのみ)。
+  final AttendanceReportService? _attendanceReportService;
 
   /// URLの`?eventId=…`(イベント一覧からの選択・イベント作成直後に渡される)。利用者が入力する欄は無い。
   final String? initialEventId;
@@ -120,6 +128,9 @@ class ConfirmedConsolePage extends StatelessWidget {
         _reminderService ?? CallableReminderService(authClient: authClient),
     assignmentService: _assignments,
     receptionStaffKeyIssuer: _keyIssuer,
+    attendanceReportService:
+        _attendanceReportService ??
+        CallableAttendanceReportService(authClient: authClient),
   );
 
   @override
@@ -358,6 +369,7 @@ class _EventConsole extends StatefulWidget {
     required this.reminderService,
     required this.assignmentService,
     required this.receptionStaffKeyIssuer,
+    required this.attendanceReportService,
     required this.viewerLabel,
   });
   final String eventId;
@@ -368,6 +380,7 @@ class _EventConsole extends StatefulWidget {
   final ReminderService reminderService;
   final AssignmentService assignmentService;
   final ReceptionStaffKeyIssuer receptionStaffKeyIssuer;
+  final AttendanceReportService attendanceReportService;
 
   /// ログイン中のroleの名前(システム管理者・イベント管理者)。
   final String viewerLabel;
@@ -469,6 +482,16 @@ class _EventConsoleState extends State<_EventConsole> {
                     ),
                   ),
                 ),
+                // イベント終了後の最終実績(参加者・受付結果)をExcelで出力する(読み取りのみ)。
+                '最終実績Excel出力': () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => AttendanceReportPage(
+                      eventId: id,
+                      eventName: event!.eventName,
+                      service: widget.attendanceReportService,
+                    ),
+                  ),
+                ),
                 '当選メール設定': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => WinnerMailPage(
@@ -485,6 +508,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 'リマインド': '前日リマインドの設定・プレビュー・送信状況',
                 'スタッフ管理': 'このイベントの受付スタッフを追加・解除する',
                 '受付': '受付スタッフ用QRを表示する(受付スタッフがスマホで読み取って受付する)',
+                '最終実績Excel出力': '参加者・受付結果をExcelで出力します。データは変更されません。',
               },
             ),
         ],

@@ -20,6 +20,7 @@ const {createReminderApi} = require("./confirmed/reminder_api");
 const {createAssignmentApi} = require("./confirmed/assignment_api");
 const {createInvitationApi} = require("./confirmed/invitation_api");
 const {createReceptionKeyApi} = require("./confirmed/reception_key_api");
+const {createAttendanceReportApi} = require("./confirmed/attendance_report_api");
 const {generateQrPng} = require("./qr_png");
 const {createMailApiTransport} = require("./mail_transport");
 
@@ -920,6 +921,10 @@ const eventCreateApi = createEventCreateApi({getDb: getFirestore, serverTimestam
 exports.createConfirmedEvent = confirmedCallable("systemAdmin", eventCreateApi.createEvent, {timeoutSeconds: 30});
 // 新方式イベントの基本情報とprogramの読み取り(Phase 1B: 対象イベントのevent_manager以上。CSV取込画面の「どのイベントへ取り込むか」の表示用。Phase 11B)
 exports.getConfirmedEventSummary = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, eventCreateApi.getSummary, {timeoutSeconds: 30});
+// イベント終了後の最終実績(参加者全員の申込内容・HEBEL属性・programごとの予定と受付結果)の読み取り。対象イベントのevent_manager以上。
+// 読み取りのみ(書込み・ファイル保存・公開URLなし)。Excelはブラウザ上で作る。受付スタッフ・受付キー(アカウント不要)からは呼べない。
+const attendanceReportApi = createAttendanceReportApi({getDb: getFirestore});
+exports.getConfirmedAttendanceReport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, attendanceReportApi.getReport, {timeoutSeconds: 120});
 const winnerMailApi = createWinnerMailApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
 });

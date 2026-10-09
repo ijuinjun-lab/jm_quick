@@ -53,7 +53,7 @@ ParticipantCsvExport buildParticipantCsv({
       '${exportedAt.month.toString().padLeft(2, '0')}'
       '${exportedAt.day.toString().padLeft(2, '0')}';
   return ParticipantCsvExport(
-    fileName: '${_safeFileName(event.name)}_参加者一覧_$date.csv',
+    fileName: '${safeExportFileName(event.name)}_参加者一覧_$date.csv',
     bytes: Uint8List.fromList(encoded),
   );
 }
@@ -93,7 +93,9 @@ String _sortKey(Participant participant) {
   return furigana.isEmpty ? participant.name : furigana;
 }
 
-String _safeFileName(String value) {
+/// ファイル名に使えない文字(\ / : * ? " < > | と制御文字)を「_」へ置き換える。空なら「イベント」。
+/// 参加者CSV(従来方式)と最終実績Excel(新方式)で共通。
+String safeExportFileName(String value) {
   final sanitized = value.trim().replaceAll(
     RegExp(r'[\\/:*?"<>|\x00-\x1f]'),
     '_',
