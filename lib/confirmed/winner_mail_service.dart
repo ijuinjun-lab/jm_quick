@@ -127,6 +127,7 @@ class WinnerMailPreview {
     this.templateVersion = 0,
     this.qrPayload = '',
     this.qrPngBase64 = '',
+    this.notificationType = '',
   });
 
   factory WinnerMailPreview.fromJson(Map<String, dynamic> json) =>
@@ -141,6 +142,7 @@ class WinnerMailPreview {
         templateVersion: (json['templateVersion'] as num?)?.toInt() ?? 0,
         qrPayload: json['qrPayload'] as String? ?? '',
         qrPngBase64: json['qrPngBase64'] as String? ?? '',
+        notificationType: json['notificationType'] as String? ?? '',
       );
 
   final bool ready;
@@ -153,6 +155,9 @@ class WinnerMailPreview {
   /// 受付用QRの文字列と、メールに添付されるQR画像(PNG・base64)。サーバーが実送信と同じレンダラーで作ったもの。
   final String qrPayload;
   final String qrPngBase64;
+
+  /// プレビューに使った通知種別(normal / waitlistPromotion)。サーバーが返さない場合は空。
+  final String notificationType;
 }
 
 /// 当選メールの設定・プレビュー。判定・生成はすべてサーバー(admin専用callable)で行う。

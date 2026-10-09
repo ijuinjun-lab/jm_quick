@@ -18,9 +18,12 @@ class FakeWinnerMailService implements WinnerMailService {
     this.previewResult,
     this.settingsError,
     this.updateError,
+    this.previewError,
   });
   WinnerMailSettings? settings;
   WinnerMailPreview? previewResult;
+  /// プレビューのAPIエラー(通常・繰り上げとも)。
+  WinnerMailException? previewError;
   WinnerMailException? settingsError;
   WinnerMailException? updateError;
   Map<String, String>? savedParticipationMapping;
@@ -67,6 +70,7 @@ class FakeWinnerMailService implements WinnerMailService {
     required String participantId,
   }) async {
     calls.add('preview:$eventId:$participantId');
+    if (previewError != null) throw previewError!;
     return previewResult!;
   }
 
@@ -89,6 +93,7 @@ class FakeWinnerMailService implements WinnerMailService {
     required String participantId,
   }) async {
     calls.add('previewWaitlist:$eventId:$participantId');
+    if (previewError != null) throw previewError!;
     return previewResult!;
   }
 }
@@ -672,6 +677,116 @@ void main() {
         expect(settings.previewParticipantId, 'batch-000001-0003');
       },
     );
+  });
+
+  group('プレビュー結果の表示位置と成功・失敗の表示', () {
+    // 画面の高さを小さくし、結果がボタンの下(画面外)に出る状態を再現する。結果が出たら見える位置まで自動でスクロールすること。
+    const viewport = Size(900, 700);
+    WinnerMailSettings settingsWithWaitlist() => WinnerMailSettings(
+      eventId: 'event-a',
+      eventName: 'テスト譲渡会',
+      subject: '【当選】ご案内',
+      introBody: '冒頭です',
+      closingBody: '締めです',
+      notesBody: '',
+      address: '',
+      access: '',
+      version: 1,
+      ready: true,
+      problems: const [],
+      missingOptional: const [],
+      previewParticipantId: 'batch-000001-0001',
+      waitlistTemplate: const {'subject': '【お席のご用意ができました：ご参加予約確定のお知らせ】 架空', 'introBody': '架空', 'closingBody': '架空', 'version': 1},
+    );
+    WinnerMailPreview result(String type, String subject) => WinnerMailPreview(
+      ready: true,
+      problems: const [],
+      subject: subject,
+      text: '架空 花子 様\n\n${type == 'waitlistPromotion' ? 'キャンセル待ちで承っておりましたお席のご用意ができましたので、ご連絡申し上げます。' : '通常の冒頭'}',
+      templateVersion: 1,
+      webPassUrl: 'https://example.invalid/p/batch-000001-0001?publicId=pub_fixture',
+      qrPngBase64: _fakePngBase64,
+      notificationType: type,
+    );
+    Future<void> openSmall(WidgetTester tester, FakeWinnerMailService service) async {
+      tester.view.physicalSize = viewport;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(_page(service));
+      await tester.pumpAndSettle();
+    }
+    bool visible(WidgetTester tester, Finder f) {
+      final r = tester.getRect(f);
+      return r.top >= 0 && r.top < viewport.height;
+    }
+    // ボタンを画面の下端に置いてから押す(本番で「押しても何も変わらない」と見えた状況。結果はボタンの下=画面外に出る)。
+    Future<void> press(WidgetTester tester, Finder button) async {
+      Scrollable.ensureVisible(tester.element(button), alignment: 1.0);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(button).bottom, greaterThan(viewport.height - 80), reason: 'ボタンは画面の下端にある');
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('通常当選: プレビュー成功後、結果欄(通知種別・件名・version・本文・QR・Web参加証URL)が見える位置に表示され、成功表示が出る', (tester) async {
+      final service = FakeWinnerMailService(settings: settingsWithWaitlist(), previewResult: result('normal', '【ご参加予約確定のお知らせ】 架空'));
+      await openSmall(tester, service);
+      await press(tester, find.text('プレビューを表示'));
+      expect(tester.takeException(), isNull);
+      expect(service.calls, contains('preview:event-a:batch-000001-0001'));
+      expect(find.text('プレビューを表示しました(下に表示しています)。'), findsOneWidget);
+      expect(find.byKey(const Key('preview-notification-type')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('preview-notification-type')), matching: find.text('通常当選')), findsOneWidget);
+      expect(find.text('【ご参加予約確定のお知らせ】 架空'), findsOneWidget);
+      expect(find.byKey(const Key('preview-text')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('preview-qr')), matching: find.byType(Image)), findsOneWidget);
+      expect(find.byKey(const Key('preview-web-pass-url')), findsOneWidget);
+      expect(visible(tester, find.byKey(const Key('preview-notice'))), isTrue, reason: '結果欄へ自動でスクロールしている');
+      expect(find.byKey(const Key('waitlist-preview-notice')), findsNothing, reason: '繰り上げの欄には出さない');
+    });
+
+    testWidgets('繰り上げ当選: プレビュー成功後、通知種別「キャンセル待ち繰り上げ当選」・件名・本文・QR・Web参加証URLが見える位置に表示される', (tester) async {
+      final service = FakeWinnerMailService(settings: settingsWithWaitlist(),
+          previewResult: result('waitlistPromotion', '【お席のご用意ができました：ご参加予約確定のお知らせ】 架空'));
+      await openSmall(tester, service);
+      await press(tester, find.byKey(const Key('preview-waitlist')));
+      expect(tester.takeException(), isNull);
+      expect(service.calls, contains('previewWaitlist:event-a:batch-000001-0001'));
+      expect(find.descendant(of: find.byKey(const Key('waitlist-preview-notice')), matching: find.text('プレビューを表示しました(下に表示しています)。')),
+          findsOneWidget);
+      expect(find.descendant(of: find.byKey(const Key('waitlist-preview-notification-type')), matching: find.text('キャンセル待ち繰り上げ当選')),
+          findsOneWidget);
+      expect(find.text('【お席のご用意ができました：ご参加予約確定のお知らせ】 架空'), findsWidgets);
+      expect(tester.widget<SelectableText>(find.byKey(const Key('waitlist-preview-text'))).data,
+          contains('キャンセル待ちで承っておりましたお席のご用意ができましたので、ご連絡申し上げます。'));
+      expect(find.descendant(of: find.byKey(const Key('waitlist-preview-qr')), matching: find.byType(Image)), findsOneWidget);
+      expect(tester.widget<SelectableText>(find.byKey(const Key('waitlist-preview-web-pass-url'))).data,
+          'https://example.invalid/p/batch-000001-0001?publicId=pub_fixture');
+      expect(visible(tester, find.byKey(const Key('waitlist-preview-notice'))), isTrue, reason: '最後の欄でも結果へ自動でスクロールする');
+      expect(find.byKey(const Key('preview-notice')), findsNothing, reason: '通常当選の欄には出さない');
+    });
+
+    for (final waitlist in [false, true]) {
+      testWidgets('${waitlist ? '繰り上げ当選' : '通常当選'}: 失敗したら、ページ上部ではなくプレビューの場所で理由が見える', (tester) async {
+        final service = FakeWinnerMailService(settings: settingsWithWaitlist(),
+            previewError: const WinnerMailException('この参加者のメールはプレビューできません。'));
+        await openSmall(tester, service);
+        await press(tester, waitlist ? find.byKey(const Key('preview-waitlist')) : find.text('プレビューを表示'));
+        final notice = find.byKey(Key('${waitlist ? 'waitlist-' : ''}preview-notice'));
+        expect(find.descendant(of: notice, matching: find.text('プレビューを表示できませんでした：この参加者のメールはプレビューできません。')), findsOneWidget);
+        expect(visible(tester, notice), isTrue, reason: '押した場所の近くで失敗が分かる');
+        expect(find.byKey(Key('${waitlist ? 'waitlist-' : ''}preview-text')), findsNothing);
+      });
+    }
+
+    testWidgets('通常当選: サーバーがready:falseを返したら、その場で「表示できません」と理由が出る(既存の理由表示を維持)', (tester) async {
+      final service = FakeWinnerMailService(settings: settingsWithWaitlist(),
+          previewResult: const WinnerMailPreview(ready: false, problems: ['template-subject-invalid']));
+      await openSmall(tester, service);
+      await press(tester, find.text('プレビューを表示'));
+      expect(find.text('プレビューを表示できません。理由を下に表示しています。'), findsOneWidget);
+      expect(visible(tester, find.byKey(const Key('preview-notice'))), isTrue);
+    });
   });
 
   group('犬・猫・トークに対応するprogramの選択欄', () {

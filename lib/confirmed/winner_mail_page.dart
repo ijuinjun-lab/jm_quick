@@ -68,6 +68,12 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   final wNotes = TextEditingController();
   final wAdoptionNotes = TextEditingController();
   WinnerMailPreview? waitlistPreview;
+
+  // プレビューの結果欄(結果が出たら自動でこの位置までスクロールする)と、ボタンの近くに出す成功・失敗の表示。
+  final _previewKey = GlobalKey();
+  final _waitlistPreviewKey = GlobalKey();
+  ({String text, bool error})? previewNotice;
+  ({String text, bool error})? waitlistPreviewNotice;
   String? selectedType;
   String? selectedParticipant;
   List<Map<String, dynamic>> get availableParticipants => settings!.previewParticipants
@@ -109,6 +115,8 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       busy = true;
       error = null;
       message = null;
+      previewNotice = null;
+      waitlistPreviewNotice = null;
     });
     try {
       await action();
@@ -188,12 +196,139 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
     });
   });
 
-  Future<void> showWaitlistPreview() => _run(() async {
+  Future<void> showWaitlistPreview() => _runPreview(waitlist: true, fetch: () async {
     final id = settings?.previewParticipantId;
-    if (id == null || id.isEmpty) return;
-    final result = await widget.service.previewWaitlist(eventId: _eventId, participantId: id);
-    if (mounted) setState(() => waitlistPreview = result);
+    if (id == null || id.isEmpty) return null;
+    return widget.service.previewWaitlist(eventId: _eventId, participantId: id);
   });
+
+  /// プレビューの実行(通常当選・繰り上げ当選で共通)。成功・失敗はボタンの近く(結果欄)に表示し、
+  /// 結果が描画されたら結果欄が見える位置まで自動でスクロールする(押しても見た目が変わらない状態を作らない)。
+  Future<void> _runPreview({required bool waitlist, required Future<WinnerMailPreview?> Function() fetch}) async {
+    void setResult(WinnerMailPreview? result, ({String text, bool error}) notice) {
+      if (waitlist) {
+        waitlistPreview = result;
+        waitlistPreviewNotice = notice;
+      } else {
+        preview = result;
+        previewNotice = notice;
+      }
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+      message = null;
+      setResult(null, (text: 'プレビューを作成しています…', error: false));
+    });
+    try {
+      final result = await fetch();
+      if (!mounted) return;
+      setState(() => setResult(
+        result,
+        result == null
+            ? (text: 'プレビューできる取込済みの参加者がいません。', error: true)
+            : result.ready
+                ? (text: 'プレビューを表示しました(下に表示しています)。', error: false)
+                : (text: 'プレビューを表示できません。理由を下に表示しています。', error: true),
+      ));
+    } on WinnerMailException catch (e) {
+      if (mounted) setState(() => setResult(null, (text: 'プレビューを表示できませんでした：${e.message}', error: true)));
+    } catch (_) {
+      if (mounted) setState(() => setResult(null, (text: 'プレビューを表示できませんでした。もう一度お試しください。', error: true)));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = (waitlist ? _waitlistPreviewKey : _previewKey).currentContext;
+      if (target != null && target.mounted) {
+        Scrollable.ensureVisible(target, duration: const Duration(milliseconds: 300), alignment: 0.05);
+      }
+    });
+  }
+
+  static String _notificationTypeLabel(String value) => switch (value) {
+    'waitlistPromotion' => 'キャンセル待ち繰り上げ当選',
+    'normal' => '通常当選',
+    _ => value,
+  };
+
+  /// プレビューの結果欄(通常当選・繰り上げ当選で同じ表示)。実送信と同じサーバーの完成形をそのまま表示する。
+  Widget _previewArea({required bool waitlist}) {
+    final p = waitlist ? waitlistPreview : preview;
+    final notice = waitlist ? waitlistPreviewNotice : previewNotice;
+    final prefix = waitlist ? 'waitlist-' : '';
+    if (p == null && notice == null) return SizedBox.shrink(key: waitlist ? _waitlistPreviewKey : _previewKey);
+    return Column(
+      key: waitlist ? _waitlistPreviewKey : _previewKey,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (notice != null)
+          Container(
+            key: Key('${prefix}preview-notice'),
+            margin: const EdgeInsets.only(top: 12),
+            padding: const EdgeInsets.all(10),
+            color: notice.error ? const Color(0xffffe8e8) : const Color(0xffe7f5ec),
+            child: Text(
+              notice.text,
+              style: TextStyle(color: notice.error ? const Color(0xffb42318) : const Color(0xff067647), fontWeight: FontWeight.bold),
+            ),
+          ),
+        if (p != null) ...[
+          const Divider(height: 28),
+          if (!p.ready)
+            for (final problem in p.problems)
+              Text(
+                problemLabel(problem),
+                style: const TextStyle(color: Color(0xffb42318)),
+              )
+          else ...[
+            if (p.notificationType.isNotEmpty)
+              InfoRow('通知種別', _notificationTypeLabel(p.notificationType), key: Key('${prefix}preview-notification-type')),
+            InfoRow('件名', p.subject),
+            InfoRow('テンプレートversion', '${p.templateVersion}'),
+            const SizedBox(height: 8),
+            const Text(
+              '本文(テキスト版)',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              padding: const EdgeInsets.all(12),
+              color: const Color(0xfff7f8fa),
+              child: SelectableText(p.text, key: Key('${prefix}preview-text')),
+            ),
+            const SizedBox(height: 20),
+            // Phase 11J: HTMLメール自体(html)はここに埋め込まない。QR画像はメールでは
+            // cid:(MIME添付の参照)で埋め込まれておりブラウザでは解決できず、また任意のサーバーHTMLを
+            // そのままFlutter側でDOM描画する経路を新設しない(script実行・危険なnavigation対策)。
+            // 代わりに、実送信と全く同じ composeWinnerMailFor が生成したQR画像そのもの(qrPngBase64。
+            // ここでQRを作り直してはいない)と、実送信と同じWeb参加証URLを、Flutter widgetとして表示する。
+            const Text(
+              'HTMLメールプレビュー(受付QR画像を含む完成形)',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '実際のHTMLメールに表示されるのと同じQR画像です(実送信と同じ処理で生成したものをそのまま表示しています)。'
+              '宛名・参加program・参加時間・参加人数・開催情報は、上の本文(テキスト版)と同じ内容がHTMLメールにも入ります。',
+              style: TextStyle(color: Color(0xff5c6670)),
+            ),
+            const SizedBox(height: 10),
+            KeyedSubtree(key: Key('${prefix}preview-qr'), child: _qrPreview(p.qrPngBase64)),
+            const SizedBox(height: 14),
+            const Text(
+              'Web参加証URL(QRコードが読み取れない場合、メール内にもこのリンクが表示されます)',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            SelectableText(p.webPassUrl, key: Key('${prefix}preview-web-pass-url')),
+          ],
+        ],
+      ],
+    );
+  }
 
   String? _validate() {
     if (mappingEnabled && (participationMapping.length != 3 || participationMapping.values.toSet().length != 3)) return '猫・犬・トークに異なるprogramを選択してください。';
@@ -236,16 +371,15 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
 
   /// 対象イベントではタイプで絞って参加者を選ぶ。他イベントは既存の代表参加者を使う。
   /// 本文・QRはどちらも実送信と同じサーバー処理で生成する。
-  Future<void> showPreview() => _run(() async {
+  Future<void> showPreview() => _runPreview(waitlist: false, fetch: () async {
     final id = settings!.participationTypes.isNotEmpty
         ? selectedParticipant ?? (availableParticipants.firstOrNull?['participantId'] as String?)
         : settings?.previewParticipantId;
-    if (id == null || id.isEmpty) return; // ボタンを表示していないので通常到達しない
-    final result = await widget.service.preview(
+    if (id == null || id.isEmpty) return null; // ボタンを表示していないので通常到達しない
+    return widget.service.preview(
       eventId: _eventId,
       participantId: id,
     );
-    if (mounted) setState(() => preview = result);
   });
 
   Widget _field(
@@ -329,7 +463,6 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   Widget _waitlistCard() {
     final w = settings!.waitlistTemplate;
     final preset = settings!.suggestedWaitlistTemplate;
-    final p = waitlistPreview;
     return Card(
       key: const Key('waitlist-mail-card'),
       child: Padding(
@@ -386,22 +519,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
                   ),
               ],
             ),
-            if (p != null) ...[
-              const Divider(height: 28),
-              if (!p.ready)
-                for (final problem in p.problems)
-                  Text(problemLabel(problem), style: const TextStyle(color: Color(0xffb42318)))
-              else ...[
-                InfoRow('件名', p.subject),
-                InfoRow('テンプレートversion', '${p.templateVersion}'),
-                const SizedBox(height: 6),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  color: const Color(0xfff7f8fa),
-                  child: SelectableText(p.text, key: const Key('waitlist-preview-text')),
-                ),
-              ],
-            ],
+            _previewArea(waitlist: true),
           ],
         ),
       ),
@@ -612,55 +730,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
               '取込済みの参加者がありません。先に参加者ファイル取込を行ってください。',
               style: TextStyle(color: Color(0xff5c6670)),
             ),
-          if (preview != null) ...[
-            const Divider(height: 28),
-            if (!preview!.ready)
-              for (final problem in preview!.problems)
-                Text(
-                  problemLabel(problem),
-                  style: const TextStyle(color: Color(0xffb42318)),
-                )
-            else ...[
-              InfoRow('件名', preview!.subject),
-              InfoRow('テンプレートversion', '${preview!.templateVersion}'),
-              const SizedBox(height: 8),
-              const Text(
-                '本文(テキスト版)',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 6),
-              Container(
-                padding: const EdgeInsets.all(12),
-                color: const Color(0xfff7f8fa),
-                child: SelectableText(preview!.text),
-              ),
-              const SizedBox(height: 20),
-              // Phase 11J: HTMLメール自体(preview!.html)はここに埋め込まない。QR画像はメールでは
-              // cid:(MIME添付の参照)で埋め込まれておりブラウザでは解決できず、また任意のサーバーHTMLを
-              // そのままFlutter側でDOM描画する経路を新設しない(script実行・危険なnavigation対策)。
-              // 代わりに、実送信と全く同じ composeWinnerMailFor が生成したQR画像そのもの(preview!.qrPngBase64。
-              // ここでQRを作り直してはいない)と、実送信と同じWeb参加証URLを、Flutter widgetとして表示する。
-              const Text(
-                'HTMLメールプレビュー(受付QR画像を含む完成形)',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                '実際のHTMLメールに表示されるのと同じQR画像です(実送信と同じ処理で生成したものをそのまま表示しています)。'
-                '宛名・参加program・参加時間・参加人数・開催情報は、上の本文(テキスト版)と同じ内容がHTMLメールにも入ります。',
-                style: TextStyle(color: Color(0xff5c6670)),
-              ),
-              const SizedBox(height: 10),
-              _qrPreview(preview!.qrPngBase64),
-              const SizedBox(height: 14),
-              const Text(
-                'Web参加証URL(QRコードが読み取れない場合、メール内にもこのリンクが表示されます)',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 4),
-              SelectableText(preview!.webPassUrl),
-            ],
-          ],
+          _previewArea(waitlist: false),
         ],
       ),
     ),
