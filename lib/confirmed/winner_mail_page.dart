@@ -490,7 +490,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
                   ],
                 ),
               ),
-            _note('下の「保存」で本文と一緒に保存します。CSV取込前に設定してください。', key: const Key('mapping-save-note')),
+            _note('下の「保存」で本文と一緒に保存します。参加者ファイル取込前に設定してください。', key: const Key('mapping-save-note')),
           ],
           _field(senderName, '送信者名'),
           _note('送信元メールアドレスは既存メール配信基盤の設定を使用します。', key: const Key('sender-address-note')),
@@ -609,7 +609,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
             )
           else if (settings?.previewParticipantId == null)
             const Text(
-              '取込済みの参加者がありません。先にCSV取込を行ってください。',
+              '取込済みの参加者がありません。先に参加者ファイル取込を行ってください。',
               style: TextStyle(color: Color(0xff5c6670)),
             ),
           if (preview != null) ...[

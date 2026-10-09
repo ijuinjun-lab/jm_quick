@@ -359,7 +359,7 @@ void main() {
         );
         await tester.pumpWidget(_page(service));
         await _load(tester);
-        expect(find.text('取込済みの参加者がありません。先にCSV取込を行ってください。'), findsOneWidget);
+        expect(find.text('取込済みの参加者がありません。先に参加者ファイル取込を行ってください。'), findsOneWidget);
         expect(find.text('プレビューを表示'), findsNothing);
         // 代替として参加者IDやpublicIdを入力させる欄は一切出ない。
         expect(find.byType(TextField).evaluate().any((e) {

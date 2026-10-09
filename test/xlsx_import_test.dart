@@ -306,9 +306,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('シート: 第2回'), findsOneWidget);
       expect(find.text('データ行数: 1行(列数: ${fixtureHeaders.length}列)'), findsOneWidget);
-      // シートを選んだ後も、通知種別を選ぶまで検証へ進めない
-      expect(find.byKey(const Key('run-validate')), findsNothing);
-      await _chooseNormalIfNeeded(tester);
+      // 通知種別はファイルより先に選んである(シートを選んでもそのまま)ので、シートを選べば検証へ進める
+      expect(tester.widget<ChoiceChip>(find.byKey(const ValueKey('notification-normal'))).selected, isTrue);
       expect(find.byKey(const Key('run-validate')), findsOneWidget);
     });
 
@@ -519,7 +518,11 @@ Future<void> _openPage(WidgetTester tester, ImportService service, PickedCsv Fun
     home: ConfirmedImportPage(eventId: 'evfixture', service: service, picker: () async => pick()),
   ));
   await tester.pumpAndSettle();
+  // 正式な導線: 1. 通知種別(通常当選)を選ぶ → 2. 「参加者ファイルを選択」でファイルを選ぶ(画面を開いただけでは開かない)。
   await _chooseNormalIfNeeded(tester);
+  await tester.ensureVisible(find.byKey(const Key('pick-file')));
+  await tester.tap(find.byKey(const Key('pick-file')));
+  await tester.pumpAndSettle();
 }
 
 /// 通知種別(必須)を選ぶ。従来の取込(通常当選)の流れのテストでは「通常当選」を選ぶ(選ぶまで検証へ進めない)。

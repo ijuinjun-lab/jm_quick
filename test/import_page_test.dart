@@ -234,6 +234,7 @@ Future<void> _open(
   double width = 900,
   void Function(BuildContext, String)? onDone,
   String? eventId = 'evfixture0123456789',
+  bool pickAfterChoosingType = true,
 }) async {
   await tester.binding.setSurfaceSize(Size(width, 4000));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -248,7 +249,12 @@ Future<void> _open(
     ),
   );
   await tester.pumpAndSettle();
+  // 正式な導線: 画面を開いてもファイル選択は開かない。1. 通知種別(通常当選) → 2. 参加者ファイルを選択。
+  if (!pickAfterChoosingType || find.byKey(const Key('pick-file')).evaluate().isEmpty) return;
   await _chooseNormalIfNeeded(tester);
+  await tester.ensureVisible(find.byKey(const Key('pick-file')));
+  await tester.tap(find.byKey(const Key('pick-file')));
+  await tester.pumpAndSettle();
 }
 
 /// 通知種別(必須)を選ぶ。従来の取込(通常当選)の流れのテストでは「通常当選」を選ぶ(選ぶまで検証へ進めない)。
@@ -450,11 +456,42 @@ void main() {
     );
 
     testWidgets(
-      '正常なeventId付きで開くと、イベントを取得した直後にファイル選択が自動で始まる(「CSVファイルを選択」を押さなくてよい)',
+      '正常なeventId付きで開いても、ファイル選択は自動で開かない。1. 通知種別 → 2. 参加者ファイルを選択 の順で進む',
       (tester) async {
         final service = FakeImportService();
-        await _open(tester, service); // pickは既定(_csv)。ここではpick-fileを一切タップしない。
+        var picks = 0;
+        await _open(tester, service, pickAfterChoosingType: false, pick: () {
+          picks += 1;
+          return _csv();
+        });
         expect(service.eventCalls, ['evfixture0123456789']);
+        expect(picks, 0, reason: '画面を開いただけではOSのファイル選択を開かない');
+        expect(find.text('1. 通知種別を選択'), findsOneWidget);
+        expect(find.text('2. 参加者ファイルを選択'), findsOneWidget);
+        expect(
+          tester.getTopLeft(find.text('1. 通知種別を選択')).dy,
+          lessThan(tester.getTopLeft(find.text('2. 参加者ファイルを選択')).dy),
+          reason: '通知種別がファイル選択より上',
+        );
+        expect(find.byKey(const ValueKey('notification-normal')), findsOneWidget, reason: 'ファイル未選択でも通知種別を表示する');
+        expect(find.byKey(const ValueKey('notification-waitlistPromotion')), findsOneWidget);
+        expect(find.byKey(const ValueKey('notification-desc-normal')), findsOneWidget);
+        expect(find.byKey(const ValueKey('notification-desc-waitlistPromotion')), findsOneWidget);
+        expect(tester.widget<OutlinedButton>(find.byKey(const Key('pick-file'))).onPressed, isNull,
+            reason: '通知種別を選ぶまでファイル選択へ進めない');
+        expect(find.byKey(const Key('pick-file-needs-type')), findsOneWidget);
+        await tester.tap(find.byKey(const Key('pick-file')), warnIfMissed: false);
+        await tester.pumpAndSettle();
+        expect(picks, 0);
+        await _chooseNormalIfNeeded(tester);
+        expect(tester.widget<OutlinedButton>(find.byKey(const Key('pick-file'))).onPressed, isNotNull);
+        expect(find.byKey(const Key('pick-file-needs-type')), findsNothing);
+        await tester.tap(find.byKey(const Key('pick-file')));
+        await tester.pumpAndSettle();
+        expect(picks, 1, reason: '「参加者ファイルを選択」を押して初めて開く');
+        expect(find.byKey(const ValueKey('notification-normal')), findsOneWidget);
+        expect(tester.widget<ChoiceChip>(find.byKey(const ValueKey('notification-normal'))).selected, isTrue,
+            reason: 'ファイルを選んでも、先に選んだ通知種別はそのまま');
         expect(find.text('選択中: 架空取込.csv'), findsOneWidget);
         expect(find.text('データ行数: 5行(列数: ${_headers.length}列)'), findsOneWidget);
         expect(find.text('PHASE11 STEP3 TEST(架空)'), findsOneWidget);
@@ -467,7 +504,7 @@ void main() {
       },
     );
 
-    testWidgets('自動のファイル選択をキャンセルしても画面に留まり、「CSVファイルを選択」から改めて選べる', (
+    testWidgets('ファイル選択をキャンセルしても画面に留まり、「参加者ファイルを選択」から改めて選べる', (
       tester,
     ) async {
       final service = FakeImportService();
@@ -477,10 +514,10 @@ void main() {
         service,
         pick: () {
           calls += 1;
-          return null; // 自動選択・手動選択とも、常にキャンセルする
+          return null; // 常にキャンセルする
         },
       );
-      expect(calls, 1, reason: 'イベント読込直後に自動で1回だけ開く');
+      expect(calls, 1, reason: '通知種別を選んでから「参加者ファイルを選択」を押したときだけ開く');
       expect(find.byKey(const Key('pick-file')), findsOneWidget);
       expect(find.text('参加者ファイルを選択'), findsOneWidget);
       expect(
@@ -490,7 +527,7 @@ void main() {
       expect(find.byKey(const Key('auto-mapping-ok')), findsNothing);
       await tester.tap(find.byKey(const Key('pick-file')));
       await tester.pumpAndSettle();
-      expect(calls, 2, reason: '「CSVファイルを選択」から再度、手動で開ける');
+      expect(calls, 2, reason: '「参加者ファイルを選択」から再度開ける');
       expect(tester.takeException(), isNull);
     });
   });

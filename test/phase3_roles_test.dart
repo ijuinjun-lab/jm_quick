@@ -227,7 +227,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       for (final label in [
-        'CSV取込',
+        '参加者ファイル取込',
         '当選メール設定',
         '当選メール送信',
         'リマインド',
@@ -381,7 +381,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       for (final label in [
-        'CSV取込',
+        '参加者ファイル取込',
         '当選メール設定',
         '当選メール送信',
         'リマインド',
@@ -500,7 +500,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('このイベントを利用する権限がありません。'), findsOneWidget);
-      expect(find.text('CSV取込'), findsNothing);
+      expect(find.text('参加者ファイル取込'), findsNothing);
     });
 
     testWidgets('CSV取込(/console/import): 担当イベントなら取込画面、担当外・スタッフなら権限なし', (
@@ -578,7 +578,7 @@ void main() {
       expect(find.text('ログイン中：スタッフ'), findsOneWidget);
       expect(find.text('架空イベントA'), findsOneWidget);
       for (final label in [
-        'CSV取込',
+        '参加者ファイル取込',
         '当選メール設定',
         '当選メール送信',
         'リマインド',
@@ -614,7 +614,7 @@ void main() {
       expect(find.text('架空イベントA'), findsOneWidget);
       expect(find.text('架空イベントB'), findsOneWidget);
       expect(find.text('ログイン中：スタッフ'), findsOneWidget);
-      expect(find.text('CSV取込'), findsNothing);
+      expect(find.text('参加者ファイル取込'), findsNothing);
     });
 
     testWidgets('受付(/console/scan・/reception)は担当イベントだけ。担当外のイベントは受付画面を出さない', (

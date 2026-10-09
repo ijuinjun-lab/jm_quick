@@ -155,10 +155,10 @@ void main() {
       expect(
         _featureTitles(
           tester,
-        ).any(['CSV取込', 'スタッフ管理', 'イベント設定', '当選メール送信'].contains),
+        ).any(['参加者ファイル取込', 'スタッフ管理', 'イベント設定', '当選メール送信'].contains),
         isFalse,
       );
-      expect(find.text('CSV取込'), findsNothing);
+      expect(find.text('参加者ファイル取込'), findsNothing);
       expect(find.text('スタッフ管理'), findsNothing);
     });
 
@@ -230,7 +230,7 @@ void main() {
       expect(access.calls, 1);
       // 管理トップ(イベント未選択)はイベント一覧・イベント作成・スタッフ管理だけ(CSV取込等は出ない)。
       expect(find.text('イベント一覧'), findsOneWidget);
-      expect(find.text('CSV取込'), findsNothing);
+      expect(find.text('参加者ファイル取込'), findsNothing);
       await tester.ensureVisible(find.text('ログアウト'));
       await tester.tap(find.text('ログアウト'));
       await _settle(tester);
@@ -281,7 +281,7 @@ void main() {
       completer.complete(const AccessCheck.granted(AccessRole.admin));
       await _settle(tester);
       expect(find.byType(ConfirmedLoginPage), findsOneWidget);
-      expect(find.text('CSV取込'), findsNothing);
+      expect(find.text('参加者ファイル取込'), findsNothing);
     });
   });
 

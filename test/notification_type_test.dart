@@ -240,12 +240,17 @@ void main() {
       expect(find.byKey(const ValueKey('notification-normal')), findsOneWidget);
       expect(find.byKey(const ValueKey('notification-waitlistPromotion')), findsOneWidget);
       expect(find.byKey(const Key('run-validate')), findsNothing, reason: '通知種別を選ぶまで検証へ進めない');
-      // program・時間枠・人数を入力・選択させる欄は無い
+      expect(tester.widget<OutlinedButton>(find.byKey(const Key('pick-file'))).onPressed, isNull, reason: '通知種別を選ぶまでファイル選択へ進めない');
+      // program・犬猫・時間枠・人数・シートを入力・選択させる欄は無い
       expect(find.byType(TextField), findsNothing);
       expect(find.byType(DropdownButtonFormField<String>), findsNothing);
 
       await _tap(tester, const ValueKey('notification-waitlistPromotion'));
       expect(find.text('使用メール：お席のご用意ができました：ご参加予約確定のお知らせ'), findsOneWidget);
+      await _tap(tester, const Key('pick-file'));
+      expect(find.byKey(const Key('file-sheet')), findsOneWidget);
+      expect(find.byType(TextField), findsNothing, reason: 'ファイル選択後も、繰り上げ先を入力させる欄は無い');
+      expect(find.byType(DropdownButtonFormField<String>), findsNothing);
       await _tap(tester, const Key('run-validate'));
       final sent = service.validations.single.json;
       expect(sent['notificationType'], 'waitlistPromotion');
@@ -276,6 +281,7 @@ void main() {
       final service = FakeImportService(event: _summary);
       await _openImport(tester, service, () => (name: '架空の繰り上げリスト.xlsx', bytes: _waitlistXlsx()));
       await _tap(tester, const ValueKey('notification-normal'));
+      await _tap(tester, const Key('pick-file'));
       const message = 'キャンセル待ち繰り上げ用ファイルの可能性があります。通知種別が「通常当選」で正しいか確認してください。';
       Finder warningIn(String key) => find.descendant(of: find.byKey(Key(key)), matching: find.text(message));
       expect(warningIn('notification-mixup'), findsOneWidget);
@@ -308,6 +314,7 @@ void main() {
       final service = FakeImportService(event: _summary);
       await _openImport(tester, service, () => (name: '架空の申込リスト.xlsx', bytes: _waitlistXlsx(sheet: '申込情報')));
       await _tap(tester, const ValueKey('notification-normal'));
+      await _tap(tester, const Key('pick-file'));
       await _tap(tester, const Key('run-validate'));
       for (final key in ['allow-all-review', 'ack-existing-duplicates', 'ack-csv-duplicates', 'ack-new-import']) {
         if (find.byKey(Key(key)).evaluate().isNotEmpty) await _tap(tester, Key(key));
@@ -328,6 +335,7 @@ void main() {
       ].join('\n');
       await _openImport(tester, service, () => (name: '架空.csv', bytes: Uint8List.fromList(utf8.encode(csv))));
       await _tap(tester, const ValueKey('notification-waitlistPromotion'));
+      await _tap(tester, const Key('pick-file'));
       expect(find.byKey(const Key('notification-error')), findsOneWidget);
       expect(find.textContaining('このファイルは繰り上げ先を一意に判定できません'), findsOneWidget);
       expect(find.byKey(const Key('run-validate')), findsNothing);
@@ -340,8 +348,9 @@ void main() {
         XSheet('15時30分～16時10分', [_waitlistHeaders, _row(2, '提出なし', wait: _dogAll, waitN: '2名')]),
       ]);
       await _openImport(tester, service, () => (name: '架空の繰り上げリスト.xlsx', bytes: bytes));
-      await _tap(tester, const ValueKey('choose-sheet-15時30分～16時10分'));
       await _tap(tester, const ValueKey('notification-waitlistPromotion'));
+      await _tap(tester, const Key('pick-file'));
+      await _tap(tester, const ValueKey('choose-sheet-15時30分～16時10分'));
       expect(find.byKey(const Key('notification-error')), findsOneWidget);
       expect(find.textContaining('対象のシートが2枚あり'), findsOneWidget);
       expect(find.byKey(const Key('run-validate')), findsNothing);

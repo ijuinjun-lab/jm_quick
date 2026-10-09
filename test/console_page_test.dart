@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/confirmed/access_role.dart';
 import 'package:jm_quick/confirmed/console_page.dart';
+import 'package:jm_quick/confirmed/import_page.dart';
 import 'package:jm_quick/confirmed/import_models.dart';
 import 'package:jm_quick/confirmed/import_service.dart' show ImportException;
 import 'package:jm_quick/confirmed/reception_staff_qr_page.dart';
@@ -170,7 +171,7 @@ void main() {
     );
 
     testWidgets(
-      'CSV取込を開くと、選択中のeventIdが自動的に引き継がれる(利用者はIDを入力・コピーしない)',
+      '参加者ファイル取込を開くと、選択中のeventIdが自動的に引き継がれる(利用者はIDを入力・コピーしない)',
       (tester) async {
         final routes = <String?>[];
         await tester.pumpWidget(
@@ -199,10 +200,61 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('event-id')), findsNothing);
-        await tester.ensureVisible(find.text('CSV取込'));
-        await tester.tap(find.text('CSV取込'));
+        await tester.ensureVisible(find.text('参加者ファイル取込'));
+        await tester.tap(find.text('参加者ファイル取込'));
         await tester.pumpAndSettle();
         expect(routes.last, '/console/import?eventId=evfixture0123456789');
+      },
+    );
+
+    testWidgets(
+      '「参加者ファイル取込」を押すと、OSのファイル選択は開かず、JM Quickの取込画面(1. 通知種別 → 2. 参加者ファイル)が表示される',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(900, 3000));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        var picks = 0;
+        await tester.pumpWidget(
+          MaterialApp(
+            onGenerateRoute: (settings) {
+              if (settings.name == '/') {
+                return MaterialPageRoute<void>(
+                  builder: (_) => ConfirmedConsolePage(
+                    initialEventId: 'evfixture0123456789',
+                    authClient: FakeAuthClient(signedIn: true),
+                    accessService: FakeAccessService([const AccessCheck.granted(AccessRole.admin)]),
+                    eventSummaryService: FakeImportService(event: _summary),
+                  ),
+                  settings: settings,
+                );
+              }
+              // /console/import?eventId=… は取込画面(ファイル選択は数えるだけ)
+              final uri = Uri.parse(settings.name!);
+              return MaterialPageRoute<void>(
+                builder: (_) => ConfirmedImportPage(
+                  eventId: uri.queryParameters['eventId'],
+                  service: FakeImportService(event: _summary),
+                  picker: () async {
+                    picks += 1;
+                    return null;
+                  },
+                ),
+                settings: settings,
+              );
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Excel／CSVの参加者ファイルを検証して取り込みます(メールは送信されません)'), findsOneWidget);
+        expect(find.text('CSV取込'), findsNothing);
+        await tester.ensureVisible(find.text('参加者ファイル取込'));
+        await tester.tap(find.text('参加者ファイル取込'));
+        await tester.pumpAndSettle();
+        expect(find.byType(ConfirmedImportPage), findsOneWidget);
+        expect(picks, 0, reason: '押した時点ではOSのファイル選択を開かない');
+        expect(find.text('1. 通知種別を選択'), findsOneWidget);
+        expect(find.text('2. 参加者ファイルを選択'), findsOneWidget);
+        expect(find.byKey(const ValueKey('notification-normal')), findsOneWidget);
+        expect(tester.widget<OutlinedButton>(find.byKey(const Key('pick-file'))).onPressed, isNull);
       },
     );
 

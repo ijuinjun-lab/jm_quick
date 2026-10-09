@@ -434,8 +434,8 @@ void main() {
         expect(find.text('架空イベント(作成直後)'), findsOneWidget);
         expect(find.textContaining('evcreated123'), findsNothing);
         // CSV取込を開くと、evcreated123が内部的に(URLのクエリとして)引き継がれる。
-        await tester.ensureVisible(find.text('CSV取込'));
-        await tester.tap(find.text('CSV取込'));
+        await tester.ensureVisible(find.text('参加者ファイル取込'));
+        await tester.tap(find.text('参加者ファイル取込'));
         await tester.pumpAndSettle();
         expect(
           routes.last,

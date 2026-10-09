@@ -29,7 +29,7 @@ const List<String> consoleTopFeatureLabels = ['イベント一覧', 'イベン�
 /// イベント選択後(`/console?eventId=…`)に表示する、そのイベントに属する機能。
 const List<String> eventConsoleFeatureLabels = [
   'イベント設定',
-  'CSV取込',
+  '参加者ファイル取込',
   '当選メール設定',
   '当選メール送信',
   'リマインド',
@@ -254,7 +254,7 @@ class _AccountBar extends StatelessWidget {
 class _ConsoleTopFlow extends StatelessWidget {
   const _ConsoleTopFlow();
 
-  static const _steps = ['① イベントを作成', '② イベント一覧から選択', '③ CSV取込・メール・受付'];
+  static const _steps = ['① イベントを作成', '② イベント一覧から選択', '③ 参加者ファイル取込・メール・受付'];
   static const _style = TextStyle(color: _mutedText, fontSize: 12);
 
   @override
@@ -449,8 +449,9 @@ class _EventConsoleState extends State<_EventConsole> {
                     ),
                   ),
                 ),
-                // CSVファイル選択画面へ直行する(このイベント固定。再びイベントを選ばせない)。
-                'CSV取込': () => Navigator.of(context).pushNamed(
+                // 参加者ファイル取込画面へ遷移する(このイベント固定。再びイベントを選ばせない)。
+                // ファイル選択はここでは開かない(取込画面で通知種別を選んでから「参加者ファイルを選択」で開く)。
+                '参加者ファイル取込': () => Navigator.of(context).pushNamed(
                   '/console/import?eventId=${Uri.encodeQueryComponent(id)}',
                 ),
                 // Phase 11L: PC(このイベント管理画面)自身のカメラは起動しない。「受付スタッフ用QR」
@@ -502,7 +503,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 ),
               },
               descriptions: const {
-                'CSV取込': '当選者CSVの取込(プレビュー確認後に確定・メールは送信されません)',
+                '参加者ファイル取込': 'Excel／CSVの参加者ファイルを検証して取り込みます(メールは送信されません)',
                 '当選メール送信': '取込回ごとの送信・進行状況・失敗分の再送',
                 '当選メール設定': '件名・本文の設定とプレビュー',
                 'リマインド': '前日リマインドの設定・プレビュー・送信状況',

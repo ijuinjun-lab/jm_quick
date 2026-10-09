@@ -329,9 +329,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         event = loaded;
         eventProgramMismatch = mismatch;
       });
-      // イベントとprogramが確認できたら、そのままファイル選択を開く(操作を1手減らす)。
-      // キャンセルされても、下の「CSVファイルを選択」から改めて選べる。
-      if (mismatch.isEmpty) await _pickFile();
+      // ファイル選択はここでは開かない。先に通知種別を選び、そのあと「参加者ファイルを選択」で開く(操作の順序を固定する)。
     } on ImportException catch (e) {
       if (mounted) setState(() => eventError = e.message);
     } catch (_) {
@@ -342,7 +340,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   }
 
   // ---- ファイル ----------------------------------------------------------------------------------
-  void _resetFile() {
+  /// [keepNotificationType]: ファイルを選び直すときは、先に選んだ通知種別を保つ(通知種別はファイルより先に決める)。
+  void _resetFile({bool keepNotificationType = false}) {
     file = null;
     parsedFile = null;
     sheet = null;
@@ -352,7 +351,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     formatError = null;
     missingHeadersList = [];
     mapping = null;
-    notificationType = null;
+    if (!keepNotificationType) notificationType = null;
     notificationError = null;
     _hebelColumn = null;
     _invalidateValidation();
@@ -482,7 +481,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   }
 
   Future<void> _pickFile() async {
-    if (busy || event == null || eventProgramMismatch.isNotEmpty) return;
+    // 通知種別を選ぶまではファイル選択を開かない
+    if (busy || event == null || eventProgramMismatch.isNotEmpty || notificationType == null) return;
     final PickedCsv? picked;
     try {
       picked = await widget.picker();
@@ -492,7 +492,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     }
     if (picked == null || !mounted) return;
     setState(() {
-      _resetFile();
+      _resetFile(keepNotificationType: true);
       file = picked;
       try {
         final parsed = parseImportFile(picked!.name, picked.bytes);
@@ -1066,24 +1066,40 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     NotificationType.waitlistPromotion => 'お席のご用意ができました：ご参加予約確定のお知らせ',
   };
 
+  static String _notificationDescriptionOf(NotificationType type) => switch (type) {
+    NotificationType.normal => '通常の当選者リストを取り込みます。キャンセル行は自動的に除外します。',
+    NotificationType.waitlistPromotion => 'キャンセル待ちから繰り上げ当選した方のリストを取り込みます。繰り上げ先・時間・人数はファイルから自動判定します。',
+  };
+
   Widget _notificationSection() {
     final mixup = _possibleMixup;
-    return _section('通知種別', [
-      const Text('このファイルの参加者へ送る当選通知の種類を選んでください(必須)。選ぶまで検証へ進めません。'),
+    return _section('1. 通知種別を選択', [
+      const Text('取り込む参加者へ送る当選通知の種類を、ファイルを選ぶ前に選んでください(必須)。'),
       const SizedBox(height: 8),
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          for (final type in NotificationType.values)
-            ChoiceChip(
-              key: ValueKey('notification-${type.value}'),
-              label: Text(type.label),
-              selected: notificationType == type,
-              onSelected: busy ? null : (_) => _selectNotificationType(type),
-            ),
-        ],
-      ),
+      for (final type in NotificationType.values)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ChoiceChip(
+                key: ValueKey('notification-${type.value}'),
+                label: Text(type.label),
+                selected: notificationType == type,
+                onSelected: busy ? null : (_) => _selectNotificationType(type),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _notificationDescriptionOf(type),
+                key: ValueKey('notification-desc-${type.value}'),
+                style: const TextStyle(color: Color(0xff5c6670)),
+              ),
+            ],
+          ),
+        ),
+      if (file != null)
+        const Text('ファイルを選んだ後に通知種別を変えると、解析・検証・プレビューはやり直しになります。',
+            key: Key('notification-change-note')),
       if (notificationType != null)
         Padding(
           padding: const EdgeInsets.only(top: 8),
@@ -2057,14 +2073,22 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                 ),
             ],
           ]),
+          // 1. 通知種別 → 2. 参加者ファイル の順(ファイル未選択でも通知種別を表示する)
+          if (event != null && eventProgramMismatch.isEmpty) _notificationSection(),
           if (event != null && eventProgramMismatch.isEmpty)
-            _section('参加者ファイル', [
+            _section('2. 参加者ファイルを選択', [
               const Text('対応形式: Excel（.xlsx）/ CSV（.csv、UTF-8(BOMあり・なし)）'),
               const Text('列は自動で解析します(選ぶ操作は不要です)。'),
+              if (notificationType == null)
+                const Text(
+                  '先に「1. 通知種別を選択」で通知種別を選んでください。',
+                  key: Key('pick-file-needs-type'),
+                  style: TextStyle(color: Color(0xffb54708)),
+                ),
               const SizedBox(height: 8),
               OutlinedButton.icon(
                 key: const Key('pick-file'),
-                onPressed: busy ? null : _pickFile,
+                onPressed: busy || notificationType == null ? null : _pickFile,
                 icon: const Icon(Icons.upload_file),
                 label: Text(file == null ? '参加者ファイルを選択' : 'ファイルを選び直す'),
               ),
@@ -2085,7 +2109,6 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                 _notice(fileError!, key: const Key('file-error')),
             ]),
           if (formatError != null) _formatErrorSection(),
-          if (table != null && formatError == null) _notificationSection(),
           if (mapping != null && table != null) _autoAnalysisSection(),
           if (mapping != null && table != null)
             _section('検証', [
