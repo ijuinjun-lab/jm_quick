@@ -18,6 +18,8 @@ const {collectReminderTargets} = require("./reminder_targets");
 
 const {rolesFor, mappingFor, participationType, TYPES} = require("./participation_types");
 const sippoPreset = require("./sippo_mail_preset");
+const sippoWaitlistPreset = require("./sippo_waitlist_mail_preset");
+const {NOTIFICATION_TYPES, NOTIFICATION_TYPE_VALUES, notificationTypeOf, templateFieldFor} = require("./notification_type");
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const invalid = (code, extra) => new ApiError("invalid-argument", `リクエストが不正です: ${code}`, {code, ...extra});
@@ -39,6 +41,19 @@ async function loadConfirmedEvent(db, eventId) {
 }
 
 const iso = (value) => { const d = toDate(value); return d ? d.toISOString() : null; };
+
+// テンプレートの表示用(管理画面)。未設定ならnull。
+const templateView = (template) => (template ? {
+  subject: template.subject || "", introBody: template.introBody || "", closingBody: template.closingBody || "",
+  notesBody: template.notesBody || "", adoptionNotesBody: template.adoptionNotesBody || "", version: Number.isInteger(template.version) ? template.version : 0,
+  updatedBy: template.updatedBy || null, updatedAt: iso(template.updatedAt),
+} : null);
+
+function parseNotificationType(value) {
+  if (value === undefined) return undefined;
+  if (!NOTIFICATION_TYPE_VALUES.includes(value)) throw invalid("invalid-notification-type");
+  return value;
+}
 
 function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl}) {
   // 管理者専用。設定と、対象イベントのプレビュー選択用氏名・ID・導出タイプを返す。
@@ -77,11 +92,14 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       programs: (event.programs || []).map((p) => ({programId: p.programId, name: p.name || p.programId})),
       ...(rolesFor(eventId, event) ? {participationTypes: TYPES, previewParticipants} : {}),
       mailSettings: {senderName: event.senderName || "", contact: event.contact || "", talkTimeText: event.confirmedMailSettings?.talkTimeText || ""},
-      template: template ? {
-        subject: template.subject || "", introBody: template.introBody || "", closingBody: template.closingBody || "",
-        notesBody: template.notesBody || "", adoptionNotesBody: template.adoptionNotesBody || "", version: Number.isInteger(template.version) ? template.version : 0,
-        updatedBy: template.updatedBy || null, updatedAt: iso(template.updatedAt),
-      } : null,
+      template: templateView(template),
+      // キャンセル待ち繰り上げ当選メール(繰り上げの取込回の送信に使う。通常当選メールとは別のテンプレート・別のversion)
+      waitlistTemplate: templateView(event[templateFieldFor(NOTIFICATION_TYPES.WAITLIST_PROMOTION)] || null),
+      suggestedWaitlistTemplate: sippoWaitlistPreset,
+      ...(() => {
+        const b = buildMailSnapshot(eventId, event, {templateField: templateFieldFor(NOTIFICATION_TYPES.WAITLIST_PROMOTION)});
+        return {waitlistReady: b.ok, waitlistProblems: b.ok ? [] : b.problems};
+      })(),
       venueInfo: {address: (event.venueInfo && event.venueInfo.address) || "", access: (event.venueInfo && event.venueInfo.access) || ""},
       event: {eventName: event.eventName || "", venue: event.venue || "", contact: event.contact || "", senderName: event.senderName || "", startAt: iso(event.startAt)},
       ready: built.ok,
@@ -92,9 +110,17 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
   }
 
   async function updateTemplate({identity, data}) {
-    const request = parseKeys(data, ["eventId", "template", "venueInfo", "mailSettings", "participationMapping"]);
+    const request = parseKeys(data, ["eventId", "template", "venueInfo", "mailSettings", "participationMapping", "notificationType"]);
     const template = validateTemplateInput(request.template);
     if (!template.ok) throw invalid("invalid-template", {errors: template.errors});
+    // キャンセル待ち繰り上げ当選メール: テンプレート本文だけを、通常当選メールとは別の項目・別のversionで保存する
+    // (会場・送信者等のイベント共通の設定は、通常当選メールの画面で変更する)。
+    if (parseNotificationType(request.notificationType) === NOTIFICATION_TYPES.WAITLIST_PROMOTION) {
+      if (request.venueInfo !== undefined || request.mailSettings !== undefined || request.participationMapping !== undefined) {
+        throw invalid("waitlist-template-only");
+      }
+      return updateWaitlistTemplate({identity, eventId: request.eventId, value: template.value});
+    }
     let venue = null;
     if (request.venueInfo !== undefined) {
       venue = validateVenueInfo(request.venueInfo);
@@ -147,14 +173,36 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     });
   }
 
+  async function updateWaitlistTemplate({identity, eventId, value}) {
+    const field = templateFieldFor(NOTIFICATION_TYPES.WAITLIST_PROMOTION);
+    const db = getDb();
+    const ref = db.collection("events").doc(eventId);
+    return db.runTransaction(async (tx) => {
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) throw new ApiError("not-found", "イベントが見つかりません。");
+      const event = snapshot.data();
+      if (!isConfirmedFlow(event)) throw new ApiError("failed-precondition", "このイベントは新方式(confirmed)ではありません。");
+      const current = event[field] || null;
+      const same = current && current.subject === value.subject && current.introBody === value.introBody &&
+        current.closingBody === value.closingBody && (current.notesBody || null) === value.notesBody &&
+        (current.adoptionNotesBody || null) === (value.adoptionNotesBody || null);
+      // 同じ内容の再送ではversionを進めない。
+      if (same) return {eventId, version: current.version, changed: false, notificationType: NOTIFICATION_TYPES.WAITLIST_PROMOTION};
+      const version = (current && Number.isInteger(current.version) ? current.version : 0) + 1;
+      tx.update(ref, {[field]: {...value, version, updatedAt: serverTimestamp(), updatedBy: identity.uid}});
+      return {eventId, version, changed: true, notificationType: NOTIFICATION_TYPES.WAITLIST_PROMOTION};
+    });
+  }
+
   // 「実際にこの参加者へ届くメール」の完成形。実送信と同じ composeWinnerMailFor を使う。
+  // テンプレートは、参加者の取込回の通知種別で決める(送信と同じ)。notificationTypeを指定した場合だけ、その種別のテンプレートで表示する
+  // (送信には影響しない。繰り上げの取込回が無い段階でも、繰り上げ当選メールの文面を確認できるようにするため)。
   async function preview({data}) {
-    const request = parseKeys(data, ["eventId", "participantId"]);
+    const request = parseKeys(data, ["eventId", "participantId", "notificationType"]);
     if (!isValidParticipantId(request.participantId)) throw invalid("invalid-participant-id");
+    const requestedType = parseNotificationType(request.notificationType);
     const db = getDb();
     const {event} = await loadConfirmedEvent(db, request.eventId);
-    const built = buildMailSnapshot(request.eventId, event);
-    if (!built.ok) return {ready: false, problems: built.problems};
 
     const participantSnapshot = await db.collection("participants").doc(request.participantId).get();
     if (!participantSnapshot.exists) throw new ApiError("not-found", "参加者が見つかりません。");
@@ -167,6 +215,9 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     if (!batchSnapshot.exists || batchSnapshot.data().eventId !== request.eventId || batchSnapshot.data().status !== "committed") {
       throw new ApiError("failed-precondition", "取込が完了(committed)していないため、この参加者のメールはプレビューできません。", {code: "batch-not-committed"});
     }
+    const notificationType = requestedType || notificationTypeOf(batchSnapshot.data());
+    const built = buildMailSnapshot(request.eventId, event, {templateField: templateFieldFor(notificationType)});
+    if (!built.ok) return {ready: false, problems: built.problems};
 
     const rendered = await composeWinnerMailFor({
       db, snapshot: built.snapshot, participantId: request.participantId, participant, appBaseUrl: getAppBaseUrl(), generateQrPng,
@@ -176,6 +227,7 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       ready: true,
       eventId: request.eventId,
       participantId: request.participantId,
+      notificationType,
       templateVersion: built.snapshot.template.version,
       senderName: built.snapshot.event.senderName,
       subject: rendered.subject,

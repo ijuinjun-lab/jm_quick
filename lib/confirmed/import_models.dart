@@ -117,9 +117,14 @@ String deriveBatchId({
   int? newImportSequence,
   Map<String, dynamic>? decisions,
   String? sheetName,
+  NotificationType notificationType = NotificationType.normal,
 }) {
   var source = '$eventId\n$fileHash\n${canonicalJson(mappingJson)}';
   if (sheetName != null) source = '$source\nsheet:$sheetName';
+  // 繰り上げ当選だけ識別に含める(通常当選のbatchIdは従来と同じ)。同じファイルでも通知種別が違えば別の取込。
+  if (notificationType != NotificationType.normal) {
+    source = '$source\nnotification:${notificationType.value}';
+  }
   if (newImportSequence != null) source = '$source\nnew-import:$newImportSequence';
   if (decisions != null && decisions.isNotEmpty) {
     source = '$source\ndecisions:${canonicalJson(decisions)}';
@@ -176,6 +181,58 @@ class ProgramMapping {
 }
 
 /// 列の対応(サーバーの mapping と同じ構造)。
+/// 取込回(importBatch)の通知種別。取込回ごとに1つで、確定後は変更できない(サーバー functions/confirmed/notification_type.js)。
+/// 送信する当選メールは、取込回のこの値でサーバーが決める(画面でテンプレートを選ばせない)。
+enum NotificationType {
+  normal('normal', '通常当選'),
+  waitlistPromotion('waitlistPromotion', 'キャンセル待ち繰り上げ当選');
+
+  const NotificationType(this.value, this.label);
+
+  /// サーバーの値。
+  final String value;
+
+  /// 画面に表示する名前。
+  final String label;
+
+  /// サーバーの値 → 種別。項目の無い既存の取込回・想定外の値は通常当選。
+  static NotificationType parse(Object? value) =>
+      value == waitlistPromotion.value ? waitlistPromotion : normal;
+}
+
+/// 自動除外の規則: [column]の値が[values]のどれかに一致する行は、今回の取込から自動で除外する(例: 区分=キャンセル)。
+class AutoExcludeRule {
+  const AutoExcludeRule({required this.column, required this.values});
+  final String column;
+  final List<String> values;
+  Map<String, dynamic> toJson() => {'column': column, 'values': values};
+}
+
+/// キャンセル待ち繰り上げ当選の判定規則(サーバー functions/confirmed/waitlist_promotion.js が判定する)。
+/// 選択肢の見出し(例「午後の部（犬）」)→ program。[kind]はファイル名との照合用(例「犬」)。
+class WaitlistMapping {
+  const WaitlistMapping({
+    required this.optionsColumn,
+    required this.countColumn,
+    required this.options,
+  });
+  final String optionsColumn;
+  final String countColumn;
+  final List<({String label, String programId, String? kind})> options;
+  Map<String, dynamic> toJson() => {
+    'optionsColumn': optionsColumn,
+    'countColumn': countColumn,
+    'options': [
+      for (final o in options)
+        {
+          'label': o.label,
+          'programId': o.programId,
+          if (o.kind != null) 'kind': o.kind,
+        },
+    ],
+  };
+}
+
 class ImportMapping {
   ImportMapping({required this.programs});
   static const int version = 1;
@@ -187,6 +244,12 @@ class ImportMapping {
 
   /// HEBEL属性の列(任意)。指定したときだけ送る(指定しないmappingは従来と同じ)。
   String? hebelResidenceColumn;
+
+  /// 自動除外の規則(任意。例: 区分=キャンセル)。指定したときだけ送る(指定しないmappingは従来と同じ)。
+  final List<AutoExcludeRule> autoExcludeRows = [];
+
+  /// キャンセル待ち繰り上げ当選の判定規則(繰り上げ当選の取込だけ)。
+  WaitlistMapping? waitlist;
   final List<RowCheck> rowChecks = [];
   final List<ProgramMapping> programs;
 
@@ -210,6 +273,9 @@ class ImportMapping {
           if (c.column != null && c.allowedValues.isNotEmpty)
             {'column': c.column, 'allowedValues': c.allowedValues},
       ],
+    if (autoExcludeRows.isNotEmpty)
+      'autoExcludeRows': [for (final r in autoExcludeRows) r.toJson()],
+    if (waitlist != null) 'waitlist': waitlist!.toJson(),
     'programs': [for (final p in enabledPrograms) p.toJson()],
   };
 
@@ -233,6 +299,11 @@ class ImportMapping {
     for (final c in rowChecks) {
       if (c.column != null && c.allowedValues.isNotEmpty) add(c.column);
     }
+    for (final r in autoExcludeRows) {
+      add(r.column);
+    }
+    add(waitlist?.optionsColumn);
+    add(waitlist?.countColumn);
     for (final p in enabledPrograms) {
       // サーバー(functions/confirmed/import_mapping.js の mappedColumns)と同じ順序
       // (participationColumn → slotColumn → countColumn)。同じ列名を複数回指定しても重複させない。
@@ -289,6 +360,8 @@ class ImportRequest {
 
 /// 共通の表(CSV・Excelのシートを読み取った[CsvTable])とmappingから、サーバーへ送るリクエストを組み立てる。
 /// [sheetName]はExcelのシート名(batchIdの識別にだけ使う。CSVはnull)。
+/// [sheetCandidates]は、繰り上げ当選のときだけ送る、ファイル内の参加者リストの形式に合うシート名すべて
+/// (サーバーは1枚=[sheetName]でなければ繰り上げ先を判定しない)。
 /// mappingが読む列だけを送り(それ以外の列は送らない)、全項目が空のレコードはblankRecordNumbersに入れ、
 /// 全レコード(2〜totalRecords+1)を過不足なく数える。人物の同一性は見ない(同じメール・氏名の行も別の行)。
 ImportRequest buildImportRequest({
@@ -300,6 +373,8 @@ ImportRequest buildImportRequest({
   int? newImportSequence,
   ImportDecisions decisions = const ImportDecisions(),
   String? sheetName,
+  List<String>? sheetCandidates,
+  NotificationType notificationType = NotificationType.normal,
 }) {
   final columns = mapping.mappedColumns();
   if (columns.length > importMaxHeaders) {
@@ -352,6 +427,7 @@ ImportRequest buildImportRequest({
     newImportSequence: newImportSequence,
     decisions: decisions.toJson(),
     sheetName: sheetName,
+    notificationType: notificationType,
   );
   return ImportRequest(
     fileName: fileName,
@@ -368,6 +444,12 @@ ImportRequest buildImportRequest({
       'totalRecords': table.records.length,
       'blankRecordNumbers': blank,
       ...decisions.toJson(),
+      // 繰り上げ当選だけ送る(通常当選のリクエストは従来と同じ)。繰り上げ先はサーバーがシート名と各行の値から判定する。
+      if (notificationType != NotificationType.normal) ...{
+        'notificationType': notificationType.value,
+        'sourceSheetName': ?sheetName,
+        'sourceSheetCandidates': ?sheetCandidates,
+      },
     },
   );
 }
@@ -440,6 +522,7 @@ class PreviewRow {
 /// previewConfirmedImport の応答(サーバーが返す項目だけ。氏名・メール・publicId・人数は含まれない)。
 class ImportPreview {
   const ImportPreview({
+    this.notificationType = NotificationType.normal,
     required this.batchId,
     required this.totalRecords,
     required this.totalRows,
@@ -487,7 +570,10 @@ class ImportPreview {
               correctedRows: (summary['correctedRows'] as num?)?.toInt() ?? 0,
               excludedRows: (summary['excludedRows'] as num?)?.toInt() ?? 0,
               importRows: (summary['importRows'] as num?)?.toInt() ?? 0,
+              autoExcludedRows:
+                  (summary['autoExcludedRows'] as num?)?.toInt() ?? 0,
             ),
+      notificationType: NotificationType.parse(json['notificationType']),
       participationTypes: maps(json['participationTypes']),
       batchId: json['batchId'] as String? ?? '',
       totalRecords: number('totalRecords'),
@@ -558,9 +644,18 @@ class ImportPreview {
   final List<Map<String, dynamic>> participationTypes;
   final List<PreviewRow> rows;
 
-  /// 最終的に取り込まれる内容の集計(原本の行数・修正・除外・取込予定)。
-  final ({int originalRows, int correctedRows, int excludedRows, int importRows})?
+  /// 最終的に取り込まれる内容の集計(原本の行数・修正・除外(自動除外を含む)・取込予定)。
+  final ({
+    int originalRows,
+    int correctedRows,
+    int excludedRows,
+    int importRows,
+    int autoExcludedRows,
+  })?
   decisionSummary;
+
+  /// 通知種別(サーバーが検証したリクエストの値)。
+  final NotificationType notificationType;
 }
 
 /// commitConfirmedImport の応答(氏名・メール・publicIdは含まれない)。
@@ -654,8 +749,12 @@ class ValidationRow {
     this.corrected = false,
     this.approvalKeys = const {},
     this.hebelResidence,
+    this.autoExcluded = false,
   });
   final int sourceRowNumber;
+
+  /// 自動除外(原本でキャンセル)の行。管理者は取り消せない(サーバーが行の値から決める)。
+  final bool autoExcluded;
 
   /// HEBEL属性の分類(サーバーの値: hebelHaus / hebelMaison / none / unset / unknown)。
   /// HEBEL属性の列が無いファイルではnull。表示名は[ImportValidation.hebelResidenceSummary]の label を使う。
@@ -713,6 +812,9 @@ class ImportValidation {
     this.correctedRowCount = 0,
     this.importRowCount = 0,
     this.hebelResidenceSummary = const [],
+    this.notificationType = NotificationType.normal,
+    this.waitlistPromotion,
+    this.autoExcludedRowCount = 0,
   });
 
   factory ImportValidation.fromJson(Map<String, dynamic> json) {
@@ -728,7 +830,26 @@ class ImportValidation {
         : null;
     List<int> numbers(Object? value) =>
         value is List ? [for (final n in value) number(n)] : const [];
+    final waitlist = json['waitlistPromotion'] is Map
+        ? Map<String, dynamic>.from(json['waitlistPromotion'] as Map)
+        : null;
     return ImportValidation(
+      notificationType: NotificationType.parse(json['notificationType']),
+      autoExcludedRowCount: (json['autoExcludedRowCount'] as num?)?.toInt() ?? 0,
+      waitlistPromotion: waitlist == null || waitlist['programId'] is! String
+          ? null
+          : (
+              programId: waitlist['programId'] as String,
+              slotLabel: waitlist['slotLabel'] as String? ?? '',
+              kind: waitlist['kind'] as String?,
+              rows: [
+                for (final r in maps(waitlist['rows']))
+                  (
+                    sourceRowNumber: number(r['sourceRowNumber']),
+                    plannedCount: number(r['plannedCount']),
+                  ),
+              ],
+            ),
       hebelResidenceSummary: [
         for (final h in maps(json['hebelResidenceSummary']))
           if (h['category'] is String)
@@ -802,6 +923,7 @@ class ImportValidation {
             participationType: r['participationType'] as String?,
             hebelResidence: r['hebelResidence'] as String?,
             excluded: r['excluded'] == true,
+            autoExcluded: r['autoExcluded'] == true,
             corrected: r['corrected'] == true,
             duplicateRows: [
               for (final n in (r['duplicateRows'] is List
@@ -867,6 +989,22 @@ class ImportValidation {
   final int importRowCount;
   final List<Map<String, dynamic>> participationTypes;
   final List<ValidationRow> rows;
+
+  /// 通知種別(サーバーが検証したリクエストの値)。
+  final NotificationType notificationType;
+
+  /// キャンセル待ち繰り上げ当選の、サーバーが判定した繰り上げ先(program・時間枠・行ごとの人数。個人情報なし)。
+  /// 通常当選ではnull。
+  final ({
+    String programId,
+    String slotLabel,
+    String? kind,
+    List<({int sourceRowNumber, int plannedCount})> rows,
+  })?
+  waitlistPromotion;
+
+  /// 自動除外(原本でキャンセル)の行数。
+  final int autoExcludedRowCount;
 
   /// HEBEL属性の分類別の件数(今回の取込から除外していない行。サーバーが固定の順序で全分類を返す)。
   /// HEBEL属性の列が無いファイルでは空。

@@ -69,6 +69,28 @@ class FakeWinnerMailService implements WinnerMailService {
     calls.add('preview:$eventId:$participantId');
     return previewResult!;
   }
+
+  @override
+  Future<int> updateWaitlistTemplate({
+    required String eventId,
+    required String subject,
+    required String introBody,
+    required String closingBody,
+    required String notesBody,
+    String? adoptionNotesBody,
+  }) async {
+    calls.add('updateWaitlist:$eventId:$subject');
+    return 1;
+  }
+
+  @override
+  Future<WinnerMailPreview> previewWaitlist({
+    required String eventId,
+    required String participantId,
+  }) async {
+    calls.add('previewWaitlist:$eventId:$participantId');
+    return previewResult!;
+  }
 }
 
 WinnerMailSettings _settings({

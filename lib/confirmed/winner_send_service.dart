@@ -230,9 +230,26 @@ class SendBatch {
     this.consistent,
     this.previewParticipantId,
     this.job,
+    this.notificationType = 'normal',
+    this.notificationTypeLabel = '通常当選',
+    this.mailSubject,
+    this.mailTemplateVersion,
   });
 
   factory SendBatch.fromJson(Map<String, dynamic> json) => SendBatch(
+    // 通知種別(取込回の正本。項目の無い既存の取込回は通常当選)と、それで決まる当選メール。画面でテンプレートは選ばない。
+    notificationType: json['notificationType'] == 'waitlistPromotion'
+        ? 'waitlistPromotion'
+        : 'normal',
+    notificationTypeLabel:
+        json['notificationTypeLabel'] as String? ??
+        (json['notificationType'] == 'waitlistPromotion'
+            ? 'キャンセル待ち繰り上げ当選'
+            : '通常当選'),
+    mailSubject: json['mail'] is Map ? (json['mail'] as Map)['subject'] as String? : null,
+    mailTemplateVersion: json['mail'] is Map
+        ? ((json['mail'] as Map)['templateVersion'] as num?)?.toInt()
+        : null,
     batchId: json['batchId'] as String? ?? '',
     sequence: (json['sequence'] as num?)?.toInt() ?? 0,
     label: json['label'] as String? ?? '',
@@ -265,6 +282,16 @@ class SendBatch {
   final bool canCreateJob;
   final List<String> blockedReasons;
   final SendJob? job;
+
+  /// 通知種別(normal / waitlistPromotion)と表示名。
+  final String notificationType;
+  final String notificationTypeLabel;
+
+  /// この取込回に送る当選メールの件名・テンプレートversion(通知種別で決まる)。古いサーバーではnull。
+  final String? mailSubject;
+  final int? mailTemplateVersion;
+
+  bool get isWaitlistPromotion => notificationType == 'waitlistPromotion';
 }
 
 class SendBatchList {

@@ -1,3 +1,4 @@
+import 'category_fold.dart';
 import 'import_models.dart';
 
 /// 「今年度の当選・参加確定者CSV」の正式フォーマット向けの取込profile(Phase 11B-4)。
@@ -21,8 +22,19 @@ class ConfirmedImportProfile {
     required this.emailColumn,
     this.registeredAtColumn,
     this.hebelResidenceHeaders = const [],
+    this.categoryColumn,
+    this.cancelledCategoryValues = const [],
+    this.waitlist,
     required this.programs,
   });
+
+  /// 行の区分の列(例「区分」。任意)。値が[cancelledCategoryValues]の行は、今回の取込から自動で除外する
+  /// (原本でキャンセルした人。通常当選・繰り上げ当選の両方)。
+  final String? categoryColumn;
+  final List<String> cancelledCategoryValues;
+
+  /// キャンセル待ち繰り上げ当選の判定規則(繰り上げ当選の取込だけで使う。program・時間枠・人数は管理者に入力させない)。
+  final WaitlistMapping? waitlist;
 
   /// 管理画面に表示する名前(この形式の呼び名)。
   final String label;
@@ -179,6 +191,19 @@ const sipposample2026Profile = ConfirmedImportProfile(
   emailColumn: 'メールアドレス',
   registeredAtColumn: '登録日時',
   hebelResidenceHeaders: ['HEBEL HAUSにお住まいですか'],
+  // 区分=キャンセルの行(原本でキャンセルした人)は、通常当選・繰り上げ当選のどちらでも自動で取込対象外にする。
+  categoryColumn: '区分',
+  cancelledCategoryValues: ['キャンセル'],
+  // キャンセル待ち繰り上げ当選: シート名(時間枠)＋キャンセル待希望枠の選択肢の見出し → program、人数はキャンセル待希望人数。
+  // 見出しは申込フォームの選択肢の表記(実ファイルで確認)。トークセッションは時間枠の繰り上げ先にならないため含めない。
+  waitlist: WaitlistMapping(
+    optionsColumn: 'キャンセル待希望枠',
+    countColumn: 'キャンセル待希望人数',
+    options: [
+      (label: '午前の部（猫）', programId: 'program-1', kind: '猫'),
+      (label: '午後の部（犬）', programId: 'program-2', kind: '犬'),
+    ],
+  ),
   programs: [
     ConfirmedImportProfileProgram(
       programId: 'program-1',
@@ -232,10 +257,14 @@ List<String> missingProfileProgramsInEvent(
 /// 利用者はCSVの列を一切選ばない。呼び出す前に[missingProfileProgramsInEvent]が空であることを確認すること。
 /// [hebelResidenceColumn]: ファイルの実際の列名([ConfirmedImportProfile.resolveHebelResidenceColumn]の結果)。
 /// 省略時(列が無いファイル)はHEBEL属性を取り込まない(mappingも従来と同じ)。
+/// [autoExcludeCancelled]: 区分の列のキャンセル行を自動除外する規則を入れる([tableHasCancelledRows]がtrueのとき)。
+/// [notificationType]: 繰り上げ当選なら、profileの判定規則(waitlist)を入れる(program・時間枠・人数はサーバーが判定する)。
 ImportMapping buildMappingFromProfile(
   ConfirmedImportProfile profile,
   List<({String programId, String name, int order})> eventPrograms, {
   String? hebelResidenceColumn,
+  bool autoExcludeCancelled = false,
+  NotificationType notificationType = NotificationType.normal,
 }) {
   final nameById = {for (final p in eventPrograms) p.programId: p.name};
   final mapping = ImportMapping(
@@ -259,8 +288,81 @@ ImportMapping buildMappingFromProfile(
     ..kanaColumn = profile.kanaColumn
     ..emailColumn = profile.emailColumn
     ..registeredAtColumn = profile.registeredAtColumn
-    ..hebelResidenceColumn = hebelResidenceColumn;
+    ..hebelResidenceColumn = hebelResidenceColumn
+    ..waitlist = notificationType == NotificationType.waitlistPromotion
+        ? profile.waitlist
+        : null;
+  if (autoExcludeCancelled && profile.categoryColumn != null) {
+    mapping.autoExcludeRows.add(
+      AutoExcludeRule(
+        column: profile.categoryColumn!,
+        values: profile.cancelledCategoryValues,
+      ),
+    );
+  }
   return mapping;
+}
+
+/// 自動除外の比較用。サーバー(import_request.js の comparable: NFKC ＋ 空白の除去)と同じ判定にする。
+/// NFKCは、全角・半角形・かなと空白に関わる部分だけを表([categoryFoldTable]・[categoryComposeTable])で行う。
+/// かなの値(例「キャンセル」)と一致するかどうかは、サーバーのNFKCと同じ結果になる(category_fold_sync.test.js)。
+String comparableCategory(String value) {
+  final out = <int>[];
+  for (final rune in value.runes) {
+    final folded = categoryFoldTable[rune];
+    for (final r in folded == null ? [rune] : folded.runes) {
+      if (out.isNotEmpty && (r == 0x3099 || r == 0x309A)) {
+        final composed = categoryComposeTable[(out.last << 16) | r];
+        if (composed != null) {
+          out[out.length - 1] = composed;
+          continue;
+        }
+      }
+      out.add(r);
+    }
+  }
+  return String.fromCharCodes(out).replaceAll(RegExp(r'\s+'), '');
+}
+
+/// 区分の列に、キャンセル([ConfirmedImportProfile.cancelledCategoryValues])の行が1つでもあるか。
+/// ある場合だけ自動除外の規則をmappingへ入れる(キャンセル行の無いファイルのmapping・batchIdは従来と同じ)。
+bool tableHasCancelledRows(ConfirmedImportProfile profile, CsvTable table) {
+  final column = profile.categoryColumn;
+  if (column == null || profile.cancelledCategoryValues.isEmpty) return false;
+  final index = table.headers.indexOf(column);
+  if (index < 0) return false;
+  final values = profile.cancelledCategoryValues.map(comparableCategory).toSet();
+  return table.records.any(
+    (r) => index < r.length && values.contains(comparableCategory(r[index])),
+  );
+}
+
+/// 「15時30分～16時10分」「15:30-16:10」等を時刻の範囲(分)として読む。読めなければnull。
+/// (サーバー functions/confirmed/waitlist_promotion.js の parseTimeRange と同じ規則。画面の取り違え警告にだけ使う。
+///  繰り上げ先の判定は必ずサーバーが行う)
+({int start, int end})? parseSheetTimeRange(String? text) {
+  if (text == null) return null;
+  final s = text
+      .replaceAll(RegExp(r'\s+'), '')
+      .replaceAllMapped(
+        RegExp('[０-９：]'),
+        (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0),
+      )
+      .replaceAll(RegExp('[〜~～－―‐ー−]'), '-');
+  final match = RegExp(
+    r'^(\d{1,2})(?:時(?:(\d{1,2})分)?|:(\d{2}))-(\d{1,2})(?:時(?:(\d{1,2})分)?|:(\d{2}))$',
+  ).firstMatch(s);
+  if (match == null) return null;
+  int? minutes(String h, String? m1, String? m2) {
+    final hour = int.parse(h);
+    final minute = int.parse(m1 ?? m2 ?? '0');
+    return hour > 23 || minute > 59 ? null : hour * 60 + minute;
+  }
+
+  final start = minutes(match[1]!, match[2], match[3]);
+  final end = minutes(match[4]!, match[5], match[6]);
+  if (start == null || end == null || end <= start) return null;
+  return (start: start, end: end);
 }
 
 /// 全角数字・全角スペースを含むことがある人数のセル値を、画面表示用に概算する。

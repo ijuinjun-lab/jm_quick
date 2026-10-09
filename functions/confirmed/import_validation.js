@@ -93,6 +93,10 @@ function contentHash(request) {
     eventId: request.eventId, fileHash: request.fileHash, mapping: request.normalizedMapping, headers: request.headers,
     rows: request.rows, totalRecords: request.totalRecords, blankRecordNumbers: request.blankRecordNumbers,
     corrections: request.corrections || [], excludedRows: (request.excludedRows || []).map((e) => e.sourceRowNumber),
+    // 繰り上げ当選だけ含める(通常当選=既存の指紋は従来と同じ)。検証と確定で通知種別・シート(候補のシートを含む)が違えば指紋が一致しない。
+    ...(request.notificationType === "waitlistPromotion" ?
+      {notificationType: request.notificationType, sourceSheetName: request.sourceSheetName,
+        sourceSheetCandidates: request.sourceSheetCandidates} : {}),
   }));
 }
 
@@ -145,8 +149,9 @@ function approvalKeysOf({eventId, records, planRows, dup, excluded = new Set()})
 
 // excluded: 今回の取込から除外した行番号(Set) / corrected: 修正した行番号(Set) / planRows: 最終的な値(許可の鍵に使う)。
 // hebelResidenceMapped: HEBEL属性の列を指定した取込か(trueのときだけ、行ごとの分類と集計を返す)。
+// autoExcluded: excludedのうち、自動除外(原本でキャンセル)の行番号(Set)。行と件数に自動であることを示す(管理者は取り消せない)。
 function validateImportPlan({eventId, event, records, existingHashes, excluded = new Set(), corrected = new Set(), planRows = [],
-  hebelResidenceMapped = false}) {
+  hebelResidenceMapped = false, autoExcluded = new Set()}) {
   const dup = duplicateRows({eventId, records, existingHashes, excluded});
   const {existingDuplicateRows, csvDuplicateRows, rowsByEmail} = dup;
   const approvalKeys = approvalKeysOf({eventId, records, planRows, dup, excluded});
@@ -178,7 +183,8 @@ function validateImportPlan({eventId, event, records, existingHashes, excluded =
       : findings.some((f) => f.severity === RESULT.INFO) ? RESULT.INFO : RESULT.OK;
     return {
       sourceRowNumber: record.sourceRowNumber, classification: record.status, result, findings,
-      ...(isExcluded ? {excluded: true} : {}), ...(corrected.has(record.sourceRowNumber) ? {corrected: true} : {}),
+      ...(isExcluded ? {excluded: true} : {}), ...(autoExcluded.has(record.sourceRowNumber) ? {autoExcluded: true} : {}),
+      ...(corrected.has(record.sourceRowNumber) ? {corrected: true} : {}),
       programIds: record.attendances.map((a) => a.programId),
       ...(typed ? {participationType: type} : {}),
       ...(hebelResidenceMapped ? {hebelResidence: hebelCategoryOf(record)} : {}),
@@ -203,6 +209,8 @@ function validateImportPlan({eventId, event, records, existingHashes, excluded =
     existingDuplicateRows, csvDuplicateRows,
     ...pendingRows({records, excluded}),
     excludedRowCount: rows.filter((r) => r.excluded).length,
+    // 自動除外(原本でキャンセル)。自動除外のある取込だけ返す(無い取込の応答は従来と同じ)。
+    ...(autoExcluded.size > 0 ? {autoExcludedRowCount: autoExcluded.size, autoExcludedRows: [...autoExcluded].sort((a, b) => a - b)} : {}),
     correctedRowCount: rows.filter((r) => r.corrected).length,
     importRowCount: rows.filter((r) => !r.excluded).length,
     ...(typed ? {participationTypes: typeSummary(eventId, records.filter((r) => !excluded.has(r.sourceRowNumber)), event)} : {}),

@@ -60,6 +60,14 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
   final talkTime = TextEditingController();
   final senderName = TextEditingController();
   final contact = TextEditingController();
+
+  // キャンセル待ち繰り上げ当選メール(通常当選メールとは別のテンプレート)
+  final wSubject = TextEditingController();
+  final wIntro = TextEditingController();
+  final wClosing = TextEditingController();
+  final wNotes = TextEditingController();
+  final wAdoptionNotes = TextEditingController();
+  WinnerMailPreview? waitlistPreview;
   String? selectedType;
   String? selectedParticipant;
   List<Map<String, dynamic>> get availableParticipants => settings!.previewParticipants
@@ -89,6 +97,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       notes,
       address,
       access, adoptionNotes, talkTime, senderName, contact,
+      wSubject, wIntro, wClosing, wNotes, wAdoptionNotes,
     ]) {
       c.dispose();
     }
@@ -134,7 +143,56 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
       contact.text = result.mailSettings['contact'] as String? ?? '';
       selectedType = null;
       selectedParticipant = null;
+      _fillWaitlist(result.waitlistTemplate ?? const {});
+      waitlistPreview = null;
     });
+  });
+
+  void _fillWaitlist(Map<String, dynamic> template) {
+    wSubject.text = template['subject'] as String? ?? '';
+    wIntro.text = template['introBody'] as String? ?? '';
+    wClosing.text = template['closingBody'] as String? ?? '';
+    wNotes.text = template['notesBody'] as String? ?? '';
+    wAdoptionNotes.text = template['adoptionNotesBody'] as String? ?? '';
+  }
+
+  String? _validateWaitlist() {
+    if (wSubject.text.trim().isEmpty) return '繰り上げ当選メールの件名を入力してください。';
+    if (wSubject.text.contains('\n')) return '件名は1行で入力してください。';
+    if (wSubject.text.trim().length > _maxSubject) return '件名は$_maxSubject文字以内で入力してください。';
+    if (wIntro.text.trim().isEmpty) return '繰り上げ当選メールの冒頭本文を入力してください。';
+    if (wClosing.text.trim().isEmpty) return '繰り上げ当選メールの締め本文を入力してください。';
+    for (final c in [wIntro, wClosing, wNotes, wAdoptionNotes]) {
+      if (c.text.trim().length > _maxBody) return '本文は$_maxBody文字以内で入力してください。';
+    }
+    return null;
+  }
+
+  Future<void> saveWaitlist() => _run(() async {
+    final problem = _validateWaitlist();
+    if (problem != null) throw WinnerMailException(problem);
+    final version = await widget.service.updateWaitlistTemplate(
+      eventId: _eventId,
+      subject: wSubject.text,
+      introBody: wIntro.text,
+      closingBody: wClosing.text,
+      notesBody: wNotes.text,
+      adoptionNotesBody: wAdoptionNotes.text,
+    );
+    final refreshed = await widget.service.getSettings(_eventId);
+    if (!mounted) return;
+    setState(() {
+      settings = refreshed;
+      waitlistPreview = null;
+      message = '繰り上げ当選メールを保存しました(テンプレートversion $version)。';
+    });
+  });
+
+  Future<void> showWaitlistPreview() => _run(() async {
+    final id = settings?.previewParticipantId;
+    if (id == null || id.isEmpty) return;
+    final result = await widget.service.previewWaitlist(eventId: _eventId, participantId: id);
+    if (mounted) setState(() => waitlistPreview = result);
   });
 
   String? _validate() {
@@ -253,10 +311,95 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
           _editor(),
           const SizedBox(height: 16),
           _previewCard(),
+          const SizedBox(height: 16),
+          _waitlistCard(),
         ],
       ],
     ),
   );
+
+  /// キャンセル待ち繰り上げ当選メール。繰り上げ当選の取込回へ送るときに、サーバーが自動でこのメールを使う(送信画面では選ばない)。
+  Widget _waitlistCard() {
+    final w = settings!.waitlistTemplate;
+    final preset = settings!.suggestedWaitlistTemplate;
+    final p = waitlistPreview;
+    return Card(
+      key: const Key('waitlist-mail-card'),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'キャンセル待ち繰り上げ当選メール',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '取込時に「キャンセル待ち繰り上げ当選」を選んだ取込回へ送るメールです。通常当選メールとは別に保存されます。'
+              '会場・送信者・問い合わせ先・QRは通常当選メールと同じ設定を使います。',
+              style: TextStyle(color: Color(0xff5c6670)),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              w == null
+                  ? '未設定(このままでは繰り上げ当選の取込回へ送信できません)'
+                  : '保存済み：テンプレートversion ${w['version']}${settings!.waitlistReady ? '' : '(不足があります)'}',
+              key: const Key('waitlist-template-status'),
+            ),
+            const SizedBox(height: 10),
+            if (preset.isNotEmpty)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton(
+                  key: const Key('load-waitlist-preset'),
+                  onPressed: busy ? null : () => setState(() => _fillWaitlist(preset)),
+                  child: const Text('繰り上げ当選の文案を入力'),
+                ),
+              ),
+            const SizedBox(height: 10),
+            _field(wSubject, '繰り上げ当選メールの件名'),
+            _field(wIntro, '繰り上げ当選メールの冒頭本文', lines: 6),
+            _field(wAdoptionNotes, '繰り上げ当選メールの譲渡会の注意事項(任意)', lines: 3),
+            _field(wNotes, '繰り上げ当選メールの注意事項(任意)', lines: 3),
+            _field(wClosing, '繰り上げ当選メールの締め本文', lines: 2),
+            Wrap(
+              spacing: 8,
+              children: [
+                FilledButton(
+                  key: const Key('save-waitlist-template'),
+                  onPressed: busy ? null : saveWaitlist,
+                  child: const Text('繰り上げ当選メールを保存'),
+                ),
+                if (settings!.previewParticipantId != null)
+                  OutlinedButton(
+                    key: const Key('preview-waitlist'),
+                    onPressed: busy || w == null ? null : showWaitlistPreview,
+                    child: const Text('繰り上げ当選メールのプレビュー'),
+                  ),
+              ],
+            ),
+            if (p != null) ...[
+              const Divider(height: 28),
+              if (!p.ready)
+                for (final problem in p.problems)
+                  Text(problemLabel(problem), style: const TextStyle(color: Color(0xffb42318)))
+              else ...[
+                InfoRow('件名', p.subject),
+                InfoRow('テンプレートversion', '${p.templateVersion}'),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  color: const Color(0xfff7f8fa),
+                  child: SelectableText(p.text, key: const Key('waitlist-preview-text')),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _editor() => Card(
     child: Padding(

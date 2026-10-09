@@ -24,6 +24,7 @@
 
 const {randomBytes} = require("node:crypto");
 const {ApiError} = require("./api_error");
+const {NOTIFICATION_TYPES, notificationTypeOf, templateFieldFor} = require("./notification_type");
 
 const DELIVERY = Object.freeze({PENDING: "pending", SENDING: "sending", SENT: "sent", FAILED: "failed", UNKNOWN: "unknown"});
 const JOB = Object.freeze({PREPARING: "preparing", READY: "ready", COMPLETED: "completed", FAILED: "failed"});
@@ -82,7 +83,9 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
 
   // ---- ジョブ作成 -----------------------------------------------------------------------------
   // snapshot: buildMailSnapshotの結果(テンプレート+event内容。個人情報なし)。ジョブへ固定し、以後の文章はこれで生成する。
-  async function createJob({db, identity, eventId, batchId, snapshot}) {
+  // notificationType・templateField: 取込回の正本の通知種別と、それで決めたテンプレート(監査用にジョブ・配送記録へ固定する)。
+  async function createJob({db, identity, eventId, batchId, snapshot, notificationType = NOTIFICATION_TYPES.NORMAL,
+    templateField = templateFieldFor(NOTIFICATION_TYPES.NORMAL)}) {
     const batchSnapshot = await db.collection("importBatches").doc(batchId).get();
     if (!batchSnapshot.exists) throw new ApiError("not-found", "取込回が見つかりません。");
     const batch = batchSnapshot.data();
@@ -103,17 +106,23 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
     const targets = participants.filter((doc) => doc.data().status === "active").map((doc) => doc.id).sort();
     const excludedInactiveCount = participants.length - targets.length;
     if (targets.length === 0) throw new ApiError("failed-precondition", "送信対象の参加者がいません。", {code: "no-targets"});
+    // 呼び出し側が選んだテンプレートが、取込回の正本の通知種別と一致すること(取り違え・改ざんの防止)。
+    if (notificationTypeOf(batch) !== notificationType || templateFieldFor(notificationType) !== templateField) {
+      throw new ApiError("failed-precondition", "取込回の通知種別と送信するメールが一致しません。", {code: "notification-type-mismatch"});
+    }
 
     return openJob({
       db, identity, type: TYPE, jobId: jobIdForBatch(batchId), eventId, batchId, batchSequence: batch.sequence, batchCreatedCount: batch.createdCount,
-      targets, excludedInactiveCount, snapshot,
+      targets, excludedInactiveCount, snapshot, notification: {notificationType, templateField},
     });
   }
 
   // ---- ジョブの開設(種別共通) --------------------------------------------------------------------
   // 対象者(targets)が確定した後の、ジョブ・item・deliveryの作成。当選メール(batch単位)と前日リマインド(イベント全体)で共通。
   // targetsは「ジョブ作成時点」で確定し、targetCountとして固定する(作成後に参加者が増減しても、既存ジョブへは自動で追加しない)。
-  async function openJob({db, identity, type, jobId, eventId, batchId = null, batchSequence = null, batchCreatedCount = null, targets, excludedInactiveCount, snapshot}) {
+  // notification(当選メールだけ): {notificationType, templateField}。新しいジョブ・配送記録に監査用として固定する。
+  async function openJob({db, identity, type, jobId, eventId, batchId = null, batchSequence = null, batchCreatedCount = null, targets, excludedInactiveCount, snapshot,
+    notification = null}) {
     const ref = jobRef(db, jobId);
     const started = await db.runTransaction(async (tx) => {
       const existing = await tx.get(ref);
@@ -126,6 +135,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
         eventId, batchId, batchSequence, type, status: JOB.PREPARING, targetCount: targets.length,
         excludedInactiveCount, sentCount: 0, failedCount: 0, unknownCount: 0, batchCreatedCount,
         templateVersion: snapshot.template.version, snapshot, createdAt: serverTimestamp(), createdBy: identity.uid, completedAt: null,
+        ...(notification ? {notificationType: notification.notificationType, templateField: notification.templateField} : {}),
       });
       return {existing: false, status: JOB.PREPARING, targetCount: targets.length};
     });
@@ -149,6 +159,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
           }
           tx.create(dRef, {
             eventId, batchId, participantId, type, jobId, status: DELIVERY.PENDING, templateVersion: snapshot.template.version,
+            ...(notification ? {notificationType: notification.notificationType} : {}),
             attemptCount: 0, leaseUntil: null, dispatchStartedAt: null, claimId: null, messageId: null, lastErrorCode: null, sentAt: null,
             createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
           });

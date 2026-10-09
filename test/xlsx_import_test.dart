@@ -306,6 +306,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('シート: 第2回'), findsOneWidget);
       expect(find.text('データ行数: 1行(列数: ${fixtureHeaders.length}列)'), findsOneWidget);
+      // シートを選んだ後も、通知種別を選ぶまで検証へ進めない
+      expect(find.byKey(const Key('run-validate')), findsNothing);
+      await _chooseNormalIfNeeded(tester);
       expect(find.byKey(const Key('run-validate')), findsOneWidget);
     });
 
@@ -515,6 +518,16 @@ Future<void> _openPage(WidgetTester tester, ImportService service, PickedCsv Fun
   await tester.pumpWidget(MaterialApp(
     home: ConfirmedImportPage(eventId: 'evfixture', service: service, picker: () async => pick()),
   ));
+  await tester.pumpAndSettle();
+  await _chooseNormalIfNeeded(tester);
+}
+
+/// 通知種別(必須)を選ぶ。従来の取込(通常当選)の流れのテストでは「通常当選」を選ぶ(選ぶまで検証へ進めない)。
+Future<void> _chooseNormalIfNeeded(WidgetTester tester) async {
+  final chip = find.byKey(const ValueKey('notification-normal'));
+  if (chip.evaluate().isEmpty || find.byKey(const Key('run-validate')).evaluate().isNotEmpty) return;
+  await tester.ensureVisible(chip);
+  await tester.tap(chip);
   await tester.pumpAndSettle();
 }
 

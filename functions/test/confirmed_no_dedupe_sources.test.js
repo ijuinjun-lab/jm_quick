@@ -68,7 +68,9 @@ test("テスト・fixtureに実CSV由来のデータが入っていない(実在
     const matches = fs.readFileSync(file, "utf8").match(emailLike) || [];
     for (const match of matches) {
       // User-approved public contact in the production preset and its exact-wording test; no exception for fixtures.
-      const approvedContact = ["confirmed/sippo_mail_preset.js", "confirmed/test/participation_types.test.js"].includes(rel(file)) &&
+      // 繰り上げ当選メールの文案(sippo_waitlist_mail_preset.js)も、ユーザー提供の文案にある同じ公開問い合わせ先だけを許可する。
+      const approvedContact = ["confirmed/sippo_mail_preset.js", "confirmed/sippo_waitlist_mail_preset.js",
+        "confirmed/test/participation_types.test.js"].includes(rel(file)) &&
         match === "sippo-support@info-event-jimukyoku.jp";
       assert.ok(approvedContact || /\.invalid$/i.test(match), `${rel(file)} に想定外のメール形式: ${match}`);
     }

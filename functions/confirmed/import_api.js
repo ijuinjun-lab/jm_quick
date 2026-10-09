@@ -25,7 +25,7 @@
 const {ApiError} = require("./api_error");
 const {validateImportMapping} = require("./import_mapping");
 const {isConfirmedFlow} = require("../flow");
-const {parseImportRequest, toPlanRows} = require("./import_request");
+const {parseImportRequest, toPlanRows, allExclusionsOf, planMappingOf} = require("./import_request");
 const {planImportBatchFromRows, importRecordId} = require("./import_batch_plan");
 const {createImportCommitter, resolveRecords} = require("./import_commit");
 const {validateImportPlan, existingEmailHashes, duplicateRows, pendingRows, fingerprintOf, createdEmailHashes, approvalKeysOf} =
@@ -71,7 +71,7 @@ function buildPlan(request, {eventProgramIds, eventDate}) {
     label: request.label || "",
     sourceFileName: request.sourceFileName,
     fileHash: request.fileHash,
-    mapping: request.mapping,
+    mapping: planMappingOf(request),
     rows: toPlanRows(request),
     blankRecordNumbers: request.blankRecordNumbers,
     totalRecords: request.totalRecords,
@@ -88,7 +88,18 @@ const eventBatchesQuery = (db, eventId) => db.collection("importBatches").where(
 const dataOf = (snapshot) => snapshot.docs.map((doc) => doc.data());
 const batchesOf = (snapshot) => snapshot.docs.map((doc) => ({id: doc.id, ...doc.data()}));
 
-const excludedSetOf = (request) => new Set(request.excludedRows.map((e) => e.sourceRowNumber));
+// 今回の取込から除外する行(管理者の除外 + 自動除外)。
+const excludedSetOf = (request) => new Set(allExclusionsOf(request).map((e) => e.sourceRowNumber));
+const autoExcludedSetOf = (request) => new Set(request.autoExcludedRows.map((e) => e.sourceRowNumber));
+// 通知種別と繰り上げ先(個人情報なし)。画面の表示用。
+const notificationOf = (request) => ({
+  notificationType: request.notificationType,
+  ...(request.waitlistResult ? {waitlistPromotion: {
+    programId: request.waitlistResult.programId, slotLabel: request.waitlistResult.slotLabel,
+    ...(request.waitlistResult.kind ? {kind: request.waitlistResult.kind} : {}),
+    rows: [...request.waitlistResult.counts].map(([sourceRowNumber, plannedCount]) => ({sourceRowNumber, plannedCount})),
+  }} : {}),
+});
 const correctedSetOf = (request) => new Set(request.corrections.map((c) => c.sourceRowNumber));
 
 const stale = () => new ApiError("failed-precondition", "取込状況が変更されました。再度検証してください。", {code: "import-state-changed"});
@@ -114,7 +125,7 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
     const existingHashes = existingEmailHashes({eventId: request.eventId, ...state, excludeBatchId});
     const validation = validateImportPlan({eventId: request.eventId, event: context.event, records: plan.records, existingHashes,
       excluded: excludedSetOf(request), corrected: correctedSetOf(request), planRows: toPlanRows(request),
-      hebelResidenceMapped: Boolean(request.normalizedMapping.participant.hebelResidenceColumn)});
+      hebelResidenceMapped: Boolean(request.normalizedMapping.participant.hebelResidenceColumn), autoExcluded: autoExcludedSetOf(request)});
     const expectedImportSequence = (eventSnap.data().importSequence || 0) + 1;
     const batches = [...state.batches].sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
     return {
@@ -122,6 +133,7 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       eventId: request.eventId,
       totalRecords: plan.batch.totalRecords,
       blankRecordCount: plan.batch.blankRecordCount,
+      ...notificationOf(request),
       ...validation,
       existingActiveParticipantCount: state.participants.filter((p) => excludeBatchId === null || p.importBatchId !== excludeBatchId).length,
       // このイベントの取込回(番号・状態だけ)。画面は「既に取り込まれている回」「次に新規取込すると第N回」を示す。
@@ -163,7 +175,9 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       decisionSummary: {
         originalRows: records.length, correctedRows: corrected.size, excludedRows: excluded.size,
         importRows: records.filter((r) => !excluded.has(r.sourceRowNumber)).length,
+        ...(request.autoExcludedRows.length > 0 ? {autoExcludedRows: request.autoExcludedRows.length} : {}),
       },
+      ...notificationOf(request),
       ...(rolesFor(request.eventId, context.event) ? {participationTypes: typeSummary(request.eventId, records, context.event)} : {}),
       totalRecords: batch.totalRecords,
       totalRows: batch.totalRows,
@@ -191,6 +205,7 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
         issueCodes: [...new Set(record.issues.map((issue) => issue.code))],
         programIds: record.attendances.map((a) => a.programId),
         ...(excluded.has(record.sourceRowNumber) ? {excluded: true} : {}),
+        ...(autoExcludedSetOf(request).has(record.sourceRowNumber) ? {autoExcluded: true} : {}),
         ...(corrected.has(record.sourceRowNumber) ? {corrected: true} : {}),
       })),
     };
@@ -272,6 +287,13 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       return {
         createdEmailHashes: createdEmailHashes(eventId, items),
         correctedRowCount: correctedSetOf(request).size,
+        // 通知種別は取込回の作成時に1回だけ保存する(以後変更するAPIは無い)。送信ジョブはこの値でメールを決める。
+        notificationType: request.notificationType,
+        ...(request.waitlistResult ? {waitlistPromotion: {
+          programId: request.waitlistResult.programId, slotLabel: request.waitlistResult.slotLabel,
+          sourceSheetName: request.sourceSheetName,
+        }} : {}),
+        ...(request.autoExcludedRows.length > 0 ? {autoExcludedCount: request.autoExcludedRows.length} : {}),
         allowedWarningCounts: {
           review: pending.reviewRows.length, existingEmailDuplicates: dup.existingDuplicateRows.length,
           csvEmailDuplicates: dup.csvDuplicateRows.length,
@@ -291,7 +313,8 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       const corrections = (correctionsByRow.get(n) || []).map((c) => ({column: c.column, originalValue: originalOf(n, c.column), correctedValue: c.value}));
       const allowedWarnings = allowed.get(n) || [];
       const resolution = item.exclusion ? "excluded" : corrections.length > 0 ? "modified" : allowedWarnings.length > 0 ? "allowed" : "none";
-      return {resolution, allowedWarnings, correctedColumns: corrections.map((c) => c.column), corrections};
+      return {resolution, allowedWarnings, correctedColumns: corrections.map((c) => c.column), corrections,
+        ...(item.exclusion && item.exclusion.auto === true ? {autoExcludedReason: item.exclusion.reason} : {})};
     };
     return committer.commit({db, identity, request, plan, guardNewBatch, rowAudit});
   }

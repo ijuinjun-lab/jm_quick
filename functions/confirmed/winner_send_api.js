@@ -13,6 +13,7 @@ const {loadConfirmedEvent} = require("./winner_mail_api");
 const {composeWinnerMailFor, composeReminderMailFor, buildMailApiMessage} = require("./winner_mail_message");
 const {createSendJobEngine, DELIVERY} = require("./send_jobs");
 const {createDeliveryWorker} = require("./delivery_worker");
+const {notificationTypeOf, templateFieldFor, notificationTypeLabel} = require("./notification_type");
 const {toDate} = require("./mail_view_model");
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -54,7 +55,12 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     if (!isValidBatchId(request.batchId)) throw invalid("invalid-batch-id");
     const db = getDb();
     const {event} = await loadConfirmedEvent(db, request.eventId);
-    const built = buildMailSnapshot(request.eventId, event);
+    // 使うテンプレートは、取込回の正本の通知種別で決める(クライアントからは指定させない)。
+    // 取込回の存在・イベント・状態の確認は下のengineが行う(ここでは種別を読むだけ)。
+    const batchSnap = await db.collection("importBatches").doc(request.batchId).get();
+    const notificationType = notificationTypeOf(batchSnap.exists ? batchSnap.data() : null);
+    const templateField = templateFieldFor(notificationType);
+    const built = buildMailSnapshot(request.eventId, event, {templateField});
     if (!built.ok) {
       throw new ApiError("failed-precondition", "当選メールの設定が完了していないため、送信ジョブを作成できません。", {code: "mail-not-ready", problems: built.problems});
     }
@@ -66,7 +72,8 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
         {code: "template-version-changed", expected: request.expectedTemplateVersion, current: built.snapshot.template.version});
     }
     // 作成時のテンプレート・イベント内容(個人情報なし)をジョブに固定する(templateVersion)。
-    return engine.createJob({db, identity, eventId: request.eventId, batchId: request.batchId, snapshot: built.snapshot});
+    return engine.createJob({db, identity, eventId: request.eventId, batchId: request.batchId, snapshot: built.snapshot,
+      notificationType, templateField});
   }
 
   // 管理者が明示的に実行する処理。未処理の項目を最大limit件、送信する。
@@ -128,6 +135,8 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     return {
       jobId: summary.jobId, eventId: summary.eventId, batchId: summary.batchId, batchSequence: summary.batchSequence,
       status: summary.status, templateVersion: summary.templateVersion, targetCount: summary.targetCount,
+      // 当選メールのジョブだけ: 固定した通知種別(項目の無い既存ジョブは通常当選)
+      ...(jobDoc.type === "winner" ? {notificationType: notificationTypeOf(jobDoc), notificationTypeLabel: notificationTypeLabel(notificationTypeOf(jobDoc))} : {}),
       excludedInactiveCount: summary.excludedInactiveCount,
       counts: {pending: summary.pendingCount, sending: summary.sendingCount, sent: summary.sentCount, failed: summary.failedCount, unknown: summary.unknownCount},
       createdAt: iso(jobDoc.createdAt), completedAt: iso(jobDoc.completedAt),
@@ -149,14 +158,27 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     const {event} = await loadConfirmedEvent(db, request.eventId);
     const built = buildMailSnapshot(request.eventId, event);
     const template = event.winnerMailTemplate || null;
+    // 通知種別ごとのメール(件名・テンプレートversion・準備状況)。取込回の通知種別に対応するものだけを使う。
+    const mailOf = (type) => {
+      const field = templateFieldFor(type);
+      const b = buildMailSnapshot(request.eventId, event, {templateField: field});
+      const t = event[field] || null;
+      return {notificationType: type, label: notificationTypeLabel(type), templateField: field, ready: b.ok,
+        subject: b.ok ? b.snapshot.template.subject : (t && typeof t.subject === "string" ? t.subject : null),
+        templateVersion: t && Number.isInteger(t.version) ? t.version : null, problems: b.ok ? [] : b.problems};
+    };
     const batchDocs = (await db.collection("importBatches").where("eventId", "==", request.eventId).get()).docs
       .map((doc) => ({batchId: doc.id, ...doc.data()}))
       .sort((a, b) => (a.sequence - b.sequence) || (a.batchId < b.batchId ? -1 : 1));
     const batches = [];
     for (const batch of batchDocs) {
       const committed = batch.status === "committed";
+      const mail = mailOf(notificationTypeOf(batch));
       const row = {
         batchId: batch.batchId, sequence: batch.sequence, label: typeof batch.label === "string" ? batch.label : `第${batch.sequence}回`,
+        // 通知種別(項目の無い既存の取込回は通常当選)と、送信に使うメール(件名・version)。テンプレートは選ばせない。
+        notificationType: mail.notificationType, notificationTypeLabel: mail.label,
+        mail: {subject: mail.subject, templateVersion: mail.templateVersion, ready: mail.ready, problems: mail.problems},
         status: batch.status, importedCount: committed ? batch.createdCount : null, createdAt: iso(batch.createdAt),
         targetCount: null, excludedInactiveCount: null, consistent: null, previewParticipantId: null, job: null, canCreateJob: false, blockedReasons: [],
       };
@@ -180,7 +202,7 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
       if (committed) {
         if (!row.consistent) row.blockedReasons.push("participants-mismatch");
         if (row.targetCount === 0) row.blockedReasons.push("no-targets");
-        if (!built.ok) row.blockedReasons.push("mail-not-ready");
+        if (!mail.ready) row.blockedReasons.push("mail-not-ready");
         if (row.job) row.blockedReasons.push("job-exists");
       }
       row.canCreateJob = row.blockedReasons.length === 0;

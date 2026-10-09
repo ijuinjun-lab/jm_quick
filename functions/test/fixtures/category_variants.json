@@ -1,0 +1,110 @@
+{
+ "target": "キャンセル",
+ "note": "区分の表記ゆれ(架空)。cancel=サーバーのNFKC＋空白除去で「キャンセル」と一致するか。Flutter(test/notification_type_test.dart)とFunctions(category_fold_sync.test.js)で共有",
+ "variants": [
+  {
+   "value": "キャンセル",
+   "cancel": true
+  },
+  {
+   "value": "ｷｬﾝｾﾙ",
+   "cancel": true
+  },
+  {
+   "value": " キャンセル ",
+   "cancel": true
+  },
+  {
+   "value": "　キャンセル　",
+   "cancel": true
+  },
+  {
+   "value": "キャン セル",
+   "cancel": true
+  },
+  {
+   "value": "ｷｬﾝ ｾﾙ",
+   "cancel": true
+  },
+  {
+   "value": "キャンセル\t",
+   "cancel": true
+  },
+  {
+   "value": " キャンセル",
+   "cancel": true
+  },
+  {
+   "value": "キャンセル\n",
+   "cancel": true
+  },
+  {
+   "value": "ｷャﾝセﾙ",
+   "cancel": true
+  },
+  {
+   "value": "㋖ャンセル",
+   "cancel": true
+  },
+  {
+   "value": "キャンセ ﾙ",
+   "cancel": true
+  },
+  {
+   "value": "提出なし",
+   "cancel": false
+  },
+  {
+   "value": "新規申込",
+   "cancel": false
+  },
+  {
+   "value": "変更",
+   "cancel": false
+  },
+  {
+   "value": "キャンセル待ち",
+   "cancel": false
+  },
+  {
+   "value": "ｷｬﾝｾﾙ待ち",
+   "cancel": false
+  },
+  {
+   "value": "キャンセル済",
+   "cancel": false
+  },
+  {
+   "value": "ギャンセル",
+   "cancel": false
+  },
+  {
+   "value": "ｷﾞｬﾝｾﾙ",
+   "cancel": false
+  },
+  {
+   "value": "ｷ゙ｬﾝｾﾙ",
+   "cancel": false
+  },
+  {
+   "value": "きゃんせる",
+   "cancel": false
+  },
+  {
+   "value": "キャンセルー",
+   "cancel": false
+  },
+  {
+   "value": "",
+   "cancel": false
+  },
+  {
+   "value": "キャンセ",
+   "cancel": false
+  },
+  {
+   "value": "ｷｬﾝｾﾙﾞ",
+   "cancel": false
+  }
+ ]
+}

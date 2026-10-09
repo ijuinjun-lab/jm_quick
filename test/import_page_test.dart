@@ -248,6 +248,16 @@ Future<void> _open(
     ),
   );
   await tester.pumpAndSettle();
+  await _chooseNormalIfNeeded(tester);
+}
+
+/// 通知種別(必須)を選ぶ。従来の取込(通常当選)の流れのテストでは「通常当選」を選ぶ(選ぶまで検証へ進めない)。
+Future<void> _chooseNormalIfNeeded(WidgetTester tester) async {
+  final chip = find.byKey(const ValueKey('notification-normal'));
+  if (chip.evaluate().isEmpty || find.byKey(const Key('run-validate')).evaluate().isNotEmpty) return;
+  await tester.ensureVisible(chip);
+  await tester.tap(chip);
+  await tester.pumpAndSettle();
 }
 
 /// CSVファイルを選ぶだけ(通常運用では列を選ぶ操作は無い。イベント読込直後に自動でも開くが、
@@ -255,9 +265,11 @@ Future<void> _open(
 Future<void> _pick(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('pick-file')));
   await tester.pumpAndSettle();
+  await _chooseNormalIfNeeded(tester);
 }
 
 Future<void> _validate(WidgetTester tester) async {
+  await _chooseNormalIfNeeded(tester);
   await tester.ensureVisible(find.byKey(const Key('run-validate')));
   await tester.tap(find.byKey(const Key('run-validate')));
   await tester.pumpAndSettle();

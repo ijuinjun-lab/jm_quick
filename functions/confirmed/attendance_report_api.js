@@ -14,6 +14,7 @@ const {ApiError} = require("./api_error");
 const {isConfirmedFlow} = require("../flow");
 const {normalizePrograms, programTimeText, toDate} = require("./mail_view_model");
 const {hebelResidenceView} = require("./hebel_residence");
+const {notificationTypeOf} = require("./notification_type");
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 // 1回の応答に含める上限(取込の上限5,000行の数回分)。超える場合は分割せず、明示的に拒否する(一部だけの実績を作らない)。
@@ -65,6 +66,8 @@ function buildAttendanceReport({eventId, event, participants, batches, attendanc
       participantId: id,
       importSequence: batch && batch.eventId === eventId && Number.isInteger(batch.sequence) ? batch.sequence : null,
       batchCommitted: batchId === null ? null : Boolean(batch) && batch.eventId === eventId && batch.status === "committed",
+      // 取込回の通知種別(項目の無い既存の取込回・取込回の無い参加者は通常当選)
+      notificationType: notificationTypeOf(batch && batch.eventId === eventId ? batch : null),
       importRow: count(p.importRow),
       name: text(p.name),
       kana: text(p.kana),

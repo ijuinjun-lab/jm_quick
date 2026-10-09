@@ -35,6 +35,10 @@ class WinnerMailSettings {
     this.suggestedTemplate = const {},
     this.programs = const [],
     this.participationMapping = const {},
+    this.waitlistTemplate,
+    this.suggestedWaitlistTemplate = const {},
+    this.waitlistReady = false,
+    this.waitlistProblems = const [],
   });
 
   factory WinnerMailSettings.fromJson(Map<String, dynamic> json) {
@@ -55,6 +59,12 @@ class WinnerMailSettings {
       adoptionNotesBody: template['adoptionNotesBody'] as String? ?? '',
       mailSettings: Map<String, dynamic>.from(json['mailSettings'] as Map? ?? {}),
       suggestedTemplate: Map<String, dynamic>.from(json['suggestedTemplate'] as Map? ?? {}),
+      waitlistTemplate: json['waitlistTemplate'] is Map
+          ? Map<String, dynamic>.from(json['waitlistTemplate'] as Map)
+          : null,
+      suggestedWaitlistTemplate: Map<String, dynamic>.from(json['suggestedWaitlistTemplate'] as Map? ?? {}),
+      waitlistReady: json['waitlistReady'] == true,
+      waitlistProblems: strings(json['waitlistProblems']),
       previewParticipants: [for (final item in json['previewParticipants'] as List? ?? []) Map<String, dynamic>.from(item as Map)],
       participationTypes: [for (final item in json['participationTypes'] as List? ?? []) Map<String, dynamic>.from(item as Map)],
       eventId: json['eventId'] as String? ?? '',
@@ -95,6 +105,13 @@ class WinnerMailSettings {
   final String adoptionNotesBody;
   final Map<String, dynamic> mailSettings;
   final Map<String, dynamic> suggestedTemplate;
+
+  /// キャンセル待ち繰り上げ当選メール(通常当選メールとは別のテンプレート・別のversion)。未設定ならnull。
+  /// 繰り上げ当選の取込回への送信では、サーバーがこのテンプレートを使う(送信画面では選ばない)。
+  final Map<String, dynamic>? waitlistTemplate;
+  final Map<String, dynamic> suggestedWaitlistTemplate;
+  final bool waitlistReady;
+  final List<String> waitlistProblems;
   final List<Map<String, dynamic>> previewParticipants;
   final List<Map<String, dynamic>> participationTypes;
 }
@@ -161,6 +178,22 @@ abstract class WinnerMailService {
     required String eventId,
     required String participantId,
   });
+
+  /// キャンセル待ち繰り上げ当選メールを保存して、新しいversionを返す(本文だけ。会場・送信者等は通常当選メールの設定)。
+  Future<int> updateWaitlistTemplate({
+    required String eventId,
+    required String subject,
+    required String introBody,
+    required String closingBody,
+    required String notesBody,
+    String? adoptionNotesBody,
+  });
+
+  /// キャンセル待ち繰り上げ当選メールの文面で表示する(確認用。送信には影響しない)。
+  Future<WinnerMailPreview> previewWaitlist({
+    required String eventId,
+    required String participantId,
+  });
 }
 
 /// callableを呼ぶ実装。IDトークンをAuthorizationヘッダで送る(uid・roleは送らない)。
@@ -222,6 +255,41 @@ class CallableWinnerMailService implements WinnerMailService {
     await _call('previewConfirmedWinnerMail', {
       'eventId': eventId,
       'participantId': participantId,
+    }),
+  );
+
+  @override
+  Future<int> updateWaitlistTemplate({
+    required String eventId,
+    required String subject,
+    required String introBody,
+    required String closingBody,
+    required String notesBody,
+    String? adoptionNotesBody,
+  }) async {
+    final result = await _call('updateConfirmedWinnerMailTemplate', {
+      'eventId': eventId,
+      'notificationType': 'waitlistPromotion',
+      'template': {
+        'subject': subject,
+        'introBody': introBody,
+        'closingBody': closingBody,
+        'notesBody': notesBody,
+        if (adoptionNotesBody != null) 'adoptionNotesBody': adoptionNotesBody,
+      },
+    });
+    return (result['version'] as num?)?.toInt() ?? 0;
+  }
+
+  @override
+  Future<WinnerMailPreview> previewWaitlist({
+    required String eventId,
+    required String participantId,
+  }) async => WinnerMailPreview.fromJson(
+    await _call('previewConfirmedWinnerMail', {
+      'eventId': eventId,
+      'participantId': participantId,
+      'notificationType': 'waitlistPromotion',
     }),
   );
 

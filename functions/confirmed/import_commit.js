@@ -22,7 +22,9 @@
 
 const {randomBytes} = require("node:crypto");
 const {ApiError} = require("./api_error");
-const {requestHash} = require("./import_request");
+const {requestHash, allExclusionsOf} = require("./import_request");
+// 自動除外(原本でキャンセル)の行の監査の excludedBy(人ではなくシステムの判断であることを示す)
+const AUTO_EXCLUDED_BY = "system:auto-exclusion";
 const {isConfirmedFlow} = require("../flow");
 
 const BATCH_STATUS = Object.freeze({COMMITTING: "committing", COMMITTED: "committed", FAILED: "failed"});
@@ -39,7 +41,8 @@ const invalid = (code, extra) => new ApiError("invalid-argument", `リクエス�
 function resolveRecords(plan, request) {
   const byRow = new Map(plan.records.map((record) => [record.sourceRowNumber, record]));
   const approved = new Set(request.approvedReviewRows);
-  const excluded = new Map(request.excludedRows.map((e) => [e.sourceRowNumber, e]));
+  // 管理者の除外 + 自動除外(原本でキャンセル)。自動除外はサーバーが行の値から決めたもの(監査行に自動であることを残す)。
+  const excluded = new Map(allExclusionsOf(request).map((e) => [e.sourceRowNumber, e]));
   for (const row of approved) {
     const record = byRow.get(row);
     if (!record) throw invalid("approval-unknown-row", {sourceRowNumber: row});
@@ -142,8 +145,9 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       approvedReview: item.approved,
       approvedBy: item.approved ? uid : null,
       approvedAt: item.approved ? serverTimestamp() : null,
-      excludedByOperator: Boolean(exclusion),
-      excludedBy: exclusion ? uid : null,
+      excludedByOperator: Boolean(exclusion) && exclusion.auto !== true,
+      excludedBy: exclusion ? (exclusion.auto === true ? AUTO_EXCLUDED_BY : uid) : null,
+      ...(exclusion && exclusion.auto === true ? {autoExcluded: true} : {}),
       excludedAt: exclusion ? serverTimestamp() : null,
       excludedReason: exclusion ? exclusion.reason : null,
       createdAt: serverTimestamp(),

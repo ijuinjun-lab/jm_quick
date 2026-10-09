@@ -139,7 +139,26 @@ class CallableImportService implements ImportService {
     throw errorFrom(response.statusCode, decoded);
   }
 
+  static const _waitlistReasons = {
+    'sheet-name-missing': 'シート名がありません(Excel(.xlsx)のシート名から時間枠を読み取ります)',
+    'sheet-name-not-time-range': 'シート名を時間枠(例: 15時30分～16時10分)として読み取れません',
+    'sheet-list-missing': 'ファイルのシートの一覧がありません(対象のシートが1枚であることを確認できません)',
+    'sheet-not-in-list': '取り込むシートが、ファイルのシートの一覧にありません',
+    'multiple-sheets': '参加者リストの形式に合うシートが複数あり、時間枠を1つに決められません',
+    'no-target-rows': '取込対象の行がありません(全員がキャンセル等)',
+    'slot-not-in-waitlist-options': 'キャンセル待ち希望枠に、シート名の時間枠と一致する選択肢がありません',
+    'slot-matches-multiple-options': 'シート名の時間枠に一致する選択肢が複数あります',
+    'count-missing': 'キャンセル待ち希望人数が空です',
+    'count-unparsable': 'キャンセル待ち希望人数を「N名」として読み取れません',
+    'count-not-positive': 'キャンセル待ち希望人数が0以下です',
+    'count-over-limit': 'キャンセル待ち希望人数が上限を超えています',
+    'programs-not-uniform': '行によって繰り上げ先のprogramが異なります',
+    'file-name-kind-conflict': 'ファイル名の種別(犬・猫など)と、判定した繰り上げ先が一致しません',
+  };
+
   static const _messages = {
+    'notification-type-mapping-mismatch': '通知種別と列の対応が一致しません。画面を読み込み直してください。',
+    'exclusion-already-automatic': 'この行は自動で除外されています(原本でキャンセル)。画面を読み込み直してください。',
     'invalid-mapping': '列の対応(mapping)に問題があります。選択した列と値を確認してください。',
     'program-not-in-event': '列の対応に、このイベントに定義されていないprogramが含まれています。',
     'column-missing': '指定した列がファイルにありません。',
@@ -176,6 +195,20 @@ class CallableImportService implements ImportService {
         ? Map<String, dynamic>.from(error['details'] as Map)
         : const <String, dynamic>{};
     final code = details['code'] as String?;
+    // キャンセル待ち繰り上げ当選: 繰り上げ先を一意に判定できない(管理者の入力では補わず、取込を止める)。理由を具体的に示す。
+    if (code == 'waitlist-undetermined') {
+      final reasons = details['reasons'] is List ? details['reasons'] as List : const [];
+      final lines = [
+        for (final r in reasons.take(20))
+          if (r is Map)
+            '・${r['sourceRowNumber'] is num ? '${r['sourceRowNumber']}行目: ' : ''}'
+                '${_waitlistReasons[r['code']] ?? '判定できない理由があります(${r['code']})'}',
+      ];
+      return ImportException(
+        ['このファイルは繰り上げ先を一意に判定できません。', ...lines].join('\n'),
+        code: code,
+      );
+    }
     switch (error['status']) {
       case 'PERMISSION_DENIED':
         return ImportException('この操作を行う権限がありません。', code: code);

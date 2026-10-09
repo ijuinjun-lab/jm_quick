@@ -83,9 +83,11 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
       if (!mounted) return;
       setState(() {
         batchList = result;
-        // テンプレートが変わっていたら、以前のプレビューは無効(確認し直す)
+        // テンプレートが変わっていたら、以前のプレビューは無効(確認し直す)。versionは取込回の通知種別のメールのもの。
         previews.removeWhere(
-          (_, p) => p.templateVersion != result.templateVersion,
+          (batchId, p) =>
+              p.templateVersion !=
+              _versionOf(result, result.batches.where((b) => b.batchId == batchId).firstOrNull),
         );
       });
     } on WinnerSendException catch (e) {
@@ -131,18 +133,22 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
     }
   }
 
+  /// 取込回に送るメールのテンプレートversion(取込回の通知種別で決まる。古いサーバーでは通常当選メールのversion)。
+  static int? _versionOf(SendBatchList list, SendBatch? batch) =>
+      batch?.mailTemplateVersion ?? list.templateVersion;
+
   // プレビューでテンプレートversionを確認済みの場合だけ、送信を開始できる。
   bool _previewed(SendBatch batch) {
     final p = previews[batch.batchId];
     return p != null &&
         p.ready &&
-        p.templateVersion == batchList!.templateVersion;
+        p.templateVersion == _versionOf(batchList!, batch);
   }
 
   Future<void> _start(SendBatch batch) async {
     if (starting != null) return; // 連打防止(サーバーの冪等性が正本)
     final list = batchList!;
-    final version = list.templateVersion;
+    final version = _versionOf(list, batch);
     if (version == null || batch.targetCount == null) return;
     final ok = await confirmSendAction(
       context,
@@ -150,6 +156,8 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
       lines: [
         'イベント：${list.eventName}',
         '対象：${batch.label}',
+        '通知種別：${batch.notificationTypeLabel}',
+        if (batch.mailSubject != null) '件名：${batch.mailSubject}',
         '送信対象：${batch.targetCount}件',
         'テンプレート：v$version',
         'この操作でメールが送信されます(送信はサーバーが行い、この画面を閉じても続きます)。',
@@ -316,6 +324,18 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
               batch.label,
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
+            // 通知種別は取込回の正本(取込時に確定)。送信するメールもこれで決まる(ここでは選べない)。
+            Container(
+              key: ValueKey('batch-notification-${batch.batchId}'),
+              margin: const EdgeInsets.symmetric(vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              color: batch.isWaitlistPromotion ? const Color(0xfffff1cf) : const Color(0xffeef3f8),
+              child: Text(
+                '通知種別：${batch.notificationTypeLabel}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+            if (batch.mailSubject != null) KeyValueRow('件名', batch.mailSubject!),
             KeyValueRow('取込の状態', batchStatusLabel(batch.status)),
             if (batch.importedCount != null)
               KeyValueRow('取込件数', '${batch.importedCount}件'),

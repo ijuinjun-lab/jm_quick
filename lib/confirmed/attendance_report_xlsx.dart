@@ -7,7 +7,7 @@ import 'xlsx_writer.dart';
 
 /// 最終実績(サーバーの[AttendanceReport])→ Excel(.xlsx)。1行 = 1 participant(同じメールアドレスでも統合しない)。
 ///
-/// 列: 取込回 / 氏名 / かな / メールアドレス / HEBEL属性 / 参加者状態、
+/// 列: 取込回 / 氏名 / かな / メールアドレス / HEBEL属性 / 参加者状態 / 通知種別、
 ///     programごと(イベントの表示順。program名はevent.programsから)に
 ///       参加予定 / 予定人数 / 予定時間 / 受付 / 実来場人数 / 受付時刻、
 ///     最後に イベント来場状況。
@@ -44,6 +44,10 @@ String participantStateOf(AttendanceReportParticipant p) {
   if (p.status == 'active') return '有効';
   return p.status.isEmpty ? '' : '無効（${p.status}）';
 }
+
+/// 通知種別の表示(項目の無い既存の取込回は通常当選)。
+String notificationTypeCellOf(AttendanceReportParticipant p) =>
+    p.notificationType == 'waitlistPromotion' ? 'キャンセル待ち繰り上げ当選' : '通常当選';
 
 /// イベント来場状況: 1つでも受付済み → 受付あり / 申込programがあり受付なし → 未来場 / programなし → 空欄。
 String eventAttendanceOf(AttendanceReportParticipant p) {
@@ -120,6 +124,7 @@ AttendanceReportFile buildAttendanceReportXlsx(
     (header: 'メールアドレス', width: 32),
     (header: 'HEBEL属性', width: 40),
     (header: '参加者状態', width: 12),
+    (header: '通知種別', width: 24),
     for (final name in names) ...[
       for (final (suffix, minimum) in const [
         ('参加予定', 10.0),
@@ -142,6 +147,7 @@ AttendanceReportFile buildAttendanceReportXlsx(
         p.email,
         hebelCellOf(p),
         participantStateOf(p),
+        notificationTypeCellOf(p),
         for (final program in report.programs) ..._programCells(p, program),
         eventAttendanceOf(p),
       ],

@@ -277,12 +277,13 @@ void main() {
         'メールアドレス',
         'HEBEL属性',
         '参加者状態',
+        '通知種別',
         for (final name in ['架空の譲渡会A', '架空の譲渡会B', '架空トーク'])
           for (final s in ['参加予定', '予定人数', '予定時間', '受付', '実来場人数', '受付時刻'])
             '$name：$s',
         'イベント来場状況',
       ]);
-      expect(header.length, 6 + 3 * 6 + 1);
+      expect(header.length, 7 + 3 * 6 + 1);
     });
 
     test(
@@ -321,6 +322,8 @@ void main() {
           reason: '同じメールでも統合しない',
         );
         expect(rows.every((r) => col(r, 5) == '有効'), isTrue);
+        // 通知種別: 項目の無い取込回(既存)は通常当選
+        expect(rows.every((r) => col(r, 6) == '通常当選'), isTrue);
       },
     );
 
@@ -376,9 +379,9 @@ void main() {
         exportedAt: DateTime.utc(2026, 11, 30),
       ).bytes;
       final xml = _part(bytes, 'xl/worksheets/sheet1.xml');
-      // 1人目の譲渡会A: 実来場人数(K2)は数値、受付時刻(L2)は日時の書式(s=2)
-      expect(xml, contains('<c r="K2"><v>3</v></c>'));
-      expect(RegExp(r'<c r="L2" s="2"><v>46356\.433').hasMatch(xml), isTrue);
+      // 1人目の譲渡会A: 実来場人数(L2)は数値、受付時刻(M2)は日時の書式(s=2)(G列=通知種別を追加)
+      expect(xml, contains('<c r="L2"><v>3</v></c>'));
+      expect(RegExp(r'<c r="M2" s="2"><v>46356\.433').hasMatch(xml), isTrue);
       expect(xml, contains('<c r="B2" t="inlineStr">'));
     });
 
@@ -408,7 +411,7 @@ void main() {
       expect(sheet.rows.length, 1);
       expect(
         _part(file.bytes, 'xl/worksheets/sheet1.xml'),
-        contains('<autoFilter ref="A1:Y1"/>'),
+        contains('<autoFilter ref="A1:Z1"/>'),
       );
     });
 

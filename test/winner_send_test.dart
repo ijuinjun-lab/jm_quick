@@ -124,6 +124,10 @@ class FakeSendService implements WinnerSendService {
             excludedInactiveCount: b.excludedInactiveCount,
             consistent: b.consistent,
             previewParticipantId: b.previewParticipantId,
+            notificationType: b.notificationType,
+            notificationTypeLabel: b.notificationTypeLabel,
+            mailSubject: b.mailSubject,
+            mailTemplateVersion: b.mailTemplateVersion,
             blockedReasons: states.containsKey(jobIdOf(b.batchId))
                 ? [
                     ...b.blockedReasons.where((r) => r != 'job-exists'),
@@ -297,6 +301,25 @@ class FakeMailService implements WinnerMailService {
     required String participantId,
   }) async {
     previewCalls.add(participantId);
+    return preview_;
+  }
+
+  @override
+  Future<int> updateWaitlistTemplate({
+    required String eventId,
+    required String subject,
+    required String introBody,
+    required String closingBody,
+    required String notesBody,
+    String? adoptionNotesBody,
+  }) async => 1;
+
+  @override
+  Future<WinnerMailPreview> previewWaitlist({
+    required String eventId,
+    required String participantId,
+  }) async {
+    previewCalls.add('waitlist:$participantId');
     return preview_;
   }
 }

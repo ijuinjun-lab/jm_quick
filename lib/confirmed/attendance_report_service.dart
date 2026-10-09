@@ -72,6 +72,7 @@ class AttendanceReportParticipant {
     required this.programs,
     this.importSequence,
     this.batchCommitted,
+    this.notificationType = 'normal',
     this.hebelCategory,
     this.hebelLabel,
     this.hebelRawValue,
@@ -86,6 +87,9 @@ class AttendanceReportParticipant {
       participantId: json['participantId'] as String? ?? '',
       importSequence: (json['importSequence'] as num?)?.toInt(),
       batchCommitted: json['batchCommitted'] as bool?,
+      notificationType: json['notificationType'] == 'waitlistPromotion'
+          ? 'waitlistPromotion'
+          : 'normal',
       name: json['name'] as String? ?? '',
       kana: json['kana'] as String? ?? '',
       email: json['email'] as String? ?? '',
@@ -110,6 +114,9 @@ class AttendanceReportParticipant {
 
   /// 取込回が確定(committed)しているか。取込回の無い参加者はnull。
   final bool? batchCommitted;
+
+  /// 取込回の通知種別(normal / waitlistPromotion)。項目の無い既存の取込回は normal。
+  final String notificationType;
   final String name;
   final String kana;
   final String email;

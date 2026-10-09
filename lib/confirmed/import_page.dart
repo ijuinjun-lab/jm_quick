@@ -151,6 +151,15 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
 
   PickedCsv? file;
 
+  /// 通知種別(ファイルを選んだ後に管理者が必ず選ぶ。選ぶまで検証へ進めない)。変えたら検証・対処・プレビューはやり直し。
+  NotificationType? notificationType;
+
+  /// 通知種別に合わない(繰り上げ先を判定できない形式等)場合の理由。
+  String? notificationError;
+
+  /// ファイルのHEBEL属性の列(通知種別を変えてmappingを作り直すときに使う)。
+  String? _hebelColumn;
+
   /// 読み取ったファイル(形式・シート)。Excelで候補のシートが複数ある間は[sheet]・[table]はnull(管理者が選ぶ)。
   ParsedImportFile? parsedFile;
   ImportSheet? sheet;
@@ -343,12 +352,116 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     formatError = null;
     missingHeadersList = [];
     mapping = null;
+    notificationType = null;
+    notificationError = null;
+    _hebelColumn = null;
     _invalidateValidation();
     _clearDecisions();
     result = null;
     commitError = null;
     commitAmbiguous = false;
   }
+
+  /// 通知種別を選ぶ(変えたら、検証・対処・プレビューはやり直し。mappingも種別に合わせて作り直す)。
+  void _selectNotificationType(NotificationType type) {
+    if (busy || type == notificationType) return;
+    setState(() {
+      notificationType = type;
+      _invalidateValidation();
+      _clearDecisions();
+      result = null;
+      commitError = null;
+      commitAmbiguous = false;
+      _rebuildMapping();
+    });
+  }
+
+  /// 通知種別とファイルから、サーバーへ送るmappingを作る(管理者は列もprogram・時間枠・人数も選ばない)。
+  /// 繰り上げ当選は、profileの判定規則(waitlist)を入れるだけで、繰り上げ先はサーバーがファイルから判定する。
+  void _rebuildMapping() {
+    mapping = null;
+    notificationError = null;
+    final parsed = table;
+    final type = notificationType;
+    if (parsed == null || type == null || formatError != null || event == null) return;
+    if (type == NotificationType.waitlistPromotion) {
+      final w = widget.profile.waitlist;
+      if (w == null) {
+        notificationError = 'この形式のファイルでは、キャンセル待ち繰り上げ当選を取り込めません。';
+        return;
+      }
+      final missing = [w.optionsColumn, w.countColumn]
+          .where((c) => !parsed.headers.contains(c))
+          .toList();
+      if (missing.isNotEmpty) {
+        notificationError = 'このファイルは繰り上げ先を一意に判定できません(列「${missing.join('」「')}」がありません)。';
+        return;
+      }
+      if (parsedFile?.format != ImportFileFormat.xlsx || sheet?.name == null) {
+        notificationError = 'このファイルは繰り上げ先を一意に判定できません(キャンセル待ち繰り上げ当選は、Excel(.xlsx)のシート名から時間枠を読み取ります)。';
+        return;
+      }
+      // シートを選ぶ = 時間枠を選ぶことになるため、候補のシートが複数あるファイルは取り込まない(管理者に選ばせない)。
+      if (sheetCandidates.length > 1) {
+        notificationError = 'このファイルは繰り上げ先を一意に判定できません(対象のシートが${sheetCandidates.length}枚あり、時間枠を1つに決められません)。';
+        return;
+      }
+    }
+    mapping = buildMappingFromProfile(
+      widget.profile,
+      event!.programs,
+      hebelResidenceColumn: _hebelColumn,
+      autoExcludeCancelled: tableHasCancelledRows(widget.profile, parsed),
+      notificationType: type,
+    );
+  }
+
+  /// 通常当選を選んだのに、繰り上げリストらしいファイル(シート名が時間枠で、全行にキャンセル待ち希望枠がある)なら警告する。
+  /// 確実ではないため止めない(繰り上げ当選の指定でシート名が時間枠として読めない場合は、上の判定とサーバーが止める)。
+  /// 通知種別は変えない。警告は通知種別の欄・検証結果・プレビュー・取込確定の確認まで表示し続ける(取り違えに確定前に気づけるように)。
+  /// 戻り値は理由(警告の本文は[_mixupWarning])。
+  String? get _possibleMixup {
+    final parsed = table;
+    final w = widget.profile.waitlist;
+    if (notificationType != NotificationType.normal || parsed == null || w == null) return null;
+    if (parseSheetTimeRange(sheet?.name) == null) return null;
+    final index = parsed.headers.indexOf(w.optionsColumn);
+    final rows = parsed.records.where((r) => r.any((c) => c.trim().isNotEmpty)).toList();
+    if (index < 0 || rows.isEmpty) return null;
+    if (!rows.every((r) => index < r.length && r[index].trim().isNotEmpty)) return null;
+    return 'シート名が時間枠(「${sheet!.name}」)で、全行にキャンセル待ち希望枠があります。';
+  }
+
+  /// 取り違えの可能性の警告(見落としにくい表示。通知種別の欄・検証結果・プレビュー・確定の確認で同じもの)。
+  Widget _mixupWarning(String reason, Key key) => Container(
+    key: key,
+    margin: const EdgeInsets.only(top: 8, bottom: 8),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: const Color(0xfffff1cf),
+      border: Border.all(color: const Color(0xffb54708), width: 2),
+    ),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(Icons.warning_amber_rounded, color: Color(0xffb54708)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'キャンセル待ち繰り上げ用ファイルの可能性があります。通知種別が「通常当選」で正しいか確認してください。',
+                style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xffb54708)),
+              ),
+              Text('理由：$reason'),
+              const Text('繰り上げ当選の参加者へ通常当選のメールを送らないよう、違う場合は通知種別を「キャンセル待ち繰り上げ当選」に選び直してください。'),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
 
   // ファイル・列の対応が変わったら、検証(と確認)・プレビューは無効。再検証が必要
   void _invalidateValidation() {
@@ -419,6 +532,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       missingHeadersList = [];
       mapping = null;
       table = null;
+      notificationError = null;
       _invalidateValidation();
       _clearDecisions();
       result = null;
@@ -443,11 +557,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       formatError = 'HEBEL属性(「${widget.profile.hebelResidenceHeaders.join('」「')}」)の列が複数あるため、どの列を使うか決められません。列を1つにしてから選び直してください。';
       return;
     }
-    mapping = buildMappingFromProfile(
-      widget.profile,
-      event!.programs,
-      hebelResidenceColumn: hebel.column,
-    );
+    _hebelColumn = hebel.column;
+    _rebuildMapping();
   }
 
   ImportRequest _buildRequest({int? newImportSequence}) => buildImportRequest(
@@ -459,12 +570,23 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     newImportSequence: newImportSequence,
     decisions: _decisions,
     sheetName: parsedFile?.format == ImportFileFormat.xlsx ? sheet?.name : null,
+    sheetCandidates: _sheetCandidateNames(),
+    notificationType: notificationType ?? NotificationType.normal,
   );
+
+  /// 繰り上げ当選のとき、ファイル内の参加者リストの形式に合うシート名すべて(サーバーが1枚であることを確かめる)。
+  List<String>? _sheetCandidateNames() {
+    if (notificationType != NotificationType.waitlistPromotion || parsedFile?.format != ImportFileFormat.xlsx) return null;
+    final names = sheetCandidates.isNotEmpty ? [for (final s in sheetCandidates) s.name] : [sheet?.name];
+    return [for (final n in names) ?n];
+  }
 
   /// 検証した内容(CSV・列の対応・修正・除外)。プレビュー時にこれと異なれば再検証が必要。
   static String _fingerprintOf(ImportRequest request) =>
       '${request.json['fileHash']}\n${canonicalJson(request.json['mapping'])}\n'
-      '${canonicalJson({'c': request.json['corrections'], 'e': request.json['excludedRows']})}';
+      '${canonicalJson({'c': request.json['corrections'], 'e': request.json['excludedRows']})}\n'
+      '${request.json['notificationType'] ?? ''}\n${request.json['sourceSheetName'] ?? ''}\n'
+      '${canonicalJson(request.json['sourceSheetCandidates'])}';
 
   /// Excelの読み取りについての注記(結合セル・数式・列名の行の位置・読まなかった非表示のシート)。
   List<Widget> _sheetNotices() {
@@ -759,7 +881,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (_possibleMixup case final reason?) _mixupWarning(reason, const Key('confirm-mixup')),
               _confirmRow('イベント名', event!.eventName),
+              _confirmRow('通知種別', (notificationType ?? NotificationType.normal).label),
               _confirmRow('ファイル名', request.fileName),
               if (sheet?.name != null) _confirmRow('シート', sheet!.name!),
               _confirmRow('総行数', '${p.totalRecords}行'),
@@ -936,6 +1060,88 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     ],
   ]);
 
+  /// 通知種別で使うメール(件名の表示)。送信時もサーバーが取込回の通知種別でこのメールを使う(選び直しはできない)。
+  static String _mailLabelOf(NotificationType type) => switch (type) {
+    NotificationType.normal => 'ご参加予約確定のお知らせ（現在の通常の当選通知）',
+    NotificationType.waitlistPromotion => 'お席のご用意ができました：ご参加予約確定のお知らせ',
+  };
+
+  Widget _notificationSection() {
+    final mixup = _possibleMixup;
+    return _section('通知種別', [
+      const Text('このファイルの参加者へ送る当選通知の種類を選んでください(必須)。選ぶまで検証へ進めません。'),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (final type in NotificationType.values)
+            ChoiceChip(
+              key: ValueKey('notification-${type.value}'),
+              label: Text(type.label),
+              selected: notificationType == type,
+              onSelected: busy ? null : (_) => _selectNotificationType(type),
+            ),
+        ],
+      ),
+      if (notificationType != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(
+            '使用メール：${_mailLabelOf(notificationType!)}',
+            key: const Key('notification-mail'),
+          ),
+        ),
+      if (notificationType == NotificationType.waitlistPromotion)
+        const Text(
+          '繰り上げ先(program・時間枠・人数)は、シート名と各行の「キャンセル待ち希望枠」「キャンセル待ち希望人数」から自動で判定します。',
+        ),
+      if (notificationError != null)
+        _notice(notificationError!, key: const Key('notification-error')),
+      if (mixup != null) _mixupWarning(mixup, const Key('notification-mixup')),
+    ]);
+  }
+
+  /// 検証結果の冒頭: 通知種別・使用メール・原本行数・キャンセル自動除外・取込(送信)対象。繰り上げ当選は判定した繰り上げ先も示す。
+  Widget _notificationSummary(ImportValidation v) {
+    final type = v.notificationType;
+    final w = v.waitlistPromotion;
+    final programName = w == null
+        ? null
+        : (event?.programs.where((p) => p.programId == w.programId).firstOrNull?.name ?? w.programId);
+    final countsText = w == null
+        ? ''
+        : ([...w.rows]..sort((a, b) => a.sourceRowNumber - b.sourceRowNumber))
+            .map((r) => '${r.sourceRowNumber}行目 ${r.plannedCount}名')
+            .join('、');
+    return Container(
+      key: const Key('notification-summary'),
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      color: type == NotificationType.waitlistPromotion ? const Color(0xfffff1cf) : const Color(0xffeef3f8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '通知種別：${type.label}',
+            key: const Key('summary-notification-type'),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          Text('使用メール：${_mailLabelOf(type)}', key: const Key('summary-mail')),
+          const SizedBox(height: 6),
+          InfoRow('原本行数', '${v.totalRows}行', key: const Key('summary-original-rows')),
+          InfoRow('キャンセル自動除外', '${v.autoExcludedRowCount}行(原本でキャンセル)', key: const Key('summary-auto-excluded')),
+          InfoRow('取込・送信対象', '${v.importRowCount}件', key: const Key('summary-import-rows')),
+          if (w != null) ...[
+            InfoRow('繰り上げ先', '$programName　${w.slotLabel}', key: const Key('summary-waitlist-target')),
+            InfoRow('人数', countsText, key: const Key('summary-waitlist-counts')),
+            const Text('元の申込の他のprogram(トークショー等)は、今回の当選に含めません。'),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _autoAnalysisSection() => _section('自動解析結果', [
     const Text(
       'ファイルの列を自動で認識しました(列を選ぶ操作は不要です)。',
@@ -1031,6 +1237,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         .toList();
     final summary = p.decisionSummary;
     return _section('プレビュー結果(まだ取り込まれていません)', [
+      if (_possibleMixup case final reason?) _mixupWarning(reason, const Key('preview-mixup')),
       if (summary != null)
         Container(
           key: const Key('preview-decision-summary'),
@@ -1390,6 +1597,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     const warnColor = Color(0xfffff1cf);
     final pendingReview = v.pendingReviewRows;
     return _section('検証結果(まだ取り込まれていません)', [
+      if (_possibleMixup case final reason?) _mixupWarning(reason, const Key('validation-mixup')),
+      _notificationSummary(v),
       InfoRow('総行数', '${v.totalRows}件(ファイル ${v.totalRecords}行・空の行${v.blankRecordCount}行を除く)', key: const Key('validation-total')),
       InfoRow('正常', '${v.okCount}件', key: const Key('validation-ok')),
       InfoRow('警告', '${v.warningCount}件', key: const Key('validation-warning')),
@@ -1627,7 +1836,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   Widget _validationRow(ImportValidation v, ImportMapping m, ValidationRow r) {
     final n = r.sourceRowNumber;
     final rowCorrections = corrections.entries.where((e) => e.key.$1 == n).toList();
-    final status = r.excluded
+    final status = r.autoExcluded
+        ? '今回の取込から除外(原本でキャンセル・自動除外)'
+        : r.excluded
         ? '今回の取込から除外(${exclusions[n] ?? ''})'
         : r.classification == RowClass.review && _isAllowed(n, _review)
         ? '${r.result.label}(許可済み)'
@@ -1693,7 +1904,10 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
             Wrap(
               spacing: 8,
               children: [
-                if (r.excluded)
+                // 自動除外(原本でキャンセル)はサーバーが決める。取り消しはできない。
+                if (r.autoExcluded)
+                  const SizedBox.shrink()
+                else if (r.excluded)
                   TextButton(
                     key: ValueKey('unexclude-$n'),
                     onPressed: busy ? null : () => _changeDecisions(() => exclusions.remove(n)),
@@ -1871,6 +2085,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                 _notice(fileError!, key: const Key('file-error')),
             ]),
           if (formatError != null) _formatErrorSection(),
+          if (table != null && formatError == null) _notificationSection(),
           if (mapping != null && table != null) _autoAnalysisSection(),
           if (mapping != null && table != null)
             _section('検証', [

@@ -15,6 +15,12 @@
 //       hebelResidenceColumn?          // HEBEL属性(受付の確認用。hebel_residence.js)。省略時は属性なし(後方互換)
 //     },
 //     rowChecks?: [{column, allowedValues[]}],   // 行の意味を確認する列(例: 区分)。外れた行はreview
+//     autoExcludeRows?: [{column, values[]}],    // この列の値が一致する行は、今回の取込から自動で除外する(例: 区分=キャンセル)。
+//                                                // 一致は空白・全角半角を無視して比べる。原本の行は消さず、除外として監査に残す
+//     waitlist?: {                               // キャンセル待ち繰り上げ当選の取込だけ(waitlist_promotion.js)
+//       optionsColumn, countColumn,              // キャンセル待ち希望枠(選択肢のカンマ区切り)・キャンセル待ち希望人数(「N名」)
+//       options: [{label, programId, kind?}]     // 選択肢の見出し(例「午後の部（犬）」)→ program。kindはファイル名との照合用(例「犬」)
+//     },
 //     programs: [{
 //       programId,                     // event.programs のprogramIdに対応
 //       countColumn,                   // 必須。人数はplannedCountの唯一の入力元
@@ -44,12 +50,15 @@ const MAX_COLUMN_NAME_LENGTH = 200;
 const MAX_VALUE_LENGTH = 200;
 const MAX_VALUES = 50;
 const MAX_PROGRAMS = 50;
-const TOP_KEYS = ["version", "participant", "rowChecks", "programs"];
+const TOP_KEYS = ["version", "participant", "rowChecks", "autoExcludeRows", "waitlist", "programs"];
 const PARTICIPANT_KEYS = ["externalIdColumn", "nameColumn", "kanaColumn", "emailColumn", "registeredAtColumn",
   "hebelResidenceColumn"];
 const PROGRAM_KEYS = ["programId", "participationColumn", "attendingValues", "notAttendingValues",
   "emptyMeans", "slotColumn", "slotFormat", "countColumn", "ignoreCountWhenNotAttending"];
 const ROW_CHECK_KEYS = ["column", "allowedValues"];
+const AUTO_EXCLUDE_KEYS = ["column", "values"];
+const WAITLIST_KEYS = ["optionsColumn", "countColumn", "options"];
+const WAITLIST_OPTION_KEYS = ["label", "programId", "kind"];
 const WAITLIST_FRAGMENT = "キャンセル待";
 
 class ImportMappingError extends Error {
@@ -138,6 +147,58 @@ function validateImportMapping(mapping, {eventProgramIds} = {}) {
     }
   }
 
+  if (mapping.autoExcludeRows !== undefined) {
+    if (!Array.isArray(mapping.autoExcludeRows) || mapping.autoExcludeRows.length === 0 || mapping.autoExcludeRows.length > MAX_VALUES) {
+      errors.push({code: "invalid-auto-exclude-rows", path: "autoExcludeRows"});
+    } else {
+      mapping.autoExcludeRows.forEach((rule, index) => {
+        const path = `autoExcludeRows[${index}]`;
+        if (!isPlainObject(rule)) { errors.push({code: "invalid-auto-exclude-rows", path}); return; }
+        checkKeys(rule, AUTO_EXCLUDE_KEYS, path, errors);
+        if (!isColumnName(rule.column)) errors.push({code: "invalid-column", path: `${path}.column`});
+        if (rule.values === undefined) errors.push({code: "invalid-values", path: `${path}.values`});
+        else checkValues(rule.values, `${path}.values`, errors);
+      });
+    }
+  }
+
+  const waitlist = mapping.waitlist;
+  if (waitlist !== undefined) {
+    if (!isPlainObject(waitlist)) {
+      errors.push({code: "invalid-waitlist", path: "waitlist"});
+    } else {
+      checkKeys(waitlist, WAITLIST_KEYS, "waitlist", errors);
+      for (const key of ["optionsColumn", "countColumn"]) {
+        if (!isColumnName(waitlist[key])) errors.push({code: "invalid-column", path: `waitlist.${key}`});
+      }
+      const mappedProgramIds = new Set(Array.isArray(mapping.programs) ? mapping.programs.map((p) => p && p.programId) : []);
+      if (!Array.isArray(waitlist.options) || waitlist.options.length === 0 || waitlist.options.length > MAX_PROGRAMS) {
+        errors.push({code: "invalid-waitlist-options", path: "waitlist.options"});
+      } else {
+        const labels = new Set();
+        waitlist.options.forEach((option, index) => {
+          const path = `waitlist.options[${index}]`;
+          if (!isPlainObject(option)) { errors.push({code: "invalid-waitlist-options", path}); return; }
+          checkKeys(option, WAITLIST_OPTION_KEYS, path, errors);
+          if (typeof option.label !== "string" || option.label.trim() === "" || option.label.trim().length > MAX_VALUE_LENGTH) {
+            errors.push({code: "invalid-waitlist-label", path: `${path}.label`});
+          } else if (labels.has(option.label.trim())) {
+            errors.push({code: "duplicate-waitlist-label", path: `${path}.label`});
+          } else {
+            labels.add(option.label.trim());
+          }
+          // 繰り上げ先は、このmappingのprogram(=イベントのprogram)のどれか
+          if (!isValidProgramId(option.programId) || !mappedProgramIds.has(option.programId)) {
+            errors.push({code: "waitlist-program-not-mapped", path: `${path}.programId`});
+          }
+          if (option.kind !== undefined && (typeof option.kind !== "string" || option.kind.trim() === "" || option.kind.trim().length > 20)) {
+            errors.push({code: "invalid-waitlist-kind", path: `${path}.kind`});
+          }
+        });
+      }
+    }
+  }
+
   const programs = mapping.programs;
   if (!Array.isArray(programs) || programs.length === 0 || programs.length > MAX_PROGRAMS) {
     errors.push({code: "programs-required", path: "programs"});
@@ -193,7 +254,10 @@ function validateImportMapping(mapping, {eventProgramIds} = {}) {
 
   if (errors.length === 0) {
     // キャンセル待ちの列は当選リストのprogramに使ってはならない(意味が異なる)。警告にとどめて表示させる。
+    // 繰り上げ当選の取込(waitlist)がキャンセル待ちの列を読むのは正しい使い方なので、その列は警告しない。
+    const waitlistColumns = isPlainObject(mapping.waitlist) ? [mapping.waitlist.optionsColumn, mapping.waitlist.countColumn] : [];
     for (const column of mappedColumns(mapping)) {
+      if (waitlistColumns.includes(column)) continue;
       if (column.includes(WAITLIST_FRAGMENT)) warnings.push({code: "waitlist-column", column});
     }
   }
@@ -220,6 +284,19 @@ function normalizeImportMapping(mapping, options) {
         {} : {hebelResidenceColumn: text(p.hebelResidenceColumn)}),
     },
     rowChecks: (mapping.rowChecks || []).map((c) => ({column: c.column.trim(), allowedValues: list(c.allowedValues)})),
+    // 指定したときだけ持つ(指定の無いmappingの正規化結果=既存の取込回のハッシュ・指紋は従来と同じ)。
+    ...(mapping.autoExcludeRows === undefined ? {} : {
+      autoExcludeRows: mapping.autoExcludeRows.map((r) => ({column: r.column.trim(), values: list(r.values)})),
+    }),
+    ...(mapping.waitlist === undefined ? {} : {
+      waitlist: {
+        optionsColumn: mapping.waitlist.optionsColumn.trim(),
+        countColumn: mapping.waitlist.countColumn.trim(),
+        options: mapping.waitlist.options.map((o) => ({
+          label: o.label.trim(), programId: o.programId, ...(o.kind === undefined ? {} : {kind: o.kind.trim()}),
+        })),
+      },
+    }),
     programs: mapping.programs.map((g) => ({
       programId: g.programId,
       participationColumn: text(g.participationColumn),
@@ -241,6 +318,11 @@ function mappedColumns(mapping) {
   const p = mapping.participant || {};
   PARTICIPANT_KEYS.forEach((key) => add(p[key]));
   (mapping.rowChecks || []).forEach((check) => add(check.column));
+  (Array.isArray(mapping.autoExcludeRows) ? mapping.autoExcludeRows : []).forEach((rule) => add(rule && rule.column));
+  if (isPlainObject(mapping.waitlist)) {
+    add(mapping.waitlist.optionsColumn);
+    add(mapping.waitlist.countColumn);
+  }
   (mapping.programs || []).forEach((g) => {
     add(g.participationColumn);
     add(g.slotColumn);
