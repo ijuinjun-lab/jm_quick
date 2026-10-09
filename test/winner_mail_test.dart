@@ -674,6 +674,75 @@ void main() {
     );
   });
 
+  group('犬・猫・トークに対応するprogramの選択欄', () {
+    // 設定済みのevent(7タイプ有効)。program名は長め(狭い幅で折り返し・省略が起きる場合も重ならないこと)。
+    Map<String, dynamic> mappedResponse() => {
+      'eventId': 'event-a',
+      'event': {'eventName': '架空の譲渡会'},
+      'template': null,
+      'venueInfo': {'address': '', 'access': ''},
+      'participationMapping': {'catProgramId': 'program-1', 'dogProgramId': 'program-2', 'talkProgramId': 'program-3'},
+      'programs': [
+        {'programId': 'program-1', 'name': '架空の譲渡会（ねこ）午前の部・とても長いprogram名'},
+        {'programId': 'program-2', 'name': '架空の譲渡会（いぬ）午後の部・とても長いprogram名'},
+        {'programId': 'program-3', 'name': '架空のトークショー'},
+      ],
+      'mailSettings': {'senderName': '', 'contact': '', 'talkTimeText': ''},
+      'ready': false,
+      'problems': ['template-subject-invalid'],
+      'missingOptional': [],
+      'previewParticipantId': null,
+    };
+    const roles = {'cat': '猫', 'dog': '犬', 'talk': 'トーク'};
+    const current = {'cat': 'program-1', 'dog': 'program-2', 'talk': 'program-3'};
+
+    for (final width in [1280.0, 360.0]) {
+      testWidgets('幅${width.toInt()}px: 3つのラベルとプルダウンが独立した行で、重ならず、現在値が表示される', (tester) async {
+        final service = FakeWinnerMailService(settings: WinnerMailSettings.fromJson(mappedResponse()));
+        await tester.pumpWidget(_page(service));
+        await _load(tester);
+        tester.view.physicalSize = Size(width, 4000);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull, reason: 'オーバーフロー等の例外が無い');
+        Rect? previous;
+        for (final role in roles.entries) {
+          final label = find.byKey(ValueKey('mapping-label-${role.key}'));
+          final dropdown = find.byKey(ValueKey('mapping-${role.key}'));
+          expect(tester.widget<Text>(label).data, '${role.value}に対応するprogram');
+          final labelRect = tester.getRect(label);
+          final dropdownRect = tester.getRect(dropdown);
+          expect(labelRect.bottom, lessThanOrEqualTo(dropdownRect.top), reason: '${role.value}: ラベルはプルダウンの上で重ならない');
+          if (previous != null) {
+            expect(previous.bottom + 12, lessThanOrEqualTo(labelRect.top), reason: '${role.value}: 前のプルダウンと十分に離れる');
+          }
+          previous = dropdownRect;
+          expect(dropdownRect.right, lessThanOrEqualTo(width), reason: '画面の幅に収まる');
+          // 現在の選択値(保存済みのmapping)をそのまま表示する
+          expect(tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue, current[role.key]);
+          expect(find.descendant(of: dropdown, matching: find.textContaining('(${current[role.key]})')), findsOneWidget);
+        }
+        expect(service.updates, isEmpty, reason: '表示だけでは保存しない');
+      });
+    }
+
+    testWidgets('プルダウンで選び直せる(保存はしない)', (tester) async {
+      final service = FakeWinnerMailService(settings: WinnerMailSettings.fromJson(mappedResponse()));
+      await tester.pumpWidget(_page(service));
+      await _load(tester);
+      final dog = find.byKey(const ValueKey('mapping-dog'));
+      await tester.ensureVisible(dog);
+      await tester.tap(dog);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('架空のトークショー (program-3)').last);
+      await tester.pumpAndSettle();
+      expect(find.descendant(of: dog, matching: find.textContaining('(program-3)')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const ValueKey('mapping-cat')), matching: find.textContaining('(program-1)')), findsOneWidget,
+          reason: '他の欄の値は変わらない');
+      expect(service.updates, isEmpty);
+      expect(service.calls.where((c) => c.startsWith('update')), isEmpty);
+    });
+  });
+
   group('HEBEL HAUS×sippo 基準文案ボタン', () {
     const presetSubject = '【ご参加予約確定のお知らせ】 HEBEL HAUS×sippo 保護犬猫譲渡会・トークセッション';
     const sendOnly = 'このメールは送信専用アドレスから配信されています。';

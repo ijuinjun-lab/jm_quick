@@ -449,14 +449,39 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
             onChanged: busy ? null : (value) => setState(() { mappingEnabled = value; }),
           ),
           if (mappingEnabled) ...[
+            // 項目ごとに「ラベル(上) → プルダウン(下)」の独立した行にする(ラベルと前後のプルダウンを重ねない。狭い幅でも同じ)。
             for (final role in const {'cat': '猫', 'dog': '犬', 'talk': 'トーク'}.entries)
-              DropdownButtonFormField<String>(
-                key: ValueKey('mapping-${role.key}'),
-                initialValue: participationMapping['${role.key}ProgramId'],
-                decoration: InputDecoration(labelText: '${role.value}に対応するprogram'),
-                items: [for (final program in settings!.programs)
-                  DropdownMenuItem(value: program['programId'] as String, child: Text('${program['name']} (${program['programId']})'))],
-                onChanged: busy ? null : (value) => setState(() { if (value != null) participationMapping['${role.key}ProgramId'] = value; }),
+              Padding(
+                key: ValueKey('mapping-row-${role.key}'),
+                padding: const EdgeInsets.only(top: 8, bottom: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${role.value}に対応するprogram',
+                      key: ValueKey('mapping-label-${role.key}'),
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<String>(
+                      key: ValueKey('mapping-${role.key}'),
+                      initialValue: participationMapping['${role.key}ProgramId'],
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      ),
+                      items: [for (final program in settings!.programs)
+                        DropdownMenuItem(
+                          value: program['programId'] as String,
+                          child: Text('${program['name']} (${program['programId']})', overflow: TextOverflow.ellipsis),
+                        )],
+                      onChanged: busy ? null : (value) => setState(() { if (value != null) participationMapping['${role.key}ProgramId'] = value; }),
+                    ),
+                  ],
+                ),
               ),
             const Text('下の「保存」で本文と一緒に保存します。CSV取込前に設定してください。'),
           ],
