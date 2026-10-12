@@ -277,6 +277,84 @@ void main() {
       expect(find.text('通知種別：通常当選'), findsOneWidget);
     });
 
+    testWidgets('繰り上げ当選のプレビュー・確定の確認: 予定人数はサーバーの繰り上げ人数(1+2+3=6名)。自動除外のキャンセル行はタイプ未確定に含めない', (tester) async {
+      // 架空の4行: 2〜4行目=繰り上げ(1名・2名・3名、犬のみ)、5行目=原本でキャンセル(自動除外)
+      Map<String, dynamic> row(int n, String classification, {bool cancelled = false}) => {
+        'sourceRowNumber': n, 'classification': classification, 'result': classification == 'ready' ? 'ok' : 'warning',
+        'findings': <Object>[], 'issueCodes': <String>[], 'programIds': cancelled ? <String>[] : ['program-2'],
+        if (!cancelled) 'participationType': 'dogOnly',
+        if (cancelled) ...{'excluded': true, 'autoExcluded': true},
+      };
+      final rows = [row(2, 'ready'), row(3, 'ready'), row(4, 'ready'), row(5, 'review', cancelled: true)];
+      final types = [
+        {'value': 'dogOnly', 'label': '犬のみ', 'count': 3},
+        {'value': 'catOnly', 'label': '猫のみ', 'count': 0},
+      ];
+      final service = FakeImportService(
+        event: _summary,
+        validateHandler: (request) async => ImportValidation.fromJson({
+          ..._validationJson(type: 'waitlistPromotion', waitlist: {
+            'programId': 'program-2', 'slotLabel': '15:30-16:10', 'kind': '犬',
+            'rows': [
+              {'sourceRowNumber': 2, 'plannedCount': 1},
+              {'sourceRowNumber': 3, 'plannedCount': 2},
+              {'sourceRowNumber': 4, 'plannedCount': 3},
+            ],
+          }),
+          'totalRecords': 4, 'totalRows': 4, 'okCount': 3, 'warningCount': 1, 'importRowCount': 3,
+          'autoExcludedRows': [5], 'participationTypes': types, 'rows': rows,
+        }),
+        previewHandler: (request) async => ImportPreview.fromJson({
+          'notificationType': 'waitlistPromotion', 'batchId': 'bfixture',
+          'totalRecords': 4, 'totalRows': 4, 'readyCount': 3, 'reviewCount': 1, 'errorCount': 0, 'blankRecordCount': 0,
+          'participantCandidateCount': 3, 'attendanceCandidateCount': 3, 'issueCounts': <String, int>{},
+          'sameFileBatches': <Object>[], 'mappingWarnings': <Object>[], 'participationTypes': types, 'rows': rows,
+          'decisionSummary': {'originalRows': 4, 'correctedRows': 0, 'excludedRows': 1, 'importRows': 3, 'autoExcludedRows': 1},
+        }),
+      );
+      await _openImport(tester, service, () => (
+        name: '【犬15時30分～16時10分】架空の繰り上げリスト.xlsx',
+        bytes: _waitlistXlsx(rows: [
+          _row(1, '提出なし', wait: _dogAll, waitN: '1名'),
+          _row(2, '提出なし', wait: _dogAll, waitN: '2名'),
+          _row(3, '提出なし', wait: _dogAll, waitN: '3名'),
+          _row(4, 'キャンセル', wait: _dogAll, waitN: '1名'),
+        ]),
+      ));
+      await _tap(tester, const ValueKey('notification-waitlistPromotion'));
+      await _tap(tester, const Key('pick-file'));
+      await _tap(tester, const Key('run-validate'));
+      for (final key in ['allow-all-review', 'ack-existing-duplicates', 'ack-csv-duplicates', 'ack-new-import']) {
+        if (find.byKey(Key(key)).evaluate().isNotEmpty) await _tap(tester, Key(key));
+      }
+      await _tap(tester, const Key('run-preview'));
+
+      expect(find.text('取込対象'), findsOneWidget);
+      expect(find.text('3件'), findsWidgets);
+      expect(find.text('犬のみ'), findsWidgets);
+      Finder valueIn(String key, String text) => find.descendant(of: find.byKey(Key(key)), matching: find.text(text));
+      expect(valueIn('preview-type-undetermined', '0件'), findsOneWidget, reason: '自動除外のキャンセル行はタイプ未確定に含めない');
+      expect(find.byKey(const Key('preview-auto-excluded')), findsOneWidget);
+      expect(find.textContaining('1件(参加タイプの集計には含めません)'), findsOneWidget, reason: 'キャンセル除外の記録は残す');
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('program-summary-ready-program-2'))).data,
+        '　確定できる予定: 6人 / 3 participant',
+        reason: '人数は元の申込の人数列ではなく、サーバーの繰り上げ人数(1+2+3)',
+      );
+      expect(
+        tester.widget<Text>(find.byKey(const ValueKey('program-summary-ready-program-1'))).data,
+        '　確定できる予定: 0人 / 0 participant',
+      );
+
+      await _tap(tester, const Key('commit'));
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.descendant(of: find.byType(AlertDialog), matching: find.text('6人 / 3 participant')), findsOneWidget,
+          reason: '取込確定の直前の確認でも同じ人数');
+      await tester.tap(find.text('キャンセル'));
+      await tester.pumpAndSettle();
+      expect(service.commits, isEmpty);
+    });
+
     testWidgets('通常当選のまま繰り上げらしいファイルを進めると、取り違えの警告が通知種別の欄・検証結果・プレビュー・確定の確認まで残る(種別は変えない)', (tester) async {
       final service = FakeImportService(event: _summary);
       await _openImport(tester, service, () => (name: '架空の繰り上げリスト.xlsx', bytes: _waitlistXlsx()));

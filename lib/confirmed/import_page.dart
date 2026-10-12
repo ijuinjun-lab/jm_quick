@@ -821,9 +821,15 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     bool Function(PreviewRow r) include,
   ) {
     final p = preview;
-    if (p == null || table == null || g.countColumn == null) {
+    // 繰り上げ当選: 人数は元の申込の人数列ではなく、サーバーが判定した繰り上げ人数(検証応答の waitlistPromotion.rows)。
+    // 通常当選は従来どおり、このprogramの人数列から概算する。
+    final waitlist = validation?.waitlistPromotion;
+    if (p == null || table == null || (waitlist == null && g.countColumn == null)) {
       return (participants: 0, headcount: 0);
     }
+    final waitlistCounts = waitlist == null
+        ? null
+        : {for (final w in waitlist.rows) w.sourceRowNumber: w.plannedCount};
     var participants = 0;
     var headcount = 0;
     for (final r in p.rows) {
@@ -831,7 +837,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (r.excluded || !include(r)) continue;
       if (!r.programIds.contains(g.programId)) continue;
       participants += 1;
-      headcount += displayCountOf(_cellAt(r.sourceRowNumber, g.countColumn)) ?? 0;
+      headcount += waitlistCounts != null
+          ? (waitlist!.programId == g.programId ? waitlistCounts[r.sourceRowNumber] ?? 0 : 0)
+          : displayCountOf(_cellAt(r.sourceRowNumber, g.countColumn)) ?? 0;
     }
     return (participants: participants, headcount: headcount);
   }
@@ -1306,7 +1314,12 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         const Text('参加タイプ別（取込対象の申込者件数・同伴者を除く）', style: TextStyle(fontWeight: FontWeight.bold)),
         for (final type in p.participationTypes)
           InfoRow('${type['label']}', '${type['count']}件'),
-        InfoRow('タイプ未確定', '${p.rows.where((r) => r.participationType == null).length}件'),
+        // 取込対象の行だけを数える(今回の取込から除外した行=原本でキャンセルの自動除外等は、タイプ未確定に含めない)
+        InfoRow('タイプ未確定', '${p.rows.where((r) => !r.excluded && r.participationType == null).length}件',
+            key: const Key('preview-type-undetermined')),
+        if ((p.decisionSummary?.autoExcludedRows ?? 0) > 0)
+          InfoRow('キャンセル自動除外', '${p.decisionSummary!.autoExcludedRows}件(参加タイプの集計には含めません)',
+              key: const Key('preview-auto-excluded')),
       ],
       const Text('program別予定', style: TextStyle(fontWeight: FontWeight.bold)),
       const Text(
