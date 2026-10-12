@@ -1,8 +1,30 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
+import '../services/download_service.dart' as download;
 import 'attendance_report_service.dart';
+import 'reception_status_csv.dart';
 import 'reception_status_summary.dart';
 import 'winner_send_service.dart';
+
+/// CSVを保存させる処理(既定はブラウザのダウンロード。サーバーには送らない。テストでは差し替える)。
+typedef ReceptionStatusCsvSaver =
+    void Function(Uint8List bytes, String fileName, String mimeType);
+
+void _saveWithBrowser(Uint8List bytes, String fileName, String mimeType) =>
+    download.downloadBytes(bytes, fileName, mimeType: mimeType);
+
+const _csvMimeType = 'text/csv;charset=utf-8';
+
+/// 表示切替。初期表示は参加者一覧。
+enum ReceptionStatusView {
+  list('参加者一覧'),
+  summary('受付集計');
+
+  const ReceptionStatusView(this.label);
+  final String label;
+}
 
 /// 主催者用「受付状況一覧」(`/console?eventId=…` のイベント管理画面から開く。閲覧のみ)。
 /// システム管理者・このイベントのイベント管理者だけ(サーバー getConfirmedAttendanceReport が同じ権限で拒否する)。
@@ -13,6 +35,10 @@ import 'winner_send_service.dart';
 ///   取得中は二重に取得しない。失敗しても前回取得した内容は残し、エラーを表示する。
 /// ■ 表示する個人情報は氏名と、HEBEL属性の3分類(この画面だけの表示・集計上の分類。保存データ・原文は表示も変更もしない)。
 ///   メールアドレス・かなは表示しない。HEBEL属性の絞り込みも取得済みのデータで行う(追加の通信なし)。
+/// ■ 「表示中の一覧をCSV出力」: 取得済みのデータに検索・絞り込み・並び順を適用した全行(描画範囲に依存しない)を、
+///   ブラウザ内でCSVにして保存させる(reception_status_csv.dart)。追加の通信・Firestoreの読取はしない。
+/// ■ 表示切替(参加者一覧 / 受付集計): 同じ取得済みデータの表示だけを切り替える(切替では通信しない)。
+///   検索・絞り込み・並び順は画面の状態として保持し、切り替えて戻っても変わらない(CSVの出力対象も同じ)。
 class ReceptionStatusPage extends StatefulWidget {
   const ReceptionStatusPage({
     super.key,
@@ -20,12 +46,15 @@ class ReceptionStatusPage extends StatefulWidget {
     required this.eventName,
     required this.service,
     DateTime Function()? now,
-  }) : now = now ?? DateTime.now;
+    ReceptionStatusCsvSaver? csvSaver,
+  }) : now = now ?? DateTime.now,
+       csvSaver = csvSaver ?? _saveWithBrowser;
 
   final String eventId;
   final String eventName;
   final AttendanceReportService service;
   final DateTime Function() now;
+  final ReceptionStatusCsvSaver csvSaver;
 
   @override
   State<ReceptionStatusPage> createState() => _ReceptionStatusPageState();
@@ -68,6 +97,15 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
   ReceptionSort sort = ReceptionSort.standard;
   List<ReceptionStatusRow> visible = const [];
 
+  /// 表示中のモード(切り替えても通信しない。絞り込み等の状態はそのまま)。
+  ReceptionStatusView view = ReceptionStatusView.list;
+
+  /// CSV出力中(連続クリックで二重に保存させない)。
+  bool exporting = false;
+
+  /// 直前のCSV出力の結果(成功・失敗)。
+  ({bool ok, String message})? exportResult;
+
   @override
   void initState() {
     super.initState();
@@ -106,6 +144,44 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
     } finally {
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  /// 表示中の一覧(検索・絞り込み・並び順を反映した全行)をCSVで保存させる。取得済みのデータだけを使う。
+  Future<void> _exportCsv() async {
+    if (exporting || visible.isEmpty) return;
+    final rows = visible;
+    setState(() {
+      exporting = true;
+      exportResult = null;
+    });
+    try {
+      final csv = buildReceptionStatusCsv(
+        eventId: widget.eventId,
+        rows: rows,
+        exportedAt: widget.now(),
+      );
+      widget.csvSaver(csv.bytes, csv.fileName, _csvMimeType);
+      if (mounted) {
+        setState(
+          () => exportResult = (
+            ok: true,
+            message: '「${csv.fileName}」を出力しました(${csv.rowCount}行)。',
+          ),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => exportResult = (
+            ok: false,
+            message: 'CSVを出力できませんでした。もう一度お試しください。',
+          ),
+        );
+      }
+    }
+    // 保存の直後の連続クリックで、同じCSVを二重に保存させない
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    if (mounted) setState(() => exporting = false);
   }
 
   void _applyFilters() {
@@ -150,18 +226,20 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
                         padding: EdgeInsets.all(32),
                         child: Center(child: CircularProgressIndicator()),
                       ),
-                    if (s != null) ...[
+                    if (s != null && view == ReceptionStatusView.summary) ...[
                       _TotalsSection(totals: s.totals),
                       _HebelSection(groups: s.hebelGroups),
                       _ProgramSection(programs: s.programs),
                       _SlotSection(programs: s.programs),
+                    ],
+                    if (s != null && view == ReceptionStatusView.list) ...[
                       _listControls(s),
                       const _RowHeader(),
                     ],
                   ],
                 ),
               ),
-              if (s != null)
+              if (s != null && view == ReceptionStatusView.list)
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                   sliver: visible.isEmpty
@@ -234,6 +312,27 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
                 key: const Key('reception-status-updated-at'),
                 style: const TextStyle(color: _muted),
               ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final v in ReceptionStatusView.values)
+                ChoiceChip(
+                  key: ValueKey('reception-status-view-${v.name}'),
+                  label: Text(v.label),
+                  avatar: Icon(
+                    v == ReceptionStatusView.list
+                        ? Icons.list_alt
+                        : Icons.bar_chart,
+                    size: 18,
+                  ),
+                  selected: view == v,
+                  showCheckmark: false,
+                  onSelected: (_) => setState(() => view = v),
+                ),
             ],
           ),
         ],
@@ -321,6 +420,39 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
             key: const Key('reception-status-count'),
             style: const TextStyle(color: _muted, fontSize: 13),
           ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 12,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                key: const Key('reception-status-export-csv'),
+                onPressed: exporting || visible.isEmpty ? null : _exportCsv,
+                icon: const Icon(Icons.download),
+                label: const Text('表示中の一覧をCSV出力'),
+              ),
+              Text(
+                '出力対象：${visible.length}行',
+                key: const Key('reception-status-export-count'),
+                style: const TextStyle(color: _muted, fontSize: 13),
+              ),
+            ],
+          ),
+          if (exportResult case final result?)
+            Container(
+              key: Key(
+                result.ok
+                    ? 'reception-status-export-done'
+                    : 'reception-status-export-error',
+              ),
+              margin: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.all(10),
+              color: result.ok
+                  ? const Color(0xffeef3f8)
+                  : const Color(0xffffe8e8),
+              child: Text(result.message),
+            ),
         ],
       ),
     ),

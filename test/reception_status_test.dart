@@ -6,17 +6,23 @@
 //  - 入口・権限: システム管理者・イベント管理者のイベント管理画面だけ。スタッフには出さない。サーバーの権限はeventManager
 //  - HEBEL属性(この画面だけの3分類): hebelHaus / hebelMaison / それ以外(none・unset・unknown・属性なし)=該当なし。
 //    属性別集計(参加者単位)・一覧の列・絞り込み(他の条件とAND、追加の通信なし)
+//  - 表示中の一覧のCSV出力: 検索・絞り込み・並び順を反映した全行(描画範囲に依存しない)・固定の8列・UTF-8 BOM・CRLF・
+//    RFC 4180のエスケープ・日本時間・0行は出力しない・二重保存の防止・追加の通信なし
+//  - 表示切替(参加者一覧 / 受付集計): 初期は参加者一覧・切替では通信しない・検索/絞り込み/並び順/CSVの対象は保持・集計値は不変
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/confirmed/access_role.dart';
 import 'package:jm_quick/confirmed/assignment_service.dart';
 import 'package:jm_quick/confirmed/attendance_report_service.dart';
+import 'package:csv/csv.dart';
 import 'package:jm_quick/confirmed/console_page.dart';
 import 'package:jm_quick/confirmed/import_models.dart';
+import 'package:jm_quick/confirmed/reception_status_csv.dart';
 import 'package:jm_quick/confirmed/reception_status_page.dart';
 import 'package:jm_quick/confirmed/reception_status_summary.dart';
 import 'package:jm_quick/confirmed/winner_send_service.dart';
@@ -152,14 +158,54 @@ class _FakeService implements AttendanceReportService {
   }
 }
 
-Widget _page(_FakeService service, {DateTime Function()? now}) => MaterialApp(
+Widget _page(
+  _FakeService service, {
+  DateTime Function()? now,
+  ReceptionStatusCsvSaver? csvSaver,
+}) => MaterialApp(
   home: ReceptionStatusPage(
     eventId: _eventId,
     eventName: '架空イベント',
     service: service,
     now: now ?? () => DateTime.utc(2026, 11, 30, 3, 4, 5),
+    csvSaver: csvSaver ?? (_, _, _) => fail('CSVを保存しない想定'),
   ),
 );
+
+/// 表示切替(参加者一覧 / 受付集計)。切替ボタンは画面上部(常に表示)。
+Future<void> _view(WidgetTester tester, ReceptionStatusView view) async {
+  final chip = find.byKey(ValueKey('reception-status-view-${view.name}'));
+  await tester.ensureVisible(chip);
+  await tester.tap(chip);
+  await tester.pumpAndSettle();
+}
+
+/// 一覧の上の部品(遅延して作られる)までスクロールする。
+Future<void> _scrollTo(WidgetTester tester, Key key) async {
+  final scrollable = find.descendant(
+    of: find.byKey(const Key('reception-status-scroll')),
+    matching: find.byType(Scrollable),
+  ).first;
+  await tester.scrollUntilVisible(find.byKey(key), 200, scrollable: scrollable);
+  await tester.pumpAndSettle();
+}
+
+/// 保存されたCSV(テスト用の差し替え)。
+class _SavedCsv {
+  final saves = <({Uint8List bytes, String fileName, String mimeType})>[];
+  void call(Uint8List bytes, String fileName, String mimeType) =>
+      saves.add((bytes: bytes, fileName: fileName, mimeType: mimeType));
+}
+
+/// CSVを読み戻す(BOMを除いて、CRLF・RFC 4180で解釈)。数値のセルは数値として読める。
+List<List<dynamic>> _parseCsv(Uint8List bytes) {
+  expect(bytes.take(3), [0xef, 0xbb, 0xbf], reason: 'UTF-8 BOM');
+  final text = utf8.decode(bytes.sublist(3));
+  return const CsvToListConverter(eol: '\r\n', shouldParseNumbers: true)
+      .convert(text)
+      .where((r) => !(r.length == 1 && r.first == ''))
+      .toList();
+}
 
 Future<void> _wide(WidgetTester tester, {double height = 2400}) async {
   await tester.binding.setSurfaceSize(Size(1280, height));
@@ -386,6 +432,7 @@ void main() {
       final service = _FakeService([_report()]);
       await tester.pumpWidget(_page(service));
       await tester.pumpAndSettle();
+      await _view(tester, ReceptionStatusView.summary);
       expect(_cells(tester, const ValueKey('hebel-status-hebelHaus')), [_haus, '1件', '1件', '0件', '100.0%']);
       expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '1件', '1件', '0件', '100.0%']);
       expect(_cells(tester, const ValueKey('hebel-status-none')), ['該当なし', '3件', '0件', '3件', '0.0%']);
@@ -393,6 +440,7 @@ void main() {
       final hebelY = tester.getTopLeft(find.byKey(const ValueKey('hebel-status-hebelHaus'))).dy;
       expect(y('total-applications') < hebelY, isTrue);
       expect(hebelY < tester.getTopLeft(find.byKey(const ValueKey('program-status-program-1'))).dy, isTrue);
+      await _view(tester, ReceptionStatusView.list);
       expect(_cells(tester, const ValueKey('status-row-p04-program-3'))[1], '該当なし', reason: 'unset');
       expect(_cells(tester, const ValueKey('status-row-p08-program-2'))[1], '該当なし', reason: '属性なし');
       expect(_cells(tester, const ValueKey('status-row-p03-program-2'))[1], _maison);
@@ -424,6 +472,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(service.calls, [_eventId]);
       expect(find.text('最終更新：2026/11/30 12:04:05（日本時間）'), findsOneWidget);
+      await _view(tester, ReceptionStatusView.summary);
       expect(_tile(tester, 'total-applications'), '申込件数|5件');
       expect(_tile(tester, 'total-planned'), '予定人数（延べ）|12名|複数プログラムの参加を含む');
       expect(_tile(tester, 'total-checked-in'), '受付済み申込件数|2件');
@@ -434,6 +483,16 @@ void main() {
           ['架空の譲渡会（ねこ）', '4名', '1件', '3名', '1件', '50.0%']);
       expect(_cells(tester, const ValueKey('slot-status-program-2-$noSlotLabel')),
           [noSlotLabel, '1名', '0名', '0件', '1件']);
+      void expectNoExtraPersonalData() {
+        expect(find.textContaining('@'), findsNothing);
+        expect(find.textContaining('かくう'), findsNothing);
+        expect(find.textContaining('該当なし（いいえ）'), findsNothing);
+        expect(find.textContaining('未設定（空欄）'), findsNothing);
+        expect(find.textContaining('お住まい'), findsNothing);
+        expect(find.textContaining('対象外'), findsNothing);
+      }
+      expectNoExtraPersonalData();
+      await _view(tester, ReceptionStatusView.list);
       expect(_cells(tester, const ValueKey('status-row-p01-program-1')),
           ['架空 一郎', _haus, '架空の譲渡会（ねこ）', '10:30-11:10', '2名', '3名', '受付済み', '11/30 10:23']);
       expect(_cells(tester, const ValueKey('status-row-p01-program-2')),
@@ -475,7 +534,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(service.calls.length, 2);
       expect(find.text('最終更新：2026/11/30 14:30:00（日本時間）'), findsOneWidget);
+      await _view(tester, ReceptionStatusView.summary);
       expect(_tile(tester, 'total-attended'), '実来場人数（延べ）|5名|複数プログラムの参加を含む');
+      await _view(tester, ReceptionStatusView.list);
       expect(_cells(tester, const ValueKey('status-row-p01-program-1'))[5], '2名', reason: '人数訂正後の値');
       expect(_cells(tester, const ValueKey('status-row-p03-program-3')).sublist(5),
           ['—', '未受付', '—'], reason: '取消済みは未受付');
@@ -522,6 +583,8 @@ void main() {
       expect(find.byKey(const Key('reception-status-error')), findsOneWidget);
       expect(find.textContaining('通信に失敗しました。'), findsOneWidget);
       expect(find.textContaining('前回取得したもの'), findsOneWidget);
+      expect(find.text('表示中 7行 / 全7行'), findsOneWidget, reason: '参加者一覧も前回の内容のまま');
+      await _view(tester, ReceptionStatusView.summary);
       expect(_tile(tester, 'total-applications'), '申込件数|5件');
       expect(find.text('最終更新：2026/11/30 12:04:05（日本時間）'), findsOneWidget, reason: '最終更新は成功した取得の時刻のまま');
       await tester.tap(find.byKey(const Key('reception-status-refresh')));
@@ -533,6 +596,8 @@ void main() {
       await tester.pumpWidget(_page(denied));
       await tester.pumpAndSettle();
       expect(find.text('この操作を行う権限がありません。'), findsOneWidget);
+      expect(find.byKey(const Key('reception-status-count')), findsNothing);
+      await _view(tester, ReceptionStatusView.summary);
       expect(find.byKey(const Key('total-applications')), findsNothing);
       expect(find.text('最終更新：—'), findsOneWidget);
       expect(find.text('最新の状態に更新'), findsOneWidget);
@@ -545,8 +610,10 @@ void main() {
       ]);
       await tester.pumpWidget(_page(service));
       await tester.pumpAndSettle();
+      await _view(tester, ReceptionStatusView.summary);
       expect(_tile(tester, 'total-applications'), '申込件数|0件');
       expect(_tile(tester, 'total-rate'), '受付率|—|受付済み申込件数 ÷ 申込件数');
+      await _view(tester, ReceptionStatusView.list);
       expect(find.text('受付の対象となる参加者はいません。'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
@@ -604,10 +671,12 @@ void main() {
       await tester.pumpWidget(_page(bigService));
       await tester.pumpAndSettle();
       watch.stop();
+      await _view(tester, ReceptionStatusView.summary);
       expect(_tile(tester, 'total-applications'), '申込件数|500件');
       expect(_tile(tester, 'total-rate'), '受付率|50.0%|受付済み申込件数 ÷ 申込件数');
       // HEBEL属性別(i % 3 == 1 の167名、うち受付済みは偶数のi)
       expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '167件', '83件', '84件', '49.7%']);
+      await _view(tester, ReceptionStatusView.list);
       final built = find.byWidgetPredicate(
         (w) => w is Container && w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith('status-row-'),
       );
@@ -647,6 +716,421 @@ void main() {
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_page(_FakeService([_report()])));
       await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('CSV出力(表示中の一覧)', () {
+    List<ReceptionStatusRow> rowsOf(AttendanceReport report) => buildReceptionStatus(report).rows;
+    final at = DateTime.utc(2026, 10, 12, 11, 30); // 日本時間 2026/10/12 20:30:00
+
+    test('固定の8列・1行=参加者×program・数値セル・未受付の人数/時刻と時間の無い申込は空欄・日本時間・HEBEL 3分類', () {
+      final csv = buildReceptionStatusCsv(eventId: _eventId, rows: rowsOf(_report()), exportedAt: at);
+      final table = _parseCsv(csv.bytes);
+      expect(table.first, ['氏名', 'HEBEL属性', '参加プログラム', '参加時間', '予定人数', '実来場人数', '受付状態', '受付時刻']);
+      expect(csv.rowCount, 7);
+      expect(table.length, 8);
+      expect(table[1], ['架空 一郎', _haus, '架空の譲渡会（ねこ）', '10:30-11:10', 2, 3, '受付済み', '2026/11/30 10:23']);
+      expect(table[2], ['架空 一郎', _haus, '架空の譲渡会（いぬ）', '14:10-14:50', 1, '', '未受付', ''], reason: '複数programは別行');
+      expect(table[3], ['架空 二郎', '該当なし', '架空の譲渡会（ねこ）', '11:10-11:50', 2, '', '未受付', ''], reason: 'none');
+      expect(table[4][1], _maison);
+      expect(table[6][1], '該当なし', reason: 'unset');
+      expect(table[7], ['架空 八子', '該当なし', '架空の譲渡会（いぬ）', '', 1, '', '未受付', ''], reason: '属性なし・時間なし');
+      expect(table[1][4], isA<int>(), reason: '予定人数は数値');
+      expect(table[1][5], isA<int>(), reason: '実来場人数は数値');
+      final text = utf8.decode(csv.bytes.sublist(3));
+      expect(RegExp(r'\d(名|件)').hasMatch(text), isFalse, reason: '単位文字を含めない');
+      // 8列以外の個人情報(メール・かな・HEBEL属性の原文/5分類の表示名)・対象外の参加者は含めない
+      for (final banned in ['@', 'かくう', 'お住まい', '該当なし（いいえ）', '未設定（空欄）', '対象外']) {
+        expect(text.contains(banned), isFalse, reason: banned);
+      }
+    });
+
+    test('UTF-8 BOM・CRLF(単独のLFなし)・日本語・ファイル名(イベントIDと日本時間の出力日時)', () {
+      final csv = buildReceptionStatusCsv(eventId: 'ev8893310df0cceab110fb4c0dd5d7ff', rows: rowsOf(_report()), exportedAt: at);
+      expect(csv.fileName, 'JM_Quick_Reception_Status_ev8893310df0cceab110fb4c0dd5d7ff_20261012_203000.csv');
+      expect(csv.bytes.sublist(0, 3), [0xef, 0xbb, 0xbf]);
+      final text = utf8.decode(csv.bytes.sublist(3));
+      expect(RegExp(r'(?<!\r)\n').hasMatch(text), isFalse, reason: '改行はすべてCRLF');
+      expect(text.split('\r\n').where((l) => l.isNotEmpty).length, 8);
+      expect(text.startsWith('氏名,HEBEL属性,参加プログラム,参加時間,予定人数,実来場人数,受付状態,受付時刻\r\n'), isTrue);
+      expect(text.endsWith('\r\n'), isTrue);
+    });
+
+    test('RFC 4180のエスケープ(カンマ・ダブルクォーテーション・改行)と数式の無害化。読み戻すと元の値', () {
+      final csv = buildReceptionStatusCsv(
+        eventId: _eventId,
+        exportedAt: at,
+        rows: rowsOf(AttendanceReport.fromJson(jsonDecode(jsonEncode({
+          'eventId': _eventId,
+          'eventName': '架空イベント',
+          'programs': [{'programId': 'program-1', 'name': '架空,"譲渡会"', 'inEvent': true}],
+          'participants': [
+            _person('x1', '架空, "引用" 太郎', programs: [_entry('program-1', time: '午前\n10:30')]),
+            _person('x2', '=1+1', programs: [_entry('program-1')]),
+          ],
+        })) as Map<String, dynamic>)),
+      );
+      final text = utf8.decode(csv.bytes.sublist(3));
+      expect(text, contains('"架空, ""引用"" 太郎",該当なし,"架空,""譲渡会""","午前\n10:30",2,,未受付,\r\n'));
+      final table = _parseCsv(csv.bytes);
+      expect(table[1].sublist(0, 4), ['架空, "引用" 太郎', '該当なし', '架空,"譲渡会"', '午前\n10:30']);
+      expect(table[2][0], "'=1+1", reason: '数式として評価させない(既存の参加者CSVと同じ無害化)');
+    });
+
+    test('人数訂正後は最新の人数、受付取消後は未受付(人数・時刻は空欄)', () {
+      final csv = buildReceptionStatusCsv(eventId: _eventId, exportedAt: at, rows: rowsOf(_report(overrides: {
+        'p01': [
+          _entry('program-1', time: '10:30-11:10', checkedIn: true, attended: 1, at: '2026-11-30T01:23:45.000Z'),
+          _entry('program-2', planned: 1, time: '14:10-14:50'),
+        ],
+        'p03': [
+          _entry('program-3', planned: 1, time: '13:00-14:00'),
+          _entry('program-2', planned: 3, time: '14:50-15:30', checkedIn: true, attended: 3, at: '2026-11-30T05:10:00.000Z'),
+        ],
+      })));
+      final table = _parseCsv(csv.bytes);
+      expect(table[1].sublist(5), [1, '受付済み', '2026/11/30 10:23']);
+      final talk = table.firstWhere((r) => r[0] == '架空 三子' && r[2] == '架空トーク');
+      expect(talk.sublist(5), ['', '未受付', '']);
+    });
+
+    test('0行は出力しない', () {
+      expect(() => buildReceptionStatusCsv(eventId: _eventId, rows: const [], exportedAt: at), throwsStateError);
+    });
+
+    Finder exportButton() => find.ancestor(
+      of: find.text('表示中の一覧をCSV出力'),
+      matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
+    );
+
+    testWidgets('ボタンと出力対象件数。押すと表示中の全行をブラウザ内で保存(1回だけ)・成功を表示。追加の通信・自動更新なし', (tester) async {
+      await _wide(tester);
+      final service = _FakeService([_report()]);
+      final saved = _SavedCsv();
+      await tester.pumpWidget(_page(service, csvSaver: saved.call, now: () => at));
+      await tester.pumpAndSettle();
+      expect(find.text('表示中の一覧をCSV出力'), findsOneWidget);
+      expect(find.text('出力対象：7行'), findsOneWidget);
+      await _scrollTo(tester, const Key('reception-status-export-csv'));
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')), warnIfMissed: false);
+      await tester.pump();
+      expect(saved.saves.length, 1, reason: '連続クリックでも1回だけ');
+      expect(tester.widget<ButtonStyleButton>(exportButton()).onPressed, isNull, reason: '出力の直後は押せない');
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(saved.saves.length, 1);
+      await tester.pump(const Duration(seconds: 1));
+      expect(tester.widget<ButtonStyleButton>(exportButton()).onPressed, isNotNull, reason: '少し待てば再び出力できる');
+      expect(saved.saves.single.fileName, 'JM_Quick_Reception_Status_${_eventId}_20261012_203000.csv');
+      expect(saved.saves.single.mimeType, 'text/csv;charset=utf-8');
+      expect(_parseCsv(saved.saves.single.bytes).length, 8);
+      expect(find.byKey(const Key('reception-status-export-done')), findsOneWidget);
+      expect(find.textContaining('(7行)'), findsOneWidget);
+      expect(service.calls.length, 1, reason: 'CSV出力では通信しない');
+      await tester.pump(const Duration(hours: 1));
+      expect(service.calls.length, 1, reason: '自動更新なし');
+    });
+
+    testWidgets('検索・program・受付状態・HEBEL属性(AND)と並び順を反映した行だけを、その順で出力する', (tester) async {
+      await _wide(tester);
+      final service = _FakeService([_report()]);
+      final saved = _SavedCsv();
+      await tester.pumpWidget(_page(service, csvSaver: saved.call));
+      await tester.pumpAndSettle();
+      Future<List<List<dynamic>>> export() async {
+        await _scrollTo(tester, const Key('reception-status-export-csv'));
+        await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(seconds: 1));
+        return _parseCsv(saved.saves.last.bytes).skip(1).toList();
+      }
+
+      List<String> keys(List<List<dynamic>> rows) => [for (final r in rows) '${r[0]}/${r[2]}'];
+      await tester.enterText(find.byKey(const Key('reception-status-search')), '一郎');
+      await tester.pumpAndSettle();
+      expect(find.text('出力対象：2行'), findsOneWidget);
+      expect(keys(await export()), ['架空 一郎/架空の譲渡会（ねこ）', '架空 一郎/架空の譲渡会（いぬ）']);
+      await tester.enterText(find.byKey(const Key('reception-status-search')), '');
+      await tester.pumpAndSettle();
+
+      await _choose(tester, 'reception-status-program', '架空の譲渡会（いぬ）');
+      expect(keys(await export()), ['架空 一郎/架空の譲渡会（いぬ）', '架空 三子/架空の譲渡会（いぬ）', '架空 八子/架空の譲渡会（いぬ）']);
+      await _choose(tester, 'reception-status-state', '未受付');
+      expect(keys(await export()), ['架空 一郎/架空の譲渡会（いぬ）', '架空 八子/架空の譲渡会（いぬ）']);
+      await _choose(tester, 'reception-status-hebel', '該当なし');
+      expect(find.text('出力対象：1行'), findsOneWidget);
+      expect(keys(await export()), ['架空 八子/架空の譲渡会（いぬ）']);
+
+      await _choose(tester, 'reception-status-program', 'すべて');
+      await _choose(tester, 'reception-status-state', '受付済み');
+      await _choose(tester, 'reception-status-hebel', 'すべて');
+      await _choose(tester, 'reception-status-sort', '受付時刻(新しい順)');
+      expect(keys(await export()), ['架空 三子/架空の譲渡会（いぬ）', '架空 三子/架空トーク', '架空 一郎/架空の譲渡会（ねこ）']);
+      await _choose(tester, 'reception-status-hebel', _maison);
+      expect(keys(await export()), ['架空 三子/架空の譲渡会（いぬ）', '架空 三子/架空トーク']);
+      expect(service.calls.length, 1, reason: '絞り込み・CSV出力では通信しない');
+    });
+
+    testWidgets('0行のときはボタンを押せない(出力しない)。保存に失敗したらエラーを表示する', (tester) async {
+      await _wide(tester);
+      final saved = _SavedCsv();
+      await tester.pumpWidget(_page(_FakeService([_report()]), csvSaver: saved.call));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('reception-status-search')), '該当しない名前');
+      await tester.pumpAndSettle();
+      expect(find.text('出力対象：0行'), findsOneWidget);
+      expect(tester.widget<ButtonStyleButton>(exportButton()).onPressed, isNull);
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(saved.saves, isEmpty);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(_page(_FakeService([_report()]), csvSaver: (_, _, _) => throw UnsupportedError('保存できない環境')));
+      await tester.pumpAndSettle();
+      await _scrollTo(tester, const Key('reception-status-export-csv'));
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(const Key('reception-status-export-error')), findsOneWidget);
+      expect(find.text('CSVを出力できませんでした。もう一度お試しください。'), findsOneWidget);
+      expect(find.byKey(const Key('reception-status-export-done')), findsNothing);
+    });
+
+    testWidgets('1,000行: 画面に描画されていない行も含め、絞り込みに一致する全行を出力する', (tester) async {
+      await _wide(tester, height: 1600);
+      final big = AttendanceReport.fromJson(jsonDecode(jsonEncode({
+        'eventId': _eventId,
+        'eventName': '架空イベント',
+        'programs': _programs,
+        'participants': [
+          for (var i = 0; i < 500; i++)
+            _person('q${i.toString().padLeft(4, '0')}', '架空 大量$i',
+                hebel: i % 3 == 0 ? _hebel('hebelHaus') : _hebel('hebelMaison'), noHebel: i % 3 == 2, programs: [
+              _entry('program-1', time: '10:30-11:10', checkedIn: i.isEven, attended: i.isEven ? 2 : null,
+                  at: i.isEven ? '2026-11-30T01:00:00.000Z' : null),
+              _entry('program-2', time: '14:10-14:50'),
+            ]),
+        ],
+      })) as Map<String, dynamic>);
+      final service = _FakeService([big]);
+      final saved = _SavedCsv();
+      await tester.pumpWidget(_page(service, csvSaver: saved.call));
+      await tester.pumpAndSettle();
+      final built = find.byWidgetPredicate(
+        (w) => w is Container && w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith('status-row-'),
+      );
+      expect(built.evaluate().length, lessThan(100));
+      await _scrollTo(tester, const Key('reception-status-export-csv'));
+      await tester.pumpAndSettle();
+      expect(find.text('出力対象：1000行'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      final all = _parseCsv(saved.saves.single.bytes);
+      expect(all.length, 1001);
+      expect(all.last[0], '架空 大量499');
+      // 絞り込み欄を画面の中ほどへ(画面上端に接していると、選択肢を押せない)
+      await _scrollTo(tester, const Key('reception-status-hebel'));
+      await tester.drag(find.byKey(const Key('reception-status-scroll')), const Offset(0, 400));
+      await tester.pumpAndSettle();
+      await _choose(tester, 'reception-status-hebel', '該当なし');
+      await _scrollTo(tester, const Key('reception-status-export-csv'));
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      final none = _parseCsv(saved.saves.last.bytes).skip(1).toList();
+      expect(none.length, 166 * 2, reason: 'i % 3 == 2 の166名 × 2program');
+      expect(none.every((r) => r[1] == '該当なし'), isTrue);
+      expect(service.calls.length, 1);
+    });
+
+    testWidgets('390px幅: CSV出力のボタン・件数・結果の表示で重大なoverflowや例外が出ない', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final saved = _SavedCsv();
+      await tester.pumpWidget(_page(_FakeService([_report()]), csvSaver: saved.call));
+      await tester.pumpAndSettle();
+      await _scrollTo(tester, const Key('reception-status-export-csv'));
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(const Key('reception-status-export-done')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('表示切替(参加者一覧 / 受付集計)', () {
+    bool selected(WidgetTester tester, ReceptionStatusView v) =>
+        tester.widget<ChoiceChip>(find.byKey(ValueKey('reception-status-view-${v.name}'))).selected;
+    const summaryKeys = ['total-applications', 'total-rate'];
+    const summaryValueKeys = [
+      ValueKey('hebel-status-hebelHaus'),
+      ValueKey('program-status-program-1'),
+      ValueKey('slot-status-program-1-10:30-11:10'),
+    ];
+    void expectHeader() {
+      expect(find.text('架空イベント'), findsOneWidget);
+      expect(find.byKey(const Key('reception-status-updated-at')), findsOneWidget);
+      expect(find.byKey(const Key('reception-status-refresh')), findsOneWidget);
+    }
+
+    void expectListMode({required bool shown}) {
+      final m = shown ? findsOneWidget : findsNothing;
+      expect(find.byKey(const Key('reception-status-search')), m);
+      expect(find.byKey(const Key('reception-status-export-csv')), m);
+      expect(find.byKey(const Key('reception-status-count')), m);
+      expect(find.byKey(const ValueKey('status-row-p01-program-1')), m);
+    }
+
+    void expectSummaryMode({required bool shown}) {
+      final m = shown ? findsOneWidget : findsNothing;
+      for (final k in summaryKeys) {
+        expect(find.byKey(Key(k)), m, reason: k);
+      }
+      for (final k in summaryValueKeys) {
+        expect(find.byKey(k), m, reason: '$k');
+      }
+    }
+
+    testWidgets('初期表示は参加者一覧(集計表は出さない)。受付集計へ切り替え・戻せる。イベント名・最終更新・更新ボタンは常に表示。切替では通信しない', (tester) async {
+      await _wide(tester);
+      final service = _FakeService([_report()]);
+      await tester.pumpWidget(_page(service));
+      await tester.pumpAndSettle();
+      expect(find.text('参加者一覧'), findsOneWidget);
+      expect(find.text('受付集計'), findsOneWidget);
+      expect(selected(tester, ReceptionStatusView.list), isTrue);
+      expect(selected(tester, ReceptionStatusView.summary), isFalse);
+      expectHeader();
+      expectListMode(shown: true);
+      expectSummaryMode(shown: false);
+      // 参加者一覧がすぐ見える(画面上部に集計表が無い)
+      expect(tester.getTopLeft(find.byKey(const Key('reception-status-search'))).dy, lessThan(600));
+
+      await _view(tester, ReceptionStatusView.summary);
+      expect(selected(tester, ReceptionStatusView.summary), isTrue);
+      expect(selected(tester, ReceptionStatusView.list), isFalse);
+      expectHeader();
+      expectSummaryMode(shown: true);
+      expectListMode(shown: false);
+      expect(_tile(tester, 'total-applications'), '申込件数|5件');
+
+      await _view(tester, ReceptionStatusView.list);
+      expect(selected(tester, ReceptionStatusView.list), isTrue);
+      expectHeader();
+      expectListMode(shown: true);
+      expectSummaryMode(shown: false);
+      for (var i = 0; i < 3; i++) {
+        await _view(tester, ReceptionStatusView.summary);
+        await _view(tester, ReceptionStatusView.list);
+      }
+      expect(service.calls.length, 1, reason: '表示切替では通信しない');
+      await tester.pump(const Duration(hours: 1));
+      expect(service.calls.length, 1, reason: '自動更新なし');
+    });
+
+    testWidgets('検索・絞り込み・並び順は切り替えて戻っても保持され、CSVの出力対象も同じ。集計値は絞り込み・切替で変わらない', (tester) async {
+      await _wide(tester);
+      final service = _FakeService([_report()]);
+      final saved = _SavedCsv();
+      await tester.pumpWidget(_page(service, csvSaver: saved.call));
+      await tester.pumpAndSettle();
+      await _view(tester, ReceptionStatusView.summary);
+      final before = [
+        for (final k in ['total-applications', 'total-planned', 'total-checked-in', 'total-attended', 'total-not-checked-in', 'total-rate'])
+          _tile(tester, k),
+        for (final k in summaryValueKeys) ..._cells(tester, k),
+      ];
+      await _view(tester, ReceptionStatusView.list);
+
+      await tester.enterText(find.byKey(const Key('reception-status-search')), '三子');
+      await tester.pumpAndSettle();
+      await _choose(tester, 'reception-status-hebel', _maison);
+      await _choose(tester, 'reception-status-state', '受付済み');
+      await _choose(tester, 'reception-status-sort', '受付時刻(新しい順)');
+      List<String> order() => [
+        for (final e in tester.widgetList<Container>(find.byWidgetPredicate(
+          (w) => w is Container && w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith('status-row-'),
+        )))
+          (e.key! as ValueKey<String>).value,
+      ];
+      final filteredOrder = order();
+      expect(filteredOrder, ['status-row-p03-program-2', 'status-row-p03-program-3']);
+
+      await _view(tester, ReceptionStatusView.summary);
+      final after = [
+        for (final k in ['total-applications', 'total-planned', 'total-checked-in', 'total-attended', 'total-not-checked-in', 'total-rate'])
+          _tile(tester, k),
+        for (final k in summaryValueKeys) ..._cells(tester, k),
+      ];
+      expect(after, before, reason: '集計は絞り込み・切替で変わらない');
+      await _view(tester, ReceptionStatusView.list);
+
+      expect(tester.widget<TextField>(find.byKey(const Key('reception-status-search'))).controller!.text, '三子');
+      String shown(String key) => [
+        for (final t in tester.widgetList<Text>(find.descendant(of: find.byKey(Key(key)), matching: find.byType(Text))))
+          t.data ?? '',
+      ].join('|');
+      expect(shown('reception-status-hebel'), contains(_maison));
+      expect(shown('reception-status-state'), contains('受付済み'));
+      expect(shown('reception-status-sort'), contains('受付時刻(新しい順)'));
+      expect(shown('reception-status-program'), contains('すべて'));
+      expect(find.text('表示中 2行 / 全7行'), findsOneWidget);
+      expect(find.text('出力対象：2行'), findsOneWidget);
+      expect(order(), filteredOrder, reason: '並び順も保持');
+
+      await _scrollTo(tester, const Key('reception-status-export-csv'));
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      final rows = _parseCsv(saved.saves.single.bytes).skip(1).toList();
+      expect([for (final r in rows) '${r[0]}/${r[2]}'], ['架空 三子/架空の譲渡会（いぬ）', '架空 三子/架空トーク']);
+      expect(service.calls.length, 1);
+    });
+
+    testWidgets('受付集計の表示中も「最新の状態に更新」で再取得でき(モードはそのまま)、通信エラーでは前回の集計を残す', (tester) async {
+      await _wide(tester);
+      final service = _FakeService([
+        _report(),
+        _report(overrides: {
+          'p03': [
+            _entry('program-3', planned: 1, time: '13:00-14:00'),
+            _entry('program-2', planned: 3, time: '14:50-15:30', checkedIn: true, attended: 3, at: '2026-11-30T05:10:00.000Z'),
+          ],
+        }),
+        const WinnerSendException('通信に失敗しました。通信状態を確認して、もう一度お試しください。', code: 'network'),
+      ]);
+      await tester.pumpWidget(_page(service));
+      await tester.pumpAndSettle();
+      await _view(tester, ReceptionStatusView.summary);
+      expect(_tile(tester, 'total-attended'), '実来場人数（延べ）|7名|複数プログラムの参加を含む');
+      await tester.tap(find.byKey(const Key('reception-status-refresh')));
+      await tester.pumpAndSettle();
+      expect(service.calls.length, 2);
+      expect(selected(tester, ReceptionStatusView.summary), isTrue, reason: '更新してもモードは変わらない');
+      expect(_tile(tester, 'total-attended'), '実来場人数（延べ）|6名|複数プログラムの参加を含む', reason: '受付取消の反映');
+      await tester.tap(find.byKey(const Key('reception-status-refresh')));
+      await tester.pumpAndSettle();
+      expect(service.calls.length, 3);
+      expect(find.byKey(const Key('reception-status-error')), findsOneWidget);
+      expect(_tile(tester, 'total-attended'), '実来場人数（延べ）|6名|複数プログラムの参加を含む', reason: '前回の内容を保持');
+      await _view(tester, ReceptionStatusView.list);
+      expect(find.byKey(const Key('reception-status-error')), findsOneWidget, reason: 'エラーはどちらのモードでも表示');
+      expect(find.text('表示中 7行 / 全7行'), findsOneWidget);
+      expect(service.calls.length, 3);
+    });
+
+    testWidgets('390px幅: 切替ボタンと両方のモードで重大なoverflowや例外が出ない', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 2400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_page(_FakeService([_report()])));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await _view(tester, ReceptionStatusView.summary);
+      expect(tester.takeException(), isNull);
+      await _view(tester, ReceptionStatusView.list);
       expect(tester.takeException(), isNull);
     });
   });
@@ -733,7 +1217,11 @@ void main() {
     });
 
     test('受付状況一覧は読み取り専用: 受付操作・Firestoreの直接読取・タイマーを使わない', () {
-      for (final path in ['lib/confirmed/reception_status_page.dart', 'lib/confirmed/reception_status_summary.dart']) {
+      for (final path in [
+        'lib/confirmed/reception_status_page.dart',
+        'lib/confirmed/reception_status_summary.dart',
+        'lib/confirmed/reception_status_csv.dart',
+      ]) {
         final source = File(path).readAsStringSync();
         for (final banned in ['Timer', 'Stream', 'cloud_firestore', 'snapshots', 'checkIn', 'correct', 'cancel', 'PollingSource']) {
           expect(source.contains(banned), isFalse, reason: '$path: $banned');
