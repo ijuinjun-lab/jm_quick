@@ -4,6 +4,8 @@
 //  - 画面: 開いたときに1回だけ取得・手動更新のみ(自動更新なし)・二重取得の防止・エラー時は前回の内容を残す
 //  - 一覧: 1行=参加者×program・氏名検索・program/受付状態の絞り込み・受付時刻の並べ替え・1,000行
 //  - 入口・権限: システム管理者・イベント管理者のイベント管理画面だけ。スタッフには出さない。サーバーの権限はeventManager
+//  - HEBEL属性(この画面だけの3分類): hebelHaus / hebelMaison / それ以外(none・unset・unknown・属性なし)=該当なし。
+//    属性別集計(参加者単位)・一覧の列・絞り込み(他の条件とAND、追加の通信なし)
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -28,6 +30,21 @@ import 'winner_mail_test.dart' show FakeWinnerMailService;
 import 'winner_send_test.dart' show FakeSendService;
 
 const _eventId = 'evStatus0123456789';
+const _haus = 'ヘーベルハウス居住（メゾンオーナー含む）';
+const _maison = 'ヘーベルメゾン居住';
+
+/// 最終実績の応答のHEBEL属性(サーバーの hebelResidenceView と同じ形)。
+Map<String, dynamic> _hebel(String category, {String? raw}) => {
+  'category': category,
+  'label': switch (category) {
+    'hebelHaus' => 'ヘーベルハウスにお住まい（ヘーベルメゾンのオーナー様含む）',
+    'hebelMaison' => 'ヘーベルメゾンにお住まい',
+    'none' => '該当なし（いいえ）',
+    'unset' => '未設定（空欄）',
+    _ => '未知のHEBEL属性',
+  },
+  'rawValue': ?raw,
+};
 
 Map<String, dynamic> _entry(
   String programId, {
@@ -51,6 +68,8 @@ Map<String, dynamic> _person(
   List<Map<String, dynamic>> programs = const [],
   String status = 'active',
   bool? committed = true,
+  Map<String, dynamic>? hebel,
+  bool noHebel = false,
 }) => {
   'participantId': id,
   'importSequence': committed == null ? null : 1,
@@ -60,7 +79,7 @@ Map<String, dynamic> _person(
   'kana': 'かくう$id',
   'email': '$id@example.invalid',
   'status': status,
-  'hebelResidence': {'category': 'none', 'label': '該当なし（いいえ）'},
+  if (!noHebel) 'hebelResidence': hebel ?? _hebel('none'),
   'programs': programs,
 };
 
@@ -84,7 +103,7 @@ AttendanceReport _report({
     'programs': _programs,
     'participants': [
       // ねこ(受付済み・人数は訂正後の3)+ いぬ(未受付)
-      _person('p01', '架空 一郎', programs: programsOf('p01', [
+      _person('p01', '架空 一郎', hebel: _hebel('hebelHaus'), programs: programsOf('p01', [
         _entry('program-1', time: '10:30-11:10', checkedIn: true, attended: 3, at: '2026-11-30T01:23:45.000Z'),
         _entry('program-2', planned: 1, time: '14:10-14:50'),
       ])),
@@ -93,21 +112,21 @@ AttendanceReport _report({
         _entry('program-1', time: '11:10-11:50'),
       ])),
       // いぬ・トークとも受付済み
-      _person('p03', '架空 三子', programs: programsOf('p03', [
+      _person('p03', '架空 三子', hebel: _hebel('hebelMaison'), programs: programsOf('p03', [
         _entry('program-3', planned: 1, time: '13:00-14:00', checkedIn: true, attended: 1, at: '2026-11-30T04:00:00.000Z'),
         _entry('program-2', planned: 3, time: '14:50-15:30', checkedIn: true, attended: 3, at: '2026-11-30T05:10:00.000Z'),
       ])),
-      _person('p04', '架空 四郎', programs: programsOf('p04', [
+      _person('p04', '架空 四郎', hebel: _hebel('unset'), programs: programsOf('p04', [
         _entry('program-3', time: '13:00-14:00'),
       ])),
       // 対象外: 有効でない参加者・未確定の取込回・申込programなし
-      _person('p05', '架空 対象外五', status: 'inactive', programs: [
+      _person('p05', '架空 対象外五', status: 'inactive', hebel: _hebel('hebelHaus'), programs: [
         _entry('program-1', time: '10:30-11:10', checkedIn: true, attended: 9, at: '2026-11-30T01:00:00.000Z'),
       ]),
-      _person('p06', '架空 対象外六', committed: false, programs: [_entry('program-1', planned: 9)]),
+      _person('p06', '架空 対象外六', committed: false, hebel: _hebel('hebelMaison'), programs: [_entry('program-1', planned: 9)]),
       _person('p07', '架空 対象外七'),
-      // 取込回なし(対象)・時間未設定
-      _person('p08', '架空 八子', committed: null, programs: programsOf('p08', [
+      // 取込回なし(対象)・時間未設定・HEBEL属性なし(列の無い取込)
+      _person('p08', '架空 八子', committed: null, noHebel: true, programs: programsOf('p08', [
         _entry('program-2', planned: 1),
       ])),
     ],
@@ -273,9 +292,131 @@ void main() {
       );
       expect(filterReceptionRows(rows, query: '該当なし'), isEmpty);
     });
+
+    test('HEBEL属性の3分類: hebelHaus・hebelMaison以外(none・unset・unknown・属性なし)はすべて「該当なし」', () {
+      expect(ReceptionHebelGroup.fromCategory('hebelHaus'), ReceptionHebelGroup.hebelHaus);
+      expect(ReceptionHebelGroup.fromCategory('hebelMaison'), ReceptionHebelGroup.hebelMaison);
+      for (final c in ['none', 'unset', 'unknown', null, '', '想定外の値']) {
+        expect(ReceptionHebelGroup.fromCategory(c), ReceptionHebelGroup.none, reason: '$c');
+      }
+      expect([for (final g in ReceptionHebelGroup.values) g.label], [_haus, _maison, '該当なし'], reason: '3分類だけ');
+      final s = buildReceptionStatus(AttendanceReport.fromJson(jsonDecode(jsonEncode({
+        'eventId': _eventId,
+        'eventName': '架空イベント',
+        'programs': _programs,
+        'participants': [
+          _person('u1', '架空 未知', hebel: _hebel('unknown', raw: '架空の想定外の回答'), programs: [_entry('program-1')]),
+          _person('u2', '架空 属性なし', noHebel: true, programs: [_entry('program-1')]),
+        ],
+      })) as Map<String, dynamic>));
+      expect(s.rows.map((r) => r.hebel), [ReceptionHebelGroup.none, ReceptionHebelGroup.none]);
+      expect(s.hebelGroups.last.applications, 2);
+    });
+
+    test('HEBEL属性別: 参加者単位(複数programでも1件)。受付済み=いずれかのprogramが受付済み。合計は全体の申込件数と一致。対象外は数えない', () {
+      final s = buildReceptionStatus(_report());
+      String line(ReceptionHebelStatus g) =>
+          '${g.group.name}:${g.applications}/${g.checkedInApplications}/${g.notCheckedInApplications}/${formatRate(g.rate)}';
+      expect(s.hebelGroups.map(line), [
+        'hebelHaus:1/1/0/100.0%', // p01(ねこ受付済み・いぬ未受付の2programで1件)。対象外のp05は数えない
+        'hebelMaison:1/1/0/100.0%', // p03(2programとも受付済みで1件)。未確定の取込回のp06は数えない
+        'none:3/0/3/0.0%', // p02(none)・p04(unset)・p08(属性なし)
+      ]);
+      expect(s.hebelGroups.fold(0, (n, g) => n + g.applications), s.totals.applications);
+      expect(s.hebelGroups.fold(0, (n, g) => n + g.checkedInApplications), s.totals.checkedInApplications);
+    });
+
+    test('HEBEL属性別: 0件の分類も常に3分類を表示し、受付率は「—」。全員未回答のイベント(10名)は該当なし10件', () {
+      final s = buildReceptionStatus(AttendanceReport.fromJson(jsonDecode(jsonEncode({
+        'eventId': _eventId,
+        'eventName': '架空イベント',
+        'programs': _programs,
+        'participants': [
+          for (var i = 0; i < 10; i++)
+            _person('e$i', '架空 検証$i', hebel: _hebel('unset'), programs: [_entry('program-2', time: '15:30-16:10')]),
+        ],
+      })) as Map<String, dynamic>));
+      expect([for (final g in s.hebelGroups) (g.group, g.applications, formatRate(g.rate))], [
+        (ReceptionHebelGroup.hebelHaus, 0, '—'),
+        (ReceptionHebelGroup.hebelMaison, 0, '—'),
+        (ReceptionHebelGroup.none, 10, '0.0%'),
+      ]);
+      final empty = buildReceptionStatus(AttendanceReport.fromJson({
+        'eventId': _eventId, 'eventName': '架空イベント', 'programs': _programs, 'participants': <Object>[],
+      }));
+      expect(empty.hebelGroups.map((g) => (g.applications, g.rate)), [(0, null), (0, null), (0, null)]);
+    });
+
+    test('HEBEL属性別: 受付取消で受付済み件数が減り、人数訂正では申込件数・受付済み件数は変わらない', () {
+      final cancelled = buildReceptionStatus(_report(overrides: {
+        'p01': [_entry('program-1', time: '10:30-11:10'), _entry('program-2', planned: 1, time: '14:10-14:50')],
+      }));
+      expect(cancelled.hebelGroups.first.checkedInApplications, 0);
+      expect(cancelled.hebelGroups.first.applications, 1);
+      expect(cancelled.hebelGroups.first.rate, 0.0);
+      final corrected = buildReceptionStatus(_report(overrides: {
+        'p01': [
+          _entry('program-1', time: '10:30-11:10', checkedIn: true, attended: 1, at: '2026-11-30T01:23:45.000Z'),
+          _entry('program-2', planned: 1, time: '14:10-14:50'),
+        ],
+      }));
+      expect(
+        [for (final g in corrected.hebelGroups) (g.applications, g.checkedInApplications)],
+        [for (final g in buildReceptionStatus(_report()).hebelGroups) (g.applications, g.checkedInApplications)],
+      );
+    });
+
+    test('HEBEL属性の絞り込みは氏名・program・受付状態とAND', () {
+      final rows = buildReceptionStatus(_report()).rows;
+      String ids(List<ReceptionStatusRow> list) => [for (final r in list) '${r.participantId}:${r.programId}'].join(',');
+      expect(ids(filterReceptionRows(rows, hebel: ReceptionHebelGroup.hebelHaus)), 'p01:program-1,p01:program-2');
+      expect(ids(filterReceptionRows(rows, hebel: ReceptionHebelGroup.none)), 'p02:program-1,p04:program-3,p08:program-2');
+      expect(ids(filterReceptionRows(rows, hebel: ReceptionHebelGroup.hebelHaus, state: ReceptionStateFilter.notCheckedIn)),
+          'p01:program-2');
+      expect(ids(filterReceptionRows(rows, hebel: ReceptionHebelGroup.none, programId: 'program-3')), 'p04:program-3');
+      expect(ids(filterReceptionRows(rows, hebel: ReceptionHebelGroup.hebelMaison, query: '一郎')), '');
+      expect(ids(filterReceptionRows(rows, hebel: ReceptionHebelGroup.hebelMaison, query: '三子', sort: ReceptionSort.checkedInAtAsc)),
+          'p03:program-3,p03:program-2');
+    });
   });
 
   group('画面', () {
+    testWidgets('HEBEL属性別受付状況(全体とprogram別の間・3分類)と一覧のHEBEL属性列。絞り込みは他の条件とAND・追加の通信なし', (tester) async {
+      await _wide(tester);
+      final service = _FakeService([_report()]);
+      await tester.pumpWidget(_page(service));
+      await tester.pumpAndSettle();
+      expect(_cells(tester, const ValueKey('hebel-status-hebelHaus')), [_haus, '1件', '1件', '0件', '100.0%']);
+      expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '1件', '1件', '0件', '100.0%']);
+      expect(_cells(tester, const ValueKey('hebel-status-none')), ['該当なし', '3件', '0件', '3件', '0.0%']);
+      double y(String key) => tester.getTopLeft(find.byKey(Key(key))).dy;
+      final hebelY = tester.getTopLeft(find.byKey(const ValueKey('hebel-status-hebelHaus'))).dy;
+      expect(y('total-applications') < hebelY, isTrue);
+      expect(hebelY < tester.getTopLeft(find.byKey(const ValueKey('program-status-program-1'))).dy, isTrue);
+      expect(_cells(tester, const ValueKey('status-row-p04-program-3'))[1], '該当なし', reason: 'unset');
+      expect(_cells(tester, const ValueKey('status-row-p08-program-2'))[1], '該当なし', reason: '属性なし');
+      expect(_cells(tester, const ValueKey('status-row-p03-program-2'))[1], _maison);
+
+      await _choose(tester, 'reception-status-hebel', '該当なし');
+      expect(find.text('表示中 3行 / 全7行'), findsOneWidget);
+      await _choose(tester, 'reception-status-program', '架空トーク');
+      expect(find.text('表示中 1行 / 全7行'), findsOneWidget);
+      expect(find.byKey(const ValueKey('status-row-p04-program-3')), findsOneWidget);
+      await _choose(tester, 'reception-status-state', '受付済み');
+      expect(find.text('条件に一致する参加者はいません。'), findsOneWidget);
+      await _choose(tester, 'reception-status-program', 'すべて');
+      await _choose(tester, 'reception-status-state', 'すべて');
+      await _choose(tester, 'reception-status-hebel', _haus);
+      await tester.enterText(find.byKey(const Key('reception-status-search')), '一郎');
+      await tester.pumpAndSettle();
+      expect(find.text('表示中 2行 / 全7行'), findsOneWidget);
+      await _choose(tester, 'reception-status-sort', '受付時刻(新しい順)');
+      await _choose(tester, 'reception-status-hebel', 'すべて');
+      expect(find.text('表示中 2行 / 全7行'), findsOneWidget);
+      expect(service.calls.length, 1, reason: '絞り込み・検索・並べ替えでは再取得しない');
+      await tester.pump(const Duration(hours: 1));
+      expect(service.calls.length, 1);
+    });
     testWidgets('開いたときに1回だけ取得し、全体・program別・時間帯別・一覧と最終更新(日本時間)を表示する', (tester) async {
       await _wide(tester);
       final service = _FakeService([_report()]);
@@ -294,14 +435,17 @@ void main() {
       expect(_cells(tester, const ValueKey('slot-status-program-2-$noSlotLabel')),
           [noSlotLabel, '1名', '0名', '0件', '1件']);
       expect(_cells(tester, const ValueKey('status-row-p01-program-1')),
-          ['架空 一郎', '架空の譲渡会（ねこ）', '10:30-11:10', '2名', '3名', '受付済み', '11/30 10:23']);
+          ['架空 一郎', _haus, '架空の譲渡会（ねこ）', '10:30-11:10', '2名', '3名', '受付済み', '11/30 10:23']);
       expect(_cells(tester, const ValueKey('status-row-p01-program-2')),
-          ['架空 一郎', '架空の譲渡会（いぬ）', '14:10-14:50', '1名', '—', '未受付', '—']);
+          ['架空 一郎', _haus, '架空の譲渡会（いぬ）', '14:10-14:50', '1名', '—', '未受付', '—'],
+          reason: '複数programの参加者は各行に同じHEBEL属性');
       expect(find.text('表示中 7行 / 全7行'), findsOneWidget);
-      // 不要な個人情報(メールアドレス・かな・HEBEL属性)・対象外の参加者は表示しない
+      // 不要な個人情報(メールアドレス・かな)・保存されているHEBEL属性の原文/5分類の表示名・対象外の参加者は表示しない
       expect(find.textContaining('@'), findsNothing);
       expect(find.textContaining('かくう'), findsNothing);
-      expect(find.textContaining('該当なし'), findsNothing);
+      expect(find.textContaining('該当なし（いいえ）'), findsNothing);
+      expect(find.textContaining('未設定（空欄）'), findsNothing);
+      expect(find.textContaining('お住まい'), findsNothing);
       expect(find.textContaining('対象外'), findsNothing);
     });
 
@@ -332,8 +476,8 @@ void main() {
       expect(service.calls.length, 2);
       expect(find.text('最終更新：2026/11/30 14:30:00（日本時間）'), findsOneWidget);
       expect(_tile(tester, 'total-attended'), '実来場人数（延べ）|5名|複数プログラムの参加を含む');
-      expect(_cells(tester, const ValueKey('status-row-p01-program-1'))[4], '2名', reason: '人数訂正後の値');
-      expect(_cells(tester, const ValueKey('status-row-p03-program-3')).sublist(4),
+      expect(_cells(tester, const ValueKey('status-row-p01-program-1'))[5], '2名', reason: '人数訂正後の値');
+      expect(_cells(tester, const ValueKey('status-row-p03-program-3')).sublist(5),
           ['—', '未受付', '—'], reason: '取消済みは未受付');
       await tester.pump(const Duration(hours: 1));
       expect(service.calls.length, 2);
@@ -447,7 +591,8 @@ void main() {
         'programs': _programs,
         'participants': [
           for (var i = 0; i < 500; i++)
-            _person('q${i.toString().padLeft(4, '0')}', '架空 大量$i', programs: [
+            _person('q${i.toString().padLeft(4, '0')}', '架空 大量$i',
+                hebel: i % 3 == 0 ? _hebel('hebelHaus') : _hebel('hebelMaison'), noHebel: i % 3 == 2, programs: [
               _entry('program-1', time: '10:30-11:10', checkedIn: i.isEven, attended: i.isEven ? 2 : null,
                   at: i.isEven ? '2026-11-30T01:00:00.000Z' : null),
               _entry('program-2', time: '14:10-14:50'),
@@ -455,12 +600,14 @@ void main() {
         ],
       })) as Map<String, dynamic>);
       final watch = Stopwatch()..start();
-      await tester.pumpWidget(_page(_FakeService([big])));
+      final bigService = _FakeService([big]);
+      await tester.pumpWidget(_page(bigService));
       await tester.pumpAndSettle();
       watch.stop();
-      expect(find.text('表示中 1000行 / 全1000行'), findsOneWidget);
       expect(_tile(tester, 'total-applications'), '申込件数|500件');
       expect(_tile(tester, 'total-rate'), '受付率|50.0%|受付済み申込件数 ÷ 申込件数');
+      // HEBEL属性別(i % 3 == 1 の167名、うち受付済みは偶数のi)
+      expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '167件', '83件', '84件', '49.7%']);
       final built = find.byWidgetPredicate(
         (w) => w is Container && w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith('status-row-'),
       );
@@ -469,15 +616,28 @@ void main() {
         of: find.byKey(const Key('reception-status-scroll')),
         matching: find.byType(Scrollable),
       ).first;
+      await tester.scrollUntilVisible(find.byKey(const Key('reception-status-count')), 300, scrollable: scrollable);
+      expect(find.text('表示中 1000行 / 全1000行'), findsOneWidget);
       // 最後の行までスクロールできる(スクロール中も作られている行は一部だけ)
       await tester.scrollUntilVisible(find.byKey(const ValueKey('status-row-q0499-program-2')), 3000, scrollable: scrollable);
       expect(built.evaluate().length, lessThan(100));
-      await tester.scrollUntilVisible(find.byKey(const Key('reception-status-search')), -3000, scrollable: scrollable);
+      tester.state<ScrollableState>(scrollable).position.jumpTo(0);
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.byKey(const Key('reception-status-search')), 300, scrollable: scrollable);
       await tester.enterText(find.byKey(const Key('reception-status-search')), '大量499');
       await tester.pumpAndSettle();
       expect(find.text('表示中 2行 / 全1000行'), findsOneWidget);
       await tester.scrollUntilVisible(find.byKey(const ValueKey('status-row-q0499-program-2')), 300, scrollable: scrollable);
       expect(find.byKey(const ValueKey('status-row-q0499-program-1')), findsOneWidget);
+      // HEBEL属性の絞り込み(i % 3 == 1 の167名 × 2program)。取得済みのデータで絞り込み、通信しない
+      tester.state<ScrollableState>(scrollable).position.jumpTo(0);
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.byKey(const Key('reception-status-search')), 300, scrollable: scrollable);
+      await tester.enterText(find.byKey(const Key('reception-status-search')), '');
+      await tester.pumpAndSettle();
+      await _choose(tester, 'reception-status-hebel', _maison);
+      expect(find.text('表示中 334行 / 全1000行'), findsOneWidget);
+      expect(bigService.calls.length, 1);
       expect(watch.elapsed, lessThan(const Duration(seconds: 10)));
       expect(tester.takeException(), isNull);
     });

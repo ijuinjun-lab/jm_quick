@@ -10,6 +10,27 @@ import 'attendance_report_service.dart';
 /// ■ 1行 = 参加者×program。1人が複数programに申し込んでいれば、その数だけ行・program別の件数に数える。
 ///   全体の申込件数は参加者(participant)単位で1件。予定人数・実来場人数の全体値はprogramの合計(延べ)。
 /// ■ program名・表示順はイベント設定(応答のprograms)から。時間帯は応答の timeText(slotLabel・startAt/endAt由来)。
+/// ■ HEBEL属性は、この画面の表示・集計だけ3分類にまとめる([ReceptionHebelGroup])。保存されている分類・原文は変えず、
+///   受付画面・最終実績Excel・取込の分類(hebel_residence.js の5分類)にも影響しない。
+
+/// 主催者用受付状況一覧のHEBEL属性(3分類)。
+///   hebelHaus → ヘーベルハウス居住(メゾンオーナー含む)、hebelMaison → ヘーベルメゾン居住、
+///   それ以外(none・unset・unknown・HEBEL属性の無い参加者)→ 該当なし。
+enum ReceptionHebelGroup {
+  hebelHaus('ヘーベルハウス居住（メゾンオーナー含む）'),
+  hebelMaison('ヘーベルメゾン居住'),
+  none('該当なし');
+
+  const ReceptionHebelGroup(this.label);
+  final String label;
+
+  /// 最終実績の応答の分類(participant.hebelResidence.category。属性なしはnull)→ 3分類。
+  static ReceptionHebelGroup fromCategory(String? category) => switch (category) {
+    'hebelHaus' => ReceptionHebelGroup.hebelHaus,
+    'hebelMaison' => ReceptionHebelGroup.hebelMaison,
+    _ => ReceptionHebelGroup.none,
+  };
+}
 
 /// 一覧の1行(参加者×program)。
 class ReceptionStatusRow {
@@ -21,6 +42,7 @@ class ReceptionStatusRow {
     required this.programIndex,
     required this.order,
     required this.checkedIn,
+    required this.hebel,
     this.timeText,
     this.plannedCount,
     this.attendedCount,
@@ -37,6 +59,9 @@ class ReceptionStatusRow {
 
   /// 既定の並び順(サーバーの参加者の順 → programの表示順)。
   final int order;
+
+  /// 参加者のHEBEL属性(3分類。同じ参加者の行はすべて同じ)。
+  final ReceptionHebelGroup hebel;
   final String? timeText;
   final int? plannedCount;
 
@@ -75,6 +100,28 @@ class ReceptionTotals {
   int get notCheckedInApplications => applications - checkedInApplications;
 
   /// 受付率(%)= 受付済み申込件数 ÷ 申込件数 × 100。申込0件ならnull。
+  double? get rate => ratePercent(checkedInApplications, applications);
+}
+
+/// HEBEL属性別の集計(参加者単位。複数programでも1件)。
+class ReceptionHebelStatus {
+  const ReceptionHebelStatus({
+    required this.group,
+    required this.applications,
+    required this.checkedInApplications,
+  });
+
+  final ReceptionHebelGroup group;
+
+  /// 申込件数(参加者単位)。
+  final int applications;
+
+  /// 受付済み件数(いずれかのprogramが受付済みの参加者)。
+  final int checkedInApplications;
+
+  int get notCheckedInApplications => applications - checkedInApplications;
+
+  /// 受付率(%)= 受付済み件数 ÷ 申込件数 × 100。申込0件ならnull。
   double? get rate => ratePercent(checkedInApplications, applications);
 }
 
@@ -133,11 +180,15 @@ class ReceptionProgramStatus {
 class ReceptionStatus {
   const ReceptionStatus({
     required this.totals,
+    required this.hebelGroups,
     required this.programs,
     required this.rows,
   });
 
   final ReceptionTotals totals;
+
+  /// HEBEL属性別(3分類を常にこの順で。0件の分類も含む)。申込件数の合計は全体の申込件数と一致する。
+  final List<ReceptionHebelStatus> hebelGroups;
   final List<ReceptionProgramStatus> programs;
 
   /// 既定の並び順(サーバーの参加者の順 → programの表示順)。
@@ -182,10 +233,18 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
   final rows = <ReceptionStatusRow>[];
   var applications = 0;
   var checkedInApplications = 0;
+  final hebelApplications = {for (final g in ReceptionHebelGroup.values) g: 0};
+  final hebelCheckedIn = {for (final g in ReceptionHebelGroup.values) g: 0};
   for (final p in report.participants) {
     if (!isReceptionTarget(p) || p.programs.isEmpty) continue;
+    final hebel = ReceptionHebelGroup.fromCategory(p.hebelCategory);
+    final anyCheckedIn = p.programs.any((e) => e.checkedIn);
     applications += 1;
-    if (p.programs.any((e) => e.checkedIn)) checkedInApplications += 1;
+    hebelApplications[hebel] = hebelApplications[hebel]! + 1;
+    if (anyCheckedIn) {
+      checkedInApplications += 1;
+      hebelCheckedIn[hebel] = hebelCheckedIn[hebel]! + 1;
+    }
     final entries = [...p.programs]
       ..sort(
         (a, b) => (programIndex[a.programId] ?? 1 << 30).compareTo(
@@ -209,6 +268,7 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
           timeText: time == null || time.isEmpty ? null : time,
           plannedCount: e.plannedCount,
           checkedIn: e.checkedIn,
+          hebel: hebel,
           attendedCount: e.checkedIn ? e.attendedCount : null,
           checkedInAt: e.checkedIn ? e.checkedInAt : null,
         ),
@@ -262,6 +322,14 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
       checkedInApplications: checkedInApplications,
       attendedTotal: _sum(rows.map((r) => r.attendedCount)),
     ),
+    hebelGroups: [
+      for (final g in ReceptionHebelGroup.values)
+        ReceptionHebelStatus(
+          group: g,
+          applications: hebelApplications[g]!,
+          checkedInApplications: hebelCheckedIn[g]!,
+        ),
+    ],
     programs: programs,
     rows: rows,
   );
@@ -293,13 +361,14 @@ enum ReceptionSort {
 String _normalizeName(String value) =>
     value.replaceAll(RegExp(r'[\s　]'), '').toLowerCase();
 
-/// 氏名(空白を無視した部分一致)・program・受付状態で絞り込み、並べ替える。
+/// 氏名(空白を無視した部分一致)・program・受付状態・HEBEL属性で絞り込み(すべてAND)、並べ替える。
 /// 受付時刻の並べ替えでは、未受付の行は常に末尾(既定の順のまま)。
 List<ReceptionStatusRow> filterReceptionRows(
   List<ReceptionStatusRow> rows, {
   String query = '',
   String? programId,
   ReceptionStateFilter state = ReceptionStateFilter.all,
+  ReceptionHebelGroup? hebel,
   ReceptionSort sort = ReceptionSort.standard,
 }) {
   final q = _normalizeName(query);
@@ -307,6 +376,7 @@ List<ReceptionStatusRow> filterReceptionRows(
     if (programId != null && r.programId != programId) return false;
     if (state == ReceptionStateFilter.checkedIn && !r.checkedIn) return false;
     if (state == ReceptionStateFilter.notCheckedIn && r.checkedIn) return false;
+    if (hebel != null && r.hebel != hebel) return false;
     if (q.isNotEmpty && !_normalizeName(r.name).contains(q)) return false;
     return true;
   }).toList();

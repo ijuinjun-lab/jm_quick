@@ -11,7 +11,8 @@ import 'winner_send_service.dart';
 ///   新しいAPI・Firestoreの直接読取・購読は使わない。データは一切変更しない。
 /// ■ 更新は手動のみ: 画面を開いたときに1回、以降は「最新の状態に更新」を押したときだけ取得する(タイマー・自動更新なし)。
 ///   取得中は二重に取得しない。失敗しても前回取得した内容は残し、エラーを表示する。
-/// ■ 表示する個人情報は氏名だけ(メールアドレス・かな・HEBEL属性は表示しない)。
+/// ■ 表示する個人情報は氏名と、HEBEL属性の3分類(この画面だけの表示・集計上の分類。保存データ・原文は表示も変更もしない)。
+///   メールアドレス・かなは表示しない。HEBEL属性の絞り込みも取得済みのデータで行う(追加の通信なし)。
 class ReceptionStatusPage extends StatefulWidget {
   const ReceptionStatusPage({
     super.key,
@@ -63,6 +64,7 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
   final query = TextEditingController();
   String? programFilter;
   ReceptionStateFilter stateFilter = ReceptionStateFilter.all;
+  ReceptionHebelGroup? hebelFilter;
   ReceptionSort sort = ReceptionSort.standard;
   List<ReceptionStatusRow> visible = const [];
 
@@ -115,6 +117,7 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
             query: query.text,
             programId: programFilter,
             state: stateFilter,
+            hebel: hebelFilter,
             sort: sort,
           );
   }
@@ -149,6 +152,7 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
                       ),
                     if (s != null) ...[
                       _TotalsSection(totals: s.totals),
+                      _HebelSection(groups: s.hebelGroups),
                       _ProgramSection(programs: s.programs),
                       _SlotSection(programs: s.programs),
                       _listControls(s),
@@ -291,6 +295,16 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
                 value: stateFilter,
                 items: [for (final f in ReceptionStateFilter.values) (f, f.label)],
                 onChanged: (v) => _update(() => stateFilter = v!),
+              ),
+              _dropdown<ReceptionHebelGroup?>(
+                key: const Key('reception-status-hebel'),
+                label: 'HEBEL属性',
+                value: hebelFilter,
+                items: [
+                  (null, 'すべて'),
+                  for (final g in ReceptionHebelGroup.values) (g, g.label),
+                ],
+                onChanged: (v) => _update(() => hebelFilter = v),
               ),
               _dropdown<ReceptionSort>(
                 key: const Key('reception-status-sort'),
@@ -495,6 +509,52 @@ class _TableLine extends StatelessWidget {
   );
 }
 
+/// HEBEL属性別受付状況(3分類を常に表示。参加者単位)。
+class _HebelSection extends StatelessWidget {
+  const _HebelSection({required this.groups});
+  final List<ReceptionHebelStatus> groups;
+
+  static const _flexes = [5, 2, 2, 2, 2];
+
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: const EdgeInsets.only(bottom: 14),
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const _SectionTitle('HEBEL属性別受付状況'),
+          const SizedBox(height: 4),
+          const Text(
+            '件数は参加者単位です(複数のプログラムに申し込んだ方も1件)。受付率は 受付済み件数 ÷ 申込件数。'
+            '回答なし・属性データなし・判定できない回答は「該当なし」に含めます。',
+            style: TextStyle(color: _muted, fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          const _TableLine(
+            header: true,
+            flexes: _flexes,
+            cells: ['HEBEL属性', '申込件数', '受付済み件数', '未受付件数', '受付率'],
+          ),
+          for (final g in groups)
+            _TableLine(
+              lineKey: ValueKey('hebel-status-${g.group.name}'),
+              flexes: _flexes,
+              cells: [
+                g.group.label,
+                '${g.applications}件',
+                '${g.checkedInApplications}件',
+                '${g.notCheckedInApplications}件',
+                formatRate(g.rate),
+              ],
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
 class _ProgramSection extends StatelessWidget {
   const _ProgramSection({required this.programs});
   final List<ReceptionProgramStatus> programs;
@@ -588,7 +648,7 @@ class _SlotSection extends StatelessWidget {
   );
 }
 
-const _rowFlexes = [4, 4, 3, 2, 2, 2, 3];
+const _rowFlexes = [4, 4, 4, 3, 2, 2, 2, 3];
 
 class _RowHeader extends StatelessWidget {
   const _RowHeader();
@@ -600,6 +660,7 @@ class _RowHeader extends StatelessWidget {
       children: [
         for (final (i, text) in const [
           '氏名',
+          'HEBEL属性',
           '参加プログラム',
           '参加時間',
           '予定人数',
@@ -628,7 +689,8 @@ class _StatusRowTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     Widget cell(int i, Widget child) => Expanded(flex: _rowFlexes[i], child: child);
-    Widget text(String value) => Text(value, overflow: TextOverflow.ellipsis);
+    Widget text(String value, {int maxLines = 1}) =>
+        Text(value, maxLines: maxLines, overflow: TextOverflow.ellipsis);
     return Container(
       key: ValueKey('status-row-${row.participantId}-${row.programId}'),
       color: striped ? const Color(0xfff9fafb) : Colors.white,
@@ -636,12 +698,13 @@ class _StatusRowTile extends StatelessWidget {
       child: Row(
         children: [
           cell(0, text(row.name)),
-          cell(1, text(row.programName)),
-          cell(2, text(row.timeText ?? '—')),
-          cell(3, text(row.plannedCount == null ? '—' : '${row.plannedCount}名')),
-          cell(4, text(row.attendedCount == null ? '—' : '${row.attendedCount}名')),
+          cell(1, text(row.hebel.label, maxLines: 2)),
+          cell(2, text(row.programName)),
+          cell(3, text(row.timeText ?? '—')),
+          cell(4, text(row.plannedCount == null ? '—' : '${row.plannedCount}名')),
+          cell(5, text(row.attendedCount == null ? '—' : '${row.attendedCount}名')),
           cell(
-            5,
+            6,
             Align(
               alignment: Alignment.centerLeft,
               child: Container(
@@ -662,7 +725,7 @@ class _StatusRowTile extends StatelessWidget {
               ),
             ),
           ),
-          cell(6, text(row.checkedInAt == null ? '—' : formatJstShort(row.checkedInAt!))),
+          cell(7, text(row.checkedInAt == null ? '—' : formatJstShort(row.checkedInAt!))),
         ],
       ),
     );
