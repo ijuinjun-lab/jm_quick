@@ -8,6 +8,7 @@
 //    属性別集計(参加者単位)・一覧の列・絞り込み(他の条件とAND、追加の通信なし)
 //  - 表示中の一覧のCSV出力: 検索・絞り込み・並び順を反映した全行(描画範囲に依存しない)・固定の8列・UTF-8 BOM・CRLF・
 //    RFC 4180のエスケープ・日本時間・0行は出力しない・二重保存の防止・追加の通信なし
+//    先頭に抽出条件の情報欄(10項目・2列)→ 空行 → 参加者一覧。押した時点の条件・データ最終更新日時/CSV出力日時・抽出件数
 //  - 表示切替(参加者一覧 / 受付集計): 初期は参加者一覧・切替では通信しない・検索/絞り込み/並び順/CSVの対象は保持・集計値は不変
 import 'dart:async';
 import 'dart:convert';
@@ -198,14 +199,36 @@ class _SavedCsv {
 }
 
 /// CSVを読み戻す(BOMを除いて、CRLF・RFC 4180で解釈)。数値のセルは数値として読める。
+/// 構成(情報欄10行×2列 → 空行1行 → 見出し・データ)を確かめたうえで、参加者一覧の部分(見出し・データ)を返す。
 List<List<dynamic>> _parseCsv(Uint8List bytes) {
+  final all = _parseCsvAll(bytes);
+  bool blank(List<dynamic> r) => r.isEmpty || (r.length == 1 && r.first == '');
+  expect(all.take(10).map((r) => r.length), List.filled(10, 2), reason: '情報欄は「項目名,値」の2列');
+  expect([for (final r in all.take(10)) r.first], receptionStatusCsvInfoLabels);
+  expect(blank(all[10]), isTrue, reason: '情報欄と参加者一覧の間は空行1行');
+  expect(all[11], receptionStatusCsvHeaders);
+  final table = all.skip(11).where((r) => !blank(r)).toList();
+  expect(table.every((r) => r.length == 8), isTrue, reason: '参加者データ部分は全行8列');
+  return table;
+}
+
+/// CSV全体(BOMを除いて、CRLF・RFC 4180で解釈)。数値のセルは数値として読める。
+List<List<dynamic>> _parseCsvAll(Uint8List bytes) {
   expect(bytes.take(3), [0xef, 0xbb, 0xbf], reason: 'UTF-8 BOM');
   final text = utf8.decode(bytes.sublist(3));
-  return const CsvToListConverter(eol: '\r\n', shouldParseNumbers: true)
-      .convert(text)
-      .where((r) => !(r.length == 1 && r.first == ''))
-      .toList();
+  return const CsvToListConverter(eol: '\r\n', shouldParseNumbers: true).convert(text);
 }
+
+/// 情報欄(項目名 → 値)。
+Map<String, dynamic> _csvInfo(Uint8List bytes) => {
+  for (final r in _parseCsvAll(bytes).take(10)) r[0] as String: r[1],
+};
+
+/// 条件を指定しないときの情報欄(純粋関数のテスト用)。
+final _noConditions = ReceptionStatusCsvConditions(
+  eventName: '架空イベント',
+  dataUpdatedAt: DateTime.utc(2026, 10, 12, 11),
+);
 
 Future<void> _wide(WidgetTester tester, {double height = 2400}) async {
   await tester.binding.setSurfaceSize(Size(1280, height));
@@ -725,7 +748,7 @@ void main() {
     final at = DateTime.utc(2026, 10, 12, 11, 30); // 日本時間 2026/10/12 20:30:00
 
     test('固定の8列・1行=参加者×program・数値セル・未受付の人数/時刻と時間の無い申込は空欄・日本時間・HEBEL 3分類', () {
-      final csv = buildReceptionStatusCsv(eventId: _eventId, rows: rowsOf(_report()), exportedAt: at);
+      final csv = buildReceptionStatusCsv(eventId: _eventId, rows: rowsOf(_report()), exportedAt: at, conditions: _noConditions);
       final table = _parseCsv(csv.bytes);
       expect(table.first, ['氏名', 'HEBEL属性', '参加プログラム', '参加時間', '予定人数', '実来場人数', '受付状態', '受付時刻']);
       expect(csv.rowCount, 7);
@@ -747,13 +770,15 @@ void main() {
     });
 
     test('UTF-8 BOM・CRLF(単独のLFなし)・日本語・ファイル名(イベントIDと日本時間の出力日時)', () {
-      final csv = buildReceptionStatusCsv(eventId: 'ev8893310df0cceab110fb4c0dd5d7ff', rows: rowsOf(_report()), exportedAt: at);
+      final csv = buildReceptionStatusCsv(eventId: 'ev8893310df0cceab110fb4c0dd5d7ff', rows: rowsOf(_report()), exportedAt: at, conditions: _noConditions);
       expect(csv.fileName, 'JM_Quick_Reception_Status_ev8893310df0cceab110fb4c0dd5d7ff_20261012_203000.csv');
       expect(csv.bytes.sublist(0, 3), [0xef, 0xbb, 0xbf]);
       final text = utf8.decode(csv.bytes.sublist(3));
       expect(RegExp(r'(?<!\r)\n').hasMatch(text), isFalse, reason: '改行はすべてCRLF');
-      expect(text.split('\r\n').where((l) => l.isNotEmpty).length, 8);
-      expect(text.startsWith('氏名,HEBEL属性,参加プログラム,参加時間,予定人数,実来場人数,受付状態,受付時刻\r\n'), isTrue);
+      expect(text.split('\r\n').where((l) => l.isNotEmpty).length, 10 + 8, reason: '情報欄10行 + 見出し + データ7行');
+      expect(text.startsWith('イベント名,架空イベント\r\n'), isTrue, reason: '先頭は情報欄');
+      expect(text.contains('\r\n抽出件数,7\r\n\r\n氏名,HEBEL属性,参加プログラム,参加時間,予定人数,実来場人数,受付状態,受付時刻\r\n'), isTrue,
+          reason: '情報欄 → 空行1行 → 参加者一覧の見出し');
       expect(text.endsWith('\r\n'), isTrue);
     });
 
@@ -761,6 +786,7 @@ void main() {
       final csv = buildReceptionStatusCsv(
         eventId: _eventId,
         exportedAt: at,
+        conditions: _noConditions,
         rows: rowsOf(AttendanceReport.fromJson(jsonDecode(jsonEncode({
           'eventId': _eventId,
           'eventName': '架空イベント',
@@ -779,7 +805,7 @@ void main() {
     });
 
     test('人数訂正後は最新の人数、受付取消後は未受付(人数・時刻は空欄)', () {
-      final csv = buildReceptionStatusCsv(eventId: _eventId, exportedAt: at, rows: rowsOf(_report(overrides: {
+      final csv = buildReceptionStatusCsv(eventId: _eventId, exportedAt: at, conditions: _noConditions, rows: rowsOf(_report(overrides: {
         'p01': [
           _entry('program-1', time: '10:30-11:10', checkedIn: true, attended: 1, at: '2026-11-30T01:23:45.000Z'),
           _entry('program-2', planned: 1, time: '14:10-14:50'),
@@ -795,8 +821,119 @@ void main() {
       expect(talk.sublist(5), ['', '未受付', '']);
     });
 
+    test('抽出条件の情報欄(10項目): 条件なしは「指定なし」「すべて」「既定の順」。データ最終更新日時とCSV出力日時は別。抽出件数=データ行数(数値)', () {
+      final csv = buildReceptionStatusCsv(eventId: _eventId, rows: rowsOf(_report()), exportedAt: at, conditions: _noConditions);
+      expect(_csvInfo(csv.bytes), {
+        'イベント名': '架空イベント',
+        'イベントID': _eventId,
+        'データ最終更新日時': '2026/10/12 20:00:00（日本時間）',
+        'CSV出力日時': '2026/10/12 20:30:00（日本時間）',
+        '氏名検索条件': '指定なし',
+        '参加プログラム': 'すべて',
+        '受付状態': 'すべて',
+        'HEBEL属性': 'すべて',
+        '並び順': '既定の順',
+        '抽出件数': 7,
+      });
+      expect(_csvInfo(csv.bytes)['抽出件数'], _parseCsv(csv.bytes).length - 1);
+      expect(_csvInfo(csv.bytes)['抽出件数'], csv.rowCount);
+    });
+
+    test('抽出条件の情報欄: 複数条件をすべて記録(HEBEL 3分類・並び順)。氏名検索・イベント名も数式の無害化とRFC 4180のエスケープ', () {
+      final rows = filterReceptionRows(
+        rowsOf(_report()),
+        query: '三子',
+        hebel: ReceptionHebelGroup.hebelMaison,
+        state: ReceptionStateFilter.checkedIn,
+        sort: ReceptionSort.checkedInAtDesc,
+      );
+      final csv = buildReceptionStatusCsv(
+        eventId: _eventId,
+        rows: rows,
+        exportedAt: at,
+        conditions: ReceptionStatusCsvConditions(
+          eventName: '架空イベント',
+          dataUpdatedAt: DateTime.utc(2026, 10, 12, 11),
+          query: '三子',
+          state: ReceptionStateFilter.checkedIn,
+          hebel: ReceptionHebelGroup.hebelMaison,
+          sort: ReceptionSort.checkedInAtDesc,
+        ),
+      );
+      final info = _csvInfo(csv.bytes);
+      expect([info['氏名検索条件'], info['参加プログラム'], info['受付状態'], info['HEBEL属性'], info['並び順'], info['抽出件数']],
+          ['三子', 'すべて', '受付済み', _maison, '受付時刻(新しい順)', 2]);
+      expect(_parseCsv(csv.bytes).length - 1, 2);
+      for (final g in ReceptionHebelGroup.values) {
+        final c = buildReceptionStatusCsv(eventId: _eventId, rows: rowsOf(_report()), exportedAt: at,
+            conditions: ReceptionStatusCsvConditions(eventName: '架空イベント', dataUpdatedAt: at, hebel: g, programName: '架空トーク'));
+        expect(_csvInfo(c.bytes)['HEBEL属性'], g.label);
+        expect(_csvInfo(c.bytes)['参加プログラム'], '架空トーク');
+      }
+      // 危険な入力(数式・カンマ・ダブルクォーテーション)
+      final risky = buildReceptionStatusCsv(eventId: _eventId, rows: rowsOf(_report()), exportedAt: at,
+          conditions: ReceptionStatusCsvConditions(
+            eventName: '+架空,"イベント"', dataUpdatedAt: at, query: '=HYPERLINK("https://example.invalid")'));
+      final text = utf8.decode(risky.bytes.sublist(3));
+      expect(text, contains('イベント名,"\'+架空,""イベント"""\r\n'));
+      expect(text, contains('氏名検索条件,"\'=HYPERLINK(""https://example.invalid"")"\r\n'));
+      expect(_csvInfo(risky.bytes)['氏名検索条件'], '\'=HYPERLINK("https://example.invalid")');
+      expect(_csvInfo(risky.bytes)['イベント名'], '\'+架空,"イベント"');
+      expect(RegExp(r'(?<!\r)\n').hasMatch(text), isFalse);
+    });
+
+    testWidgets('画面: 出力ボタンを押した時点の条件(検索・program・受付状態・HEBEL・並び順)と、最後に取得した日時・出力日時・件数を記録する', (tester) async {
+      await _wide(tester);
+      var clock = DateTime.utc(2026, 10, 12, 10); // 取得 19:00(日本時間)
+      final service = _FakeService([_report()]);
+      final saved = _SavedCsv();
+      await tester.pumpWidget(_page(service, csvSaver: saved.call, now: () => clock));
+      await tester.pumpAndSettle();
+      Future<Map<String, dynamic>> export() async {
+        await _scrollTo(tester, const Key('reception-status-export-csv'));
+        await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(seconds: 1));
+        return _csvInfo(saved.saves.last.bytes);
+      }
+
+      clock = DateTime.utc(2026, 10, 12, 11, 30); // 出力 20:30
+      final plain = await export();
+      expect(plain['データ最終更新日時'], '2026/10/12 19:00:00（日本時間）');
+      expect(plain['CSV出力日時'], '2026/10/12 20:30:00（日本時間）');
+      expect([plain['氏名検索条件'], plain['参加プログラム'], plain['受付状態'], plain['HEBEL属性'], plain['並び順'], plain['抽出件数']],
+          ['指定なし', 'すべて', 'すべて', 'すべて', '既定の順', 7]);
+      expect(plain['イベント名'], '架空イベント');
+      expect(plain['イベントID'], _eventId);
+
+      await tester.enterText(find.byKey(const Key('reception-status-search')), '架空');
+      await tester.pumpAndSettle();
+      await _choose(tester, 'reception-status-program', '架空の譲渡会（いぬ）');
+      await _choose(tester, 'reception-status-state', '未受付');
+      await _choose(tester, 'reception-status-hebel', '該当なし');
+      await _choose(tester, 'reception-status-sort', '受付時刻(古い順)');
+      final filtered = await export();
+      expect([filtered['氏名検索条件'], filtered['参加プログラム'], filtered['受付状態'], filtered['HEBEL属性'], filtered['並び順']],
+          ['架空', '架空の譲渡会（いぬ）', '未受付', '該当なし', '受付時刻(古い順)']);
+      final data = _parseCsv(saved.saves.last.bytes).skip(1).toList();
+      expect(filtered['抽出件数'], data.length);
+      expect(find.text('出力対象：${data.length}行'), findsOneWidget, reason: '画面の出力対象件数とも一致');
+      expect([for (final r in data) r[0]], ['架空 八子']);
+
+      // 最新の状態に更新した後は、その取得日時が記録される(出力日時とは別)
+      clock = DateTime.utc(2026, 10, 12, 12); // 取得 21:00
+      await tester.tap(find.byKey(const Key('reception-status-refresh')));
+      await tester.pumpAndSettle();
+      clock = DateTime.utc(2026, 10, 12, 12, 15); // 出力 21:15
+      final again = await export();
+      expect(again['データ最終更新日時'], '2026/10/12 21:00:00（日本時間）');
+      expect(again['CSV出力日時'], '2026/10/12 21:15:00（日本時間）');
+      expect(again['氏名検索条件'], '架空', reason: '更新しても条件は保持');
+      expect(service.calls.length, 2, reason: 'CSV出力では通信しない(手動更新の1回だけ増える)');
+    });
+
     test('0行は出力しない', () {
-      expect(() => buildReceptionStatusCsv(eventId: _eventId, rows: const [], exportedAt: at), throwsStateError);
+      expect(() => buildReceptionStatusCsv(eventId: _eventId, rows: const [], exportedAt: at, conditions: _noConditions), throwsStateError);
     });
 
     Finder exportButton() => find.ancestor(
@@ -930,6 +1067,7 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       final all = _parseCsv(saved.saves.single.bytes);
       expect(all.length, 1001);
+      expect(_csvInfo(saved.saves.single.bytes)['抽出件数'], 1000);
       expect(all.last[0], '架空 大量499');
       // 絞り込み欄を画面の中ほどへ(画面上端に接していると、選択肢を押せない)
       await _scrollTo(tester, const Key('reception-status-hebel'));
@@ -942,6 +1080,8 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       final none = _parseCsv(saved.saves.last.bytes).skip(1).toList();
       expect(none.length, 166 * 2, reason: 'i % 3 == 2 の166名 × 2program');
+      expect(_csvInfo(saved.saves.last.bytes)['抽出件数'], 166 * 2);
+      expect(_csvInfo(saved.saves.last.bytes)['HEBEL属性'], '該当なし');
       expect(none.every((r) => r[1] == '該当なし'), isTrue);
       expect(service.calls.length, 1);
     });

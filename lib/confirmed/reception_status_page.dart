@@ -37,6 +37,7 @@ enum ReceptionStatusView {
 ///   メールアドレス・かなは表示しない。HEBEL属性の絞り込みも取得済みのデータで行う(追加の通信なし)。
 /// ■ 「表示中の一覧をCSV出力」: 取得済みのデータに検索・絞り込み・並び順を適用した全行(描画範囲に依存しない)を、
 ///   ブラウザ内でCSVにして保存させる(reception_status_csv.dart)。追加の通信・Firestoreの読取はしない。
+///   CSVの先頭には、押した時点の抽出条件・データ最終更新日時・CSV出力日時・抽出件数を記録する。
 /// ■ 表示切替(参加者一覧 / 受付集計): 同じ取得済みデータの表示だけを切り替える(切替では通信しない)。
 ///   検索・絞り込み・並び順は画面の状態として保持し、切り替えて戻っても変わらない(CSVの出力対象も同じ)。
 class ReceptionStatusPage extends StatefulWidget {
@@ -150,6 +151,22 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
   Future<void> _exportCsv() async {
     if (exporting || visible.isEmpty) return;
     final rows = visible;
+    // 出力ボタンを押した時点の画面の条件(CSVの情報欄に記録する。rowsと同じ状態から取る)
+    final programName = programFilter == null
+        ? null
+        : status?.programs
+              .where((p) => p.programId == programFilter)
+              .firstOrNull
+              ?.name;
+    final conditions = ReceptionStatusCsvConditions(
+      eventName: widget.eventName,
+      dataUpdatedAt: updatedAt,
+      query: query.text,
+      programName: programName ?? programFilter,
+      state: stateFilter,
+      hebel: hebelFilter,
+      sort: sort,
+    );
     setState(() {
       exporting = true;
       exportResult = null;
@@ -159,6 +176,7 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
         eventId: widget.eventId,
         rows: rows,
         exportedAt: widget.now(),
+        conditions: conditions,
       );
       widget.csvSaver(csv.bytes, csv.fileName, _csvMimeType);
       if (mounted) {
