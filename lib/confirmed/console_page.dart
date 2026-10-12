@@ -13,6 +13,7 @@ import 'import_models.dart';
 import 'import_service.dart';
 import 'reception_staff_key_service.dart';
 import 'reception_staff_qr_page.dart';
+import 'reception_status_page.dart';
 import 'reminder_page.dart';
 import 'reminder_service.dart';
 import 'winner_mail_page.dart';
@@ -37,6 +38,7 @@ const List<String> eventConsoleFeatureLabels = [
   'スタッフ管理',
   '受付',
   '受付訂正',
+  '受付状況一覧',
   '最終実績Excel出力',
 ];
 
@@ -483,6 +485,16 @@ class _EventConsoleState extends State<_EventConsole> {
                     ),
                   ),
                 ),
+                // 主催者用の受付状況一覧(閲覧のみ。最終実績と同じ読み取り専用API・同じ権限。手動更新のみ)。
+                '受付状況一覧': () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ReceptionStatusPage(
+                      eventId: id,
+                      eventName: event!.eventName,
+                      service: widget.attendanceReportService,
+                    ),
+                  ),
+                ),
                 // イベント終了後の最終実績(参加者・受付結果)をExcelで出力する(読み取りのみ)。
                 '最終実績Excel出力': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -509,6 +521,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 'リマインド': '前日リマインドの設定・プレビュー・送信状況',
                 'スタッフ管理': 'このイベントの受付スタッフを追加・解除する',
                 '受付': '受付スタッフ用QRを表示する(受付スタッフがスマホで読み取って受付する)',
+                '受付状況一覧': '受付状況(全体・プログラム別・時間帯別・参加者)を確認します。閲覧のみです。',
                 '最終実績Excel出力': '参加者・受付結果をExcelで出力します。データは変更されません。',
               },
             ),
