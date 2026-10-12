@@ -16,6 +16,12 @@ import 'package:jm_quick/confirmed/qr_scanner_page.dart';
 import 'package:jm_quick/confirmed/reception_route.dart';
 import 'package:jm_quick/confirmed/web_qr_camera.dart';
 
+import 'package:jm_quick/confirmed/reception_staff_device_page.dart';
+import 'package:jm_quick/confirmed/reception_staff_key_service.dart';
+import 'app_check_fake.dart';
+import 'reception_staff_device_test.dart' show FakeKeyServer;
+import 'reception_staff_key_fake.dart';
+
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'confirmed_pass_reception_test.dart' show FakeReceptionService, rp;
 
@@ -86,6 +92,182 @@ const _scannerSourceFiles = [
 ];
 
 void main() {
+  testWidgets('直接受付から既存Webカメラへ進み、異なるQRを連続読取してカメラを再生成する', (tester) async {
+    final cameras = <FakeCameraGateway>[];
+    final participants = <String>[];
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final services = {
+      'p0': FakeReceptionService(
+        programs: [rp('a', '受付対象', 1, checkedIn: true, attended: 1)],
+      ),
+      'p1': FakeReceptionService(programs: [rp('a', '受付対象', 1)]),
+      'p2': FakeReceptionService(programs: [rp('a', '受付対象', 1)]),
+    };
+    Widget reception(String participantId, {VoidCallback? next}) {
+      participants.add(participantId);
+      return ReceptionRoutePage(
+        eventId: 'ev1',
+        participantId: participantId,
+        publicId: 'pub_abc0123456789012345678',
+        authClient: FakeAuthClient(signedIn: true),
+        accessService: FakeAccessService([
+          const AccessCheck.granted(AccessRole.staff),
+        ]),
+        receptionService: services[participantId]!,
+        isLegacyEvent: (_) async => false,
+        legacyBuilder: (_) => const Text('legacy'),
+        onScanNext: next,
+      );
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: reception('p0'),
+        onGenerateRoute: (settings) {
+          expect(settings.name, '/console/scan?eventId=ev1');
+          return MaterialPageRoute<void>(
+            builder: (_) => ConfirmedScanReceptionFlow(
+              initialEventId: 'ev1',
+              expectedHost: _host,
+              surfaceBuilder: (context, {required onRaw}) => WebQrCameraView(
+                onDetected: onRaw,
+                onProblem: (_) => fail('camera error'),
+                gatewayFactory: () {
+                  final camera = FakeCameraGateway();
+                  cameras.add(camera);
+                  return camera;
+                },
+              ),
+              receptionBuilder:
+                  ({
+                    required eventId,
+                    required participantId,
+                    required publicId,
+                    required onScanNext,
+                  }) => reception(participantId, next: onScanNext),
+            ),
+          );
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('受付済み'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('scan-next')));
+    await tester.tap(find.byKey(const Key('scan-next')));
+    await tester.pumpAndSettle();
+    for (final qr in [_validEv1, _validEv1Second, _validEv1]) {
+      final camera = cameras.last;
+      expect(camera.openCalls, 1);
+      camera.onDetect!(qr);
+      await tester.pumpAndSettle();
+      expect(camera.closeCalls, 1);
+      final service = services[participants.last]!;
+      if (service.checkIns.isEmpty) {
+        await tester.ensureVisible(find.text('受付する'));
+        await tester.tap(find.text('受付する'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.text('受付する'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(service.checkIns, hasLength(1));
+        // 次回getViewも受付済みを返す、保存後のサーバー状態を再現。
+        service.programs = [rp('a', '受付対象', 1, checkedIn: true, attended: 1)];
+      }
+      expect(tester.takeException(), isNull);
+      expect(find.text('受付済み'), findsOneWidget);
+      expect(find.text('受付する'), findsNothing);
+      await tester.ensureVisible(find.byKey(const Key('scan-next')));
+      await tester.tap(find.byKey(const Key('scan-next')));
+      await tester.pumpAndSettle();
+    }
+    expect(cameras.length, 4);
+    expect(cameras.last.openCalls, 1);
+    expect(participants, ['p0', 'p1', 'p2', 'p1']);
+    expect(services['p0']!.checkIns, isEmpty);
+    expect(services['p1']!.checkIns, hasLength(1));
+    expect(services['p2']!.checkIns, hasLength(1));
+  });
+
+  testWidgets('受付キー方式でも受付後にカメラを再開し、再読取は追加受付しない', (tester) async {
+    final server = FakeKeyServer();
+    final cameras = <FakeCameraGateway>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReceptionStaffDeviceRoute(
+          eventId: 'event1',
+          receptionKey: fakeReceptionKey,
+          expectedHost: _host,
+          serviceFactory: (eventId, key) => ReceptionStaffKeyService(
+            eventId: eventId,
+            receptionKey: key,
+            httpClient: server.client(),
+            baseUrl: 'https://functions.example.invalid',
+            appCheck: FakeAppCheck(),
+          ),
+          surfaceBuilder: (context, {required onRaw}) => WebQrCameraView(
+            onDetected: onRaw,
+            onProblem: (_) => fail('camera error'),
+            gatewayFactory: () {
+              final camera = FakeCameraGateway();
+              cameras.add(camera);
+              return camera;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    for (final qr in [
+      for (final id in ['p1', 'p2', 'p1'])
+        _qr(
+          eventId: 'event1',
+          participantId: id,
+          publicId: 'pub_abc0123456789012345678',
+        ),
+    ]) {
+      final camera = cameras.last;
+      expect(camera.openCalls, 1);
+      camera.onDetect!(qr);
+      await tester.pumpAndSettle();
+      expect(camera.closeCalls, 1);
+      if (server.checkedIn.length < 2) {
+        await tester.ensureVisible(find.text('受付する'));
+        await tester.tap(find.text('受付する'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.text('受付する'),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('受付済み'), findsOneWidget);
+      expect(find.text('受付する'), findsNothing);
+      expect(find.text('人数を訂正'), findsNothing);
+      expect(find.text('受付を取り消す'), findsNothing);
+      await tester.ensureVisible(find.byKey(const Key('scan-next')));
+      await tester.tap(find.byKey(const Key('scan-next')));
+      await tester.pumpAndSettle();
+    }
+    expect(cameras.length, 4);
+    expect(cameras.last.openCalls, 1);
+    expect(server.checkedIn, {'p1_alpha': 2, 'p2_alpha': 2});
+    expect(
+      server.requests.where(
+        (r) => r.name == 'checkInConfirmedProgramByStaffKey',
+      ),
+      hasLength(2),
+    );
+  });
+
   group('parseReceptionQrPayload(QR文字列の検証。ここはセキュリティの正本ではない)', () {
     test('正常なJM Quick受付QR → eventId/participantId/publicIdを取り出せる', () {
       final result = parseReceptionQrPayload(_validEv1, expectedHost: _host);
@@ -556,16 +738,15 @@ void main() {
       },
     );
 
-    testWidgets(
-      'initialEventId未指定(直リンク等)では、従来どおり最初に読み取ったQRのイベントへ固定される',
-      (tester) async {
-        await pumpFlow(tester); // initialEventIdなし
-        latest!.onRaw(_validEv2); // 最初のQRがev2でも受け付ける(固定前)
-        await tester.pump();
-        expect(calls.length, 1);
-        expect(calls.single.eventId, 'ev2');
-      },
-    );
+    testWidgets('initialEventId未指定(直リンク等)では、従来どおり最初に読み取ったQRのイベントへ固定される', (
+      tester,
+    ) async {
+      await pumpFlow(tester); // initialEventIdなし
+      latest!.onRaw(_validEv2); // 最初のQRがev2でも受け付ける(固定前)
+      await tester.pump();
+      expect(calls.length, 1);
+      expect(calls.single.eventId, 'ev2');
+    });
 
     testWidgets('受付完了後、「次のQRを読み取る」からscannerへ戻り、同じイベントの次の参加者を続けて受付できる', (
       tester,
@@ -756,51 +937,48 @@ void main() {
       expect(find.byType(ConfirmedQrScannerView), findsOneWidget);
     });
 
-    testWidgets(
-      'Phase 11L: 受付スタッフ用QR経由(eventId付きURL)で未ログインのまま開いても、'
-      'ログイン後にeventIdが保持され、そのイベントのscannerへ進む(eventIdが失われない)',
-      (tester) async {
-        final auth = FakeAuthClient(signedIn: false);
-        await tester.pumpWidget(
-          MaterialApp(
-            home: ConfirmedScanReceptionRoute(
-              eventId: 'event1',
-              authClient: auth,
-              accessService: FakeAccessService([
-                const AccessCheck.granted(AccessRole.staff),
-              ]),
-            ),
+    testWidgets('Phase 11L: 受付スタッフ用QR経由(eventId付きURL)で未ログインのまま開いても、'
+        'ログイン後にeventIdが保持され、そのイベントのscannerへ進む(eventIdが失われない)', (tester) async {
+      final auth = FakeAuthClient(signedIn: false);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ConfirmedScanReceptionRoute(
+            eventId: 'event1',
+            authClient: auth,
+            accessService: FakeAccessService([
+              const AccessCheck.granted(AccessRole.staff),
+            ]),
           ),
-        );
-        await tester.pump();
-        // ログイン前は、scannerもeventIdの引き継ぎ先(ConfirmedScanReceptionFlow)もまだ作られない。
-        expect(find.text('メールアドレス'), findsOneWidget);
-        expect(find.byType(ConfirmedQrScannerView), findsNothing);
-        await tester.enterText(
-          find.widgetWithText(TextField, 'メールアドレス'),
-          'staff@example.invalid',
-        );
-        await tester.enterText(
-          find.widgetWithText(TextField, 'パスワード'),
-          'password123',
-        );
-        // AppBarのタイトルにも「ログイン」の文字列があるため、ボタン(FilledButton)を指定してtapする。
-        await tester.tap(find.widgetWithText(FilledButton, 'ログイン'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 10));
-        // ログイン後、URLのクエリ由来のeventId('event1')がそのままConfirmedScanReceptionFlowへ渡り、
-        // そのイベントのscannerへ進む(ログインによってeventIdが失われていない)。
-        expect(
-          tester
-              .widget<ConfirmedScanReceptionFlow>(
-                find.byType(ConfirmedScanReceptionFlow),
-              )
-              .initialEventId,
-          'event1',
-        );
-        expect(find.byType(ConfirmedQrScannerView), findsOneWidget);
-      },
-    );
+        ),
+      );
+      await tester.pump();
+      // ログイン前は、scannerもeventIdの引き継ぎ先(ConfirmedScanReceptionFlow)もまだ作られない。
+      expect(find.text('メールアドレス'), findsOneWidget);
+      expect(find.byType(ConfirmedQrScannerView), findsNothing);
+      await tester.enterText(
+        find.widgetWithText(TextField, 'メールアドレス'),
+        'staff@example.invalid',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, 'パスワード'),
+        'password123',
+      );
+      // AppBarのタイトルにも「ログイン」の文字列があるため、ボタン(FilledButton)を指定してtapする。
+      await tester.tap(find.widgetWithText(FilledButton, 'ログイン'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
+      // ログイン後、URLのクエリ由来のeventId('event1')がそのままConfirmedScanReceptionFlowへ渡り、
+      // そのイベントのscannerへ進む(ログインによってeventIdが失われていない)。
+      expect(
+        tester
+            .widget<ConfirmedScanReceptionFlow>(
+              find.byType(ConfirmedScanReceptionFlow),
+            )
+            .initialEventId,
+        'event1',
+      );
+      expect(find.byType(ConfirmedQrScannerView), findsOneWidget);
+    });
 
     testWidgets('カメラ非対応環境(このテスト実行環境=VM)でも、既定のカメラ面はクラッシュせず「利用できません」表示に落ち着く', (
       tester,

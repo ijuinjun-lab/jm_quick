@@ -49,7 +49,7 @@ class ReceptionRoutePage extends StatefulWidget {
 
   /// QRカメラスキャナー(Phase 11C)から開かれた場合だけ渡される。「次のQRを読み取る」の導線を
   /// confirmedの受付画面([ConfirmedReceptionPage])に追加で表示する。/reception への直接アクセス(通常のQR・OS標準カメラ経路)
-  /// ではnullのままで、画面は従来どおり変わらない。legacyの受付画面には渡さない(legacyは変更しない)。
+  /// では既存の /console/scan へ進む導線を使う。OSのカメラアプリへは戻さない。legacyには渡さない。
   final VoidCallback? onScanNext;
   final AuthClient? _authClient;
   final AccessService? _accessService;
@@ -201,7 +201,14 @@ class _KindResolverState extends State<_KindResolver> {
         participantId: route.participantId!,
         publicId: route.publicId!,
         signOut: widget.signOut,
-        onScanNext: route.onScanNext,
+        onScanNext:
+            route.onScanNext ??
+            () => Navigator.of(context).pushReplacementNamed(
+              Uri(
+                path: '/console/scan',
+                queryParameters: {'eventId': route.eventId!},
+              ).toString(),
+            ),
         adminService: widget.isAdmin
             ? (service is ReceptionAdminService
                   ? service as ReceptionAdminService
