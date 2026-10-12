@@ -37,7 +37,6 @@ const List<String> eventConsoleFeatureLabels = [
   '参加者管理',
   'スタッフ管理',
   '受付',
-  '受付訂正',
   '受付状況一覧',
   '最終実績Excel出力',
 ];
