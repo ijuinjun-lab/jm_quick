@@ -11,6 +11,8 @@ import 'package:archive/archive.dart';
 ///   - [XlsxDateTime]: 日付時刻のセル(Excelのシリアル値+「yyyy/mm/dd hh:mm:ss」書式。並べ替え・フィルターができる)
 ///   - null: 空のセル
 /// ■ 1行目は列名(太字)。先頭行を固定し、全体にオートフィルターを付ける。装飾はこれだけ。
+/// ■ [infoSheet]を渡すと、2枚目に「項目・値」の小さな情報シートを付ける(1枚目の明細表の構造は変えない。
+///   オートフィルター・先頭行の固定は1枚目だけ)。
 /// ■ ブラウザ上で作る(サーバー・Storageには保存しない)。
 class XlsxDateTime {
   /// [wallClock]の年月日・時分秒を、そのままExcelの日時にする(Excelにはタイムゾーンが無いため、
@@ -29,6 +31,7 @@ Uint8List buildXlsx({
   required String sheetName,
   required List<XlsxColumn> columns,
   required List<List<Object?>> rows,
+  ({String name, List<XlsxColumn> columns, List<List<Object?>> rows})? infoSheet,
 }) {
   final archive = Archive();
   void add(String name, String xml) {
@@ -39,15 +42,29 @@ Uint8List buildXlsx({
   final safeSheetName = _sheetName(sheetName);
   final lastColumn = _columnName(columns.isEmpty ? 1 : columns.length);
   final lastRow = rows.length + 1;
-  add('[Content_Types].xml', _contentTypes);
+  final info = infoSheet;
+  final infoName = info == null ? null : _sheetName(info.name);
+  add('[Content_Types].xml', _contentTypes(withInfo: info != null));
   add('_rels/.rels', _rootRels);
-  add('xl/workbook.xml', _workbook(safeSheetName, lastColumn, lastRow));
-  add('xl/_rels/workbook.xml.rels', _workbookRels);
+  add('xl/workbook.xml', _workbook(safeSheetName, lastColumn, lastRow, infoSheetName: infoName));
+  add('xl/_rels/workbook.xml.rels', _workbookRels(withInfo: info != null));
   add('xl/styles.xml', _styles);
   add(
     'xl/worksheets/sheet1.xml',
     _sheet(columns, rows, lastColumn: lastColumn, lastRow: lastRow),
   );
+  if (info != null) {
+    add(
+      'xl/worksheets/sheet2.xml',
+      _sheet(
+        info.columns,
+        info.rows,
+        lastColumn: _columnName(info.columns.isEmpty ? 1 : info.columns.length),
+        lastRow: info.rows.length + 1,
+        table: false,
+      ),
+    );
+  }
   return Uint8List.fromList(ZipEncoder().encode(archive));
 }
 
@@ -134,6 +151,7 @@ String _sheet(
   List<List<Object?>> rows, {
   required String lastColumn,
   required int lastRow,
+  bool table = true,
 }) {
   final b = StringBuffer()
     ..write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
@@ -141,15 +159,17 @@ String _sheet(
       '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
       'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
     )
-    ..write('<dimension ref="A1:$lastColumn$lastRow"/>')
-    // 先頭行(列名)を固定する
-    ..write(
+    ..write('<dimension ref="A1:$lastColumn$lastRow"/>');
+  // 先頭行(列名)を固定する(明細表だけ)
+  if (table) {
+    b.write(
       '<sheetViews><sheetView workbookViewId="0">'
       '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
       '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
       '</sheetView></sheetViews>',
-    )
-    ..write('<sheetFormatPr defaultRowHeight="15"/>');
+    );
+  }
+  b.write('<sheetFormatPr defaultRowHeight="15"/>');
   if (columns.isNotEmpty) {
     b.write('<cols>');
     for (var i = 0; i < columns.length; i++) {
@@ -175,32 +195,40 @@ String _sheet(
     }
     b.write('</row>');
   }
-  b
-    ..write('</sheetData>')
-    // 1行目を見出しとして、全体にオートフィルター(並べ替え・絞り込み)を付ける
-    ..write('<autoFilter ref="A1:$lastColumn$lastRow"/>')
-    ..write('</worksheet>');
+  b.write('</sheetData>');
+  // 1行目を見出しとして、全体にオートフィルター(並べ替え・絞り込み)を付ける(明細表だけ)
+  if (table) b.write('<autoFilter ref="A1:$lastColumn$lastRow"/>');
+  b.write('</worksheet>');
   return b.toString();
 }
 
-String _workbook(String sheetName, String lastColumn, int lastRow) {
+String _workbook(
+  String sheetName,
+  String lastColumn,
+  int lastRow, {
+  String? infoSheetName,
+}) {
   final quoted = "'${sheetName.replaceAll("'", "''")}'";
+  final info = infoSheetName == null
+      ? ''
+      : '<sheet name="${_xmlEscape(infoSheetName)}" sheetId="2" r:id="rId3"/>';
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
       '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
       'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-      '<sheets><sheet name="${_xmlEscape(sheetName)}" sheetId="1" r:id="rId1"/></sheets>'
+      '<sheets><sheet name="${_xmlEscape(sheetName)}" sheetId="1" r:id="rId1"/>$info</sheets>'
       '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'
       '${_xmlEscape(quoted)}!\$A\$1:\$$lastColumn\$$lastRow</definedName></definedNames>'
       '</workbook>';
 }
 
-const _contentTypes =
+String _contentTypes({required bool withInfo}) =>
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
     '<Default Extension="xml" ContentType="application/xml"/>'
     '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
     '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    '${withInfo ? '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' : ''}'
     '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
     '</Types>';
 
@@ -210,11 +238,12 @@ const _rootRels =
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
     '</Relationships>';
 
-const _workbookRels =
+String _workbookRels({required bool withInfo}) =>
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
     '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    '${withInfo ? '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>' : ''}'
     '</Relationships>';
 
 // cellXfs: 0=標準 / 1=列名(太字) / 2=日付時刻(yyyy/mm/dd hh:mm:ss)

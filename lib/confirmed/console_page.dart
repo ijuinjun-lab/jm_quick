@@ -34,7 +34,6 @@ const List<String> eventConsoleFeatureLabels = [
   '当選メール設定',
   '当選メール送信',
   'リマインド',
-  '参加者管理',
   'スタッフ管理',
   '受付',
   '受付状況一覧',
@@ -491,6 +490,9 @@ class _EventConsoleState extends State<_EventConsole> {
                       eventId: id,
                       eventName: event!.eventName,
                       service: widget.attendanceReportService,
+                      // 欠席判定用(このイベント管理画面が既に取得した値。追加の通信はしない)
+                      eventStartAt: event!.startAt,
+                      eventEndAt: event!.endAt,
                     ),
                   ),
                 ),
@@ -501,6 +503,9 @@ class _EventConsoleState extends State<_EventConsole> {
                       eventId: id,
                       eventName: event!.eventName,
                       service: widget.attendanceReportService,
+                      // 欠席判定用(このイベント管理画面が既に取得した値。追加の通信はしない)
+                      eventStartAt: event!.startAt,
+                      eventEndAt: event!.endAt,
                     ),
                   ),
                 ),

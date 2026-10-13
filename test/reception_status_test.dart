@@ -9,6 +9,7 @@
 //  - 表示中の一覧のCSV出力: 検索・絞り込み・並び順を反映した全行(描画範囲に依存しない)・固定の8列・UTF-8 BOM・CRLF・
 //    RFC 4180のエスケープ・日本時間・0行は出力しない・二重保存の防止・追加の通信なし
 //    先頭に抽出条件の情報欄(10項目・2列)→ 空行 → 参加者一覧。押した時点の条件・データ最終更新日時/CSV出力日時・抽出件数
+//  - 欠席: 未受付のまま終了時刻(時間帯→イベント終了日時、不明なら判定しない)を過ぎたもの。判定時刻=最後の取得時刻
 //  - 表示切替(参加者一覧 / 受付集計): 初期は参加者一覧・切替では通信しない・検索/絞り込み/並び順/CSVの対象は保持・集計値は不変
 import 'dart:async';
 import 'dart:convert';
@@ -456,9 +457,9 @@ void main() {
       await tester.pumpWidget(_page(service));
       await tester.pumpAndSettle();
       await _view(tester, ReceptionStatusView.summary);
-      expect(_cells(tester, const ValueKey('hebel-status-hebelHaus')), [_haus, '1件', '1件', '0件', '100.0%']);
-      expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '1件', '1件', '0件', '100.0%']);
-      expect(_cells(tester, const ValueKey('hebel-status-none')), ['該当なし', '3件', '0件', '3件', '0.0%']);
+      expect(_cells(tester, const ValueKey('hebel-status-hebelHaus')), [_haus, '1件', '1件', '0件', '0件', '100.0%']);
+      expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '1件', '1件', '0件', '0件', '100.0%']);
+      expect(_cells(tester, const ValueKey('hebel-status-none')), ['該当なし', '3件', '0件', '3件', '0件', '0.0%']);
       double y(String key) => tester.getTopLeft(find.byKey(Key(key))).dy;
       final hebelY = tester.getTopLeft(find.byKey(const ValueKey('hebel-status-hebelHaus'))).dy;
       expect(y('total-applications') < hebelY, isTrue);
@@ -503,9 +504,9 @@ void main() {
       expect(_tile(tester, 'total-not-checked-in'), '未受付申込件数|3件');
       expect(_tile(tester, 'total-rate'), '受付率|40.0%|受付済み申込件数 ÷ 申込件数');
       expect(_cells(tester, const ValueKey('program-status-program-1')),
-          ['架空の譲渡会（ねこ）', '4名', '1件', '3名', '1件', '50.0%']);
+          ['架空の譲渡会（ねこ）', '4名', '1件', '3名', '1件', '0件', '50.0%']);
       expect(_cells(tester, const ValueKey('slot-status-program-2-$noSlotLabel')),
-          [noSlotLabel, '1名', '0名', '0件', '1件']);
+          [noSlotLabel, '1名', '0名', '0件', '1件', '0件']);
       void expectNoExtraPersonalData() {
         expect(find.textContaining('@'), findsNothing);
         expect(find.textContaining('かくう'), findsNothing);
@@ -698,7 +699,7 @@ void main() {
       expect(_tile(tester, 'total-applications'), '申込件数|500件');
       expect(_tile(tester, 'total-rate'), '受付率|50.0%|受付済み申込件数 ÷ 申込件数');
       // HEBEL属性別(i % 3 == 1 の167名、うち受付済みは偶数のi)
-      expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '167件', '83件', '84件', '49.7%']);
+      expect(_cells(tester, const ValueKey('hebel-status-hebelMaison')), [_maison, '167件', '83件', '84件', '0件', '49.7%']);
       await _view(tester, ReceptionStatusView.list);
       final built = find.byWidgetPredicate(
         (w) => w is Container && w.key is ValueKey<String> && (w.key! as ValueKey<String>).value.startsWith('status-row-'),
@@ -1272,6 +1273,202 @@ void main() {
       expect(tester.takeException(), isNull);
       await _view(tester, ReceptionStatusView.list);
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('欠席判定(表示時に判定・Firestoreへ保存しない)', () {
+    // 開催日 2026/11/30(日本時間)。開始 10:00 JST・終了 17:00 JST
+    final start = DateTime.utc(2026, 11, 30, 1);
+    final end = DateTime.utc(2026, 11, 30, 8);
+    DateTime jst(int h, int m, [int s = 0]) => DateTime.utc(2026, 11, 30, h, m, s).subtract(const Duration(hours: 9));
+    ReceptionStatus at(DateTime judgedAt, {AttendanceReport? report, DateTime? eventStart, DateTime? eventEnd, bool noEnd = false}) =>
+        buildReceptionStatus(report ?? _report(), judgedAt: judgedAt, eventStartAt: eventStart ?? start, eventEndAt: noEnd ? null : (eventEnd ?? end));
+    String states(ReceptionStatus s) => [for (final r in s.rows) '${r.participantId}:${r.programId}=${r.state.label}'].join(',');
+
+    test('時間帯の解析: 開催日(日本時間)と組み合わせる。全角・時分表記も可。日付またぎ・長さ0・不正・開催日不明はnull', () {
+      expect(slotEndAt('14:10-14:50', start), jst(14, 50));
+      expect(slotEndAt('14時10分～14時50分', start), jst(14, 50));
+      expect(slotEndAt('１４：１０－１４：５０', start), jst(14, 50));
+      expect(slotEndAt(' 9:00 〜 9:40 ', start), jst(9, 40));
+      // 開始時刻のUTCが前日でも、日本時間の開催日で組み合わせる(11/30 01:00 JST = 11/29 16:00 UTC)
+      expect(slotEndAt('10:30-11:10', DateTime.utc(2026, 11, 29, 16)), jst(11, 10));
+      for (final bad in ['23:30-00:30', '10:00-10:00', '11:10-10:30', '25:00-26:00', '10:70-11:00', '午前の部', '10:30', '', '10:30-11:10 (犬)']) {
+        expect(slotEndAt(bad, start), isNull, reason: bad);
+      }
+      expect(slotEndAt('10:30-11:10', null), isNull, reason: '開催日が不明なら時刻だけでは決めない');
+      expect(slotEndAt(null, start), isNull);
+    });
+
+    test('終了時刻の優先順位: 時間帯(受付記録の終了日時・slotLabel)→ イベント終了日時 → 不明(null。24:00等で補完しない)', () {
+      expect(programEndAt(timeText: '14:10-14:50', eventStartAt: start, eventEndAt: end), jst(14, 50));
+      expect(programEndAt(timeText: null, eventStartAt: start, eventEndAt: end), end);
+      expect(programEndAt(timeText: '23:30-00:30', eventStartAt: start, eventEndAt: end), end, reason: '日付またぎは時間帯では決めずイベント終了へ');
+      expect(programEndAt(timeText: '14:10-14:50', eventStartAt: null, eventEndAt: end), end);
+      expect(programEndAt(timeText: null, eventStartAt: start, eventEndAt: null), isNull);
+      expect(programEndAt(timeText: '午前の部', eventStartAt: start, eventEndAt: null), isNull);
+    });
+
+    test('境界: 終了時刻ちょうどは未受付、過ぎたら欠席。受付済みは終了後も受付済み(出席)', () {
+      final e = jst(11, 50);
+      expect(attendanceStateOf(checkedIn: false, endAt: e, judgedAt: e), ReceptionAttendanceState.pending);
+      expect(attendanceStateOf(checkedIn: false, endAt: e, judgedAt: e.add(const Duration(seconds: 1))), ReceptionAttendanceState.absent);
+      expect(attendanceStateOf(checkedIn: false, endAt: e, judgedAt: e.subtract(const Duration(seconds: 1))), ReceptionAttendanceState.pending);
+      expect(attendanceStateOf(checkedIn: true, endAt: e, judgedAt: jst(23, 0)), ReceptionAttendanceState.attended);
+      expect(attendanceStateOf(checkedIn: false, endAt: null, judgedAt: jst(23, 0)), ReceptionAttendanceState.pending, reason: '終了時刻不明');
+      expect(attendanceStateOf(checkedIn: false, endAt: e, judgedAt: null), ReceptionAttendanceState.pending, reason: '判定時刻なし');
+      expect(buildReceptionStatus(_report()).rows.every((r) => r.state != ReceptionAttendanceState.absent), isTrue,
+          reason: '判定時刻を渡さなければ欠席にしない(従来どおり)');
+    });
+
+    test('12:00時点: 終了した時間帯の未受付だけ欠席。program別・時間帯別・全体・HEBEL属性別に数える(既存の数値は不変)', () {
+      final s = at(jst(12, 0));
+      expect(states(s), 'p01:program-1=受付済み,p01:program-2=未受付,p02:program-1=欠席,p03:program-2=受付済み,p03:program-3=受付済み,'
+          'p04:program-3=未受付,p08:program-2=未受付');
+      expect(s.totals.absentApplications, 1);
+      expect((s.totals.applications, s.totals.checkedInApplications, s.totals.notCheckedInApplications, s.totals.rate), (5, 2, 3, 40.0),
+          reason: '既存の申込件数・受付済み・未受付・受付率は変わらない');
+      expect(s.programs[0].absentEntries, 1);
+      expect(s.programs[0].slots.map((x) => '${x.label}:${x.absentEntries}'), ['10:30-11:10:0', '11:10-11:50:1']);
+      expect(s.programs[1].absentEntries, 0);
+      expect([for (final g in s.hebelGroups) g.absentApplications], [0, 0, 1], reason: 'p02(none)');
+    });
+
+    test('18:00時点(イベント終了後): 未受付はすべて欠席。受付のある参加者は欠席申込に数えない(複数programは独立)', () {
+      final s = at(jst(18, 0));
+      expect(states(s), 'p01:program-1=受付済み,p01:program-2=欠席,p02:program-1=欠席,p03:program-2=受付済み,p03:program-3=受付済み,'
+          'p04:program-3=欠席,p08:program-2=欠席');
+      expect(s.totals.absentApplications, 3, reason: 'p02・p04・p08。p01はねこを受付済みなので参加者としては欠席ではない');
+      expect([for (final g in s.hebelGroups) g.absentApplications], [0, 0, 3]);
+      expect(s.hebelGroups.fold(0, (n, g) => n + g.absentApplications), s.totals.absentApplications);
+      expect(s.programs.map((p) => p.absentEntries), [1, 2, 1]);
+      expect(s.programs[1].slots.map((x) => '${x.label}:${x.absentEntries}'), ['14:10-14:50:1', '14:50-15:30:0', '$noSlotLabel:1']);
+      expect(filterReceptionRows(s.rows, state: ReceptionStateFilter.absent).length, 4);
+      expect(filterReceptionRows(s.rows, state: ReceptionStateFilter.notCheckedIn), isEmpty, reason: '未受付は欠席を含まない');
+      expect(filterReceptionRows(s.rows, state: ReceptionStateFilter.absent, hebel: ReceptionHebelGroup.none, programId: 'program-3')
+          .map((r) => r.participantId), ['p04']);
+    });
+
+    test('イベント終了日時が無い: 時間帯の無いprogram(トーク等)は欠席にしない。時間帯のあるprogramは時間帯で判定', () {
+      final s = at(jst(18, 0), noEnd: true);
+      expect(states(s), 'p01:program-1=受付済み,p01:program-2=欠席,p02:program-1=欠席,p03:program-2=受付済み,p03:program-3=受付済み,'
+          'p04:program-3=欠席,p08:program-2=未受付');
+      expect(s.totals.absentApplications, 2);
+      final noStart = buildReceptionStatus(_report(), judgedAt: jst(18, 0));
+      expect(noStart.rows.every((r) => r.state != ReceptionAttendanceState.absent), isTrue, reason: '開催日も終了日時も不明なら欠席にしない');
+    });
+
+    test('受付取消後は判定時刻で未受付/欠席、再受付で受付済み。人数訂正では出欠は変わらない', () {
+      final cancelled = _report(overrides: {
+        'p03': [
+          _entry('program-3', planned: 1, time: '13:00-14:00'),
+          _entry('program-2', planned: 3, time: '14:50-15:30', checkedIn: true, attended: 3, at: '2026-11-30T05:10:00.000Z'),
+        ],
+      });
+      String talk(ReceptionStatus s) => s.rows.firstWhere((r) => r.participantId == 'p03' && r.programId == 'program-3').state.label;
+      expect(talk(at(jst(13, 30), report: cancelled)), '未受付');
+      expect(talk(at(jst(14, 1), report: cancelled)), '欠席');
+      final rechecked = _report(overrides: {
+        'p03': [
+          _entry('program-3', planned: 1, time: '13:00-14:00', checkedIn: true, attended: 1, at: '2026-11-30T05:20:00.000Z'),
+          _entry('program-2', planned: 3, time: '14:50-15:30', checkedIn: true, attended: 3, at: '2026-11-30T05:10:00.000Z'),
+        ],
+      });
+      expect(talk(at(jst(18, 0), report: rechecked)), '受付済み', reason: '終了後の再受付も受付済み');
+      final corrected = _report(overrides: {
+        'p01': [
+          _entry('program-1', time: '10:30-11:10', checkedIn: true, attended: 1, at: '2026-11-30T01:23:45.000Z'),
+          _entry('program-2', planned: 1, time: '14:10-14:50'),
+        ],
+      });
+      expect(states(at(jst(18, 0), report: corrected)), states(at(jst(18, 0))));
+    });
+
+    test('CSV: 受付状態に「欠席」。8列・抽出条件(受付状態=欠席)と件数が一致', () {
+      final s = at(jst(18, 0));
+      final rows = filterReceptionRows(s.rows, state: ReceptionStateFilter.absent);
+      final csv = buildReceptionStatusCsv(eventId: _eventId, rows: rows, exportedAt: jst(18, 5),
+          conditions: ReceptionStatusCsvConditions(eventName: '架空イベント', dataUpdatedAt: jst(18, 0), state: ReceptionStateFilter.absent));
+      final table = _parseCsv(csv.bytes);
+      expect(table.skip(1).map((r) => r[6]).toSet(), {'欠席'});
+      expect(table.skip(1).every((r) => r[5] == '' && r[7] == ''), isTrue, reason: '欠席の実来場人数・受付時刻は空欄');
+      expect(_csvInfo(csv.bytes)['受付状態'], '欠席');
+      expect(_csvInfo(csv.bytes)['抽出件数'], 4);
+      final all = _parseCsv(buildReceptionStatusCsv(eventId: _eventId, rows: s.rows, exportedAt: jst(18, 5),
+          conditions: ReceptionStatusCsvConditions(eventName: '架空イベント', dataUpdatedAt: jst(18, 0))).bytes);
+      expect(all.skip(1).map((r) => r[6]).toSet(), {'受付済み', '欠席'});
+    });
+
+    testWidgets('画面: 判定時刻は最後の取得時刻(時間が経っても再取得・再判定しない)。更新すると再判定。欠席の表示・絞り込み・集計・CSV', (tester) async {
+      await _wide(tester);
+      var clock = jst(11, 0);
+      final service = _FakeService([_report()]);
+      final saved = _SavedCsv();
+      await tester.pumpWidget(MaterialApp(
+        home: ReceptionStatusPage(
+          eventId: _eventId, eventName: '架空イベント', service: service, now: () => clock, csvSaver: saved.call,
+          eventStartAt: start, eventEndAt: end,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(_cells(tester, const ValueKey('status-row-p02-program-1'))[6], '未受付', reason: '11:00時点では終了前');
+      clock = jst(12, 0);
+      await tester.pump(const Duration(hours: 2));
+      expect(_cells(tester, const ValueKey('status-row-p02-program-1'))[6], '未受付', reason: '再取得しない限り判定時刻は変わらない');
+      expect(service.calls.length, 1);
+
+      await tester.tap(find.byKey(const Key('reception-status-refresh')));
+      await tester.pumpAndSettle();
+      expect(service.calls.length, 2);
+      expect(_cells(tester, const ValueKey('status-row-p02-program-1'))[6], '欠席');
+      await _choose(tester, 'reception-status-state', '欠席');
+      expect(find.text('表示中 1行 / 全7行'), findsOneWidget);
+      await _scrollTo(tester, const Key('reception-status-export-csv'));
+      await tester.tap(find.byKey(const Key('reception-status-export-csv')));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      final info = _csvInfo(saved.saves.single.bytes);
+      expect([info['受付状態'], info['抽出件数'], info['データ最終更新日時']], ['欠席', 1, '2026/11/30 12:00:00（日本時間）']);
+      expect(_parseCsv(saved.saves.single.bytes)[1][6], '欠席');
+
+      await _view(tester, ReceptionStatusView.summary);
+      expect(_tile(tester, 'total-absent'), '欠席申込件数|1件|未受付のうち、全プログラムが終了');
+      expect(_tile(tester, 'total-not-checked-in'), '未受付申込件数|3件', reason: '既存の未受付申込件数は不変(欠席を含む)');
+      expect(_cells(tester, const ValueKey('hebel-status-none')), ['該当なし', '3件', '0件', '3件', '1件', '0.0%']);
+      expect(_cells(tester, const ValueKey('program-status-program-1')), ['架空の譲渡会（ねこ）', '4名', '1件', '3名', '1件', '1件', '50.0%']);
+      expect(_cells(tester, const ValueKey('slot-status-program-1-11:10-11:50')), ['11:10-11:50', '2名', '0名', '0件', '1件', '1件']);
+      expect(service.calls.length, 2, reason: '絞り込み・CSV・表示切替では通信しない');
+    });
+
+    testWidgets('入口: イベント管理画面が取得済みのイベント開始・終了日時を渡す(追加の通信なし)', (tester) async {
+      await _wide(tester);
+      final reports = _FakeService([_report()]);
+      final summary = ImportEventSummary.fromJson({
+        'eventId': _eventId, 'eventName': '架空イベント', 'venue': '架空会場', 'programs': <Object>[],
+        'startAt': '2026-11-30T01:00:00.000Z', 'endAt': '2026-11-30T08:00:00.000Z',
+      });
+      expect(summary.endAt!.toUtc(), end);
+      expect(ImportEventSummary.fromJson({'eventId': _eventId}).endAt, isNull);
+      await tester.pumpWidget(MaterialApp(
+        home: ConfirmedConsolePage(
+          initialEventId: _eventId,
+          authClient: FakeAuthClient(signedIn: true),
+          accessService: FakeAccessService([const AccessCheck.granted(AccessRole.admin)]),
+          receptionStaffKeyIssuer: FakeReceptionStaffKeyIssuer(),
+          eventSummaryService: FakeImportService(event: summary),
+          winnerMailService: FakeWinnerMailService(),
+          winnerSendService: FakeSendService(),
+          reminderService: FakeReminderService(),
+          assignmentService: FakeAssignmentService(),
+          attendanceReportService: reports,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('受付状況一覧'));
+      await tester.pumpAndSettle();
+      final page = tester.widget<ReceptionStatusPage>(find.byType(ReceptionStatusPage));
+      expect(page.eventStartAt!.toUtc(), start);
+      expect(page.eventEndAt!.toUtc(), end);
+      expect(reports.calls, [_eventId]);
     });
   });
 

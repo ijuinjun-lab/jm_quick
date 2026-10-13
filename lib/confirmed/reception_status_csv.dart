@@ -17,6 +17,7 @@ import 'reception_status_summary.dart';
 ///   条件の無い項目は「指定なし」/「すべて」と明記する。
 /// ■ 参加者一覧の列は固定の8列: 氏名 / HEBEL属性 / 参加プログラム / 参加時間 / 予定人数 / 実来場人数 / 受付状態 / 受付時刻。
 ///   メールアドレス・かな・HEBEL属性の原文など、これ以外の個人情報は含めない。HEBEL属性は画面と同じ3分類。
+/// ■ 受付状態は 受付済み / 未受付 / 欠席(画面と同じ判定。判定時刻=データ最終更新日時)。
 /// ■ 予定人数・実来場人数は数値のセル(単位なし)。未受付の実来場人数・受付時刻、時間の無い申込の参加時間は空欄。
 ///   受付時刻は日本時間の YYYY/MM/DD HH:mm。
 /// ■ UTF-8(BOM付き)・CRLF・カンマ区切り。カンマ・ダブルクォーテーション・改行を含む値はRFC 4180どおりに囲む
@@ -108,7 +109,7 @@ List<Object> _row(ReceptionStatusRow r) => [
   r.timeText ?? '',
   r.plannedCount ?? '',
   r.checkedIn ? (r.attendedCount ?? '') : '',
-  r.checkedIn ? '受付済み' : '未受付',
+  r.state.label, // 受付済み / 未受付 / 欠席(画面と同じ判定時刻)
   r.checkedIn && r.checkedInAt != null ? formatCsvJst(r.checkedInAt!) : '',
 ];
 

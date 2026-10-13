@@ -1072,12 +1072,14 @@ class ImportEventSummary {
     required this.startAt,
     required this.venue,
     required this.programs,
+    this.endAt,
   });
   factory ImportEventSummary.fromJson(Map<String, dynamic> json) =>
       ImportEventSummary(
         eventId: json['eventId'] as String? ?? '',
         eventName: json['eventName'] as String? ?? '',
         startAt: DateTime.tryParse(json['startAt'] as String? ?? '')?.toLocal(),
+        endAt: DateTime.tryParse(json['endAt'] as String? ?? '')?.toLocal(),
         venue: json['venue'] as String? ?? '',
         programs: [
           for (final p
@@ -1095,6 +1097,9 @@ class ImportEventSummary {
   final String eventId;
   final String eventName;
   final DateTime? startAt;
+
+  /// イベントの終了日時(サーバーが返す。未設定はnull)。受付状況一覧の欠席判定の③に使う。
+  final DateTime? endAt;
   final String venue;
   final List<({String programId, String name, int order})> programs;
 }

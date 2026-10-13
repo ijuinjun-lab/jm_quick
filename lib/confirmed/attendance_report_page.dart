@@ -28,6 +28,8 @@ class AttendanceReportPage extends StatefulWidget {
     required this.service,
     AttendanceReportSaver? saver,
     DateTime Function()? now,
+    this.eventStartAt,
+    this.eventEndAt,
   }) : saver = saver ?? _saveWithBrowser,
        now = now ?? DateTime.now;
 
@@ -36,6 +38,10 @@ class AttendanceReportPage extends StatefulWidget {
   final AttendanceReportService service;
   final AttendanceReportSaver saver;
   final DateTime Function() now;
+
+  /// 欠席判定用のイベント開始・終了(イベント管理画面が取得済みの値。この画面では取得しない)。
+  final DateTime? eventStartAt;
+  final DateTime? eventEndAt;
 
   @override
   State<AttendanceReportPage> createState() => _AttendanceReportPageState();
@@ -57,7 +63,14 @@ class _AttendanceReportPageState extends State<AttendanceReportPage> {
     });
     try {
       final report = await widget.service.getReport(widget.eventId);
-      final file = buildAttendanceReportXlsx(report, exportedAt: widget.now());
+      // データ取得日時(欠席の判定時刻。出力情報シートとファイル名にも使う)
+      final fetchedAt = widget.now();
+      final file = buildAttendanceReportXlsx(
+        report,
+        exportedAt: fetchedAt,
+        eventStartAt: widget.eventStartAt,
+        eventEndAt: widget.eventEndAt,
+      );
       widget.saver(file.bytes, file.fileName, xlsxMimeType);
       if (mounted) {
         setState(
@@ -95,7 +108,8 @@ class _AttendanceReportPageState extends State<AttendanceReportPage> {
             const SizedBox(height: 6),
             const Text(
               '参加者全員(未来場の方を含む)について、取込回・氏名・かな・メールアドレス・HEBEL属性と、'
-              'programごとの予定人数・予定時間・受付状況・実来場人数・受付時刻(日本時間)を1行ずつ出力します。',
+              'programごとの予定人数・予定時間・受付状況(受付済・未受付・欠席)・実来場人数・受付時刻(日本時間)を1行ずつ出力します。'
+              '2枚目のシートに、データ取得日時(日本時間)を記録します。',
             ),
             const SizedBox(height: 6),
             const Text(

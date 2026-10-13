@@ -147,7 +147,7 @@ void main() {
     });
 
     testWidgets(
-      'そのイベントに属する機能(イベント設定・CSV取込・当選メール設定・当選メール送信・リマインド・参加者管理・受付)が表示される。「受付訂正」は出さない',
+      'そのイベントに属する機能(イベント設定・CSV取込・当選メール設定・当選メール送信・リマインド・受付)が表示される。「受付訂正」「参加者管理」は出さない',
       (tester) async {
         await tester.pumpWidget(_eventConsole());
         await tester.pumpAndSettle();
@@ -158,7 +158,10 @@ void main() {
         // 「受付訂正(準備中)」はメニューから削除した(訂正・取消は既存のスマホ受付画面で行う)。
         expect(find.text('受付訂正'), findsNothing);
         expect(eventConsoleFeatureLabels, isNot(contains('受付訂正')));
-        for (final label in ['イベント設定', '参加者管理']) {
+        // 「参加者管理(準備中)」も、遷移先・実装済みの機能が無いためメニューから削除した。
+        expect(find.text('参加者管理'), findsNothing);
+        expect(eventConsoleFeatureLabels, isNot(contains('参加者管理')));
+        for (final label in ['イベント設定']) {
           final tile = tester.widget<ListTile>(
             find.ancestor(
               of: find.text(label),

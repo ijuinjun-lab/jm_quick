@@ -3,6 +3,7 @@
 //  - 第5回相当(HEBEL: ハウス3・メゾン2・いいえ5)+ 未知・空欄・属性なし・同じメールの別participant・受付済/未受付・
 //    複数program・人数訂正後の値・受付取消(未受付)・0 participant・特殊文字を含むイベント名
 //  - 画面: 説明文・出力ボタン・保存(ダウンロード)・エラー表示。/console のイベント管理画面からの入口
+//  - 受付列の欠席(受付状況一覧と同じ判定・判定時刻=データ取得日時)・2枚目「出力情報」(データ取得日時)。明細表の構造は不変
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -15,6 +16,7 @@ import 'package:jm_quick/confirmed/attendance_report_service.dart';
 import 'package:jm_quick/confirmed/attendance_report_xlsx.dart';
 import 'package:jm_quick/confirmed/console_page.dart';
 import 'package:jm_quick/confirmed/import_models.dart';
+import 'package:jm_quick/confirmed/reception_status_summary.dart';
 import 'package:jm_quick/confirmed/winner_send_service.dart';
 import 'package:jm_quick/confirmed/xlsx_reader.dart';
 import 'package:jm_quick/confirmed/xlsx_writer.dart';
@@ -175,11 +177,18 @@ AttendanceReport _report({String? eventName}) => AttendanceReport.fromJson(
       as Map<String, dynamic>,
 );
 
-/// 書き出したxlsxを、取込用の読み取り器で読み戻す(1シート)。
+/// 書き出したxlsxを、取込用の読み取り器で読み戻す(1シート。xlsx書き出し器の単体確認用)。
 XlsxSheet _readBack(Uint8List bytes) {
   final sheets = readXlsxSheets(bytes);
   expect(sheets.length, 1);
   return sheets.single;
+}
+
+/// 最終実績Excelを読み戻す。1枚目=明細表「最終実績」(これを返す)、2枚目=「出力情報」。
+XlsxSheet _readReport(Uint8List bytes) {
+  final sheets = readXlsxSheets(bytes);
+  expect(sheets.map((s) => s.name), ['最終実績', '出力情報'], reason: '明細表は1枚目のまま。2枚目は出力情報だけ');
+  return sheets.first;
 }
 
 String _part(Uint8List bytes, String name) => utf8.decode(
@@ -269,7 +278,7 @@ void main() {
         _report(),
         exportedAt: DateTime.utc(2026, 11, 30, 16, 0),
       );
-      final header = _readBack(file.bytes).rows.first;
+      final header = _readReport(file.bytes).rows.first;
       expect(header, [
         '取込回',
         '氏名',
@@ -293,7 +302,7 @@ void main() {
           _report(),
           exportedAt: DateTime.utc(2026, 11, 30),
         );
-        final rows = _readBack(file.bytes).rows.skip(1).toList();
+        final rows = _readReport(file.bytes).rows.skip(1).toList();
         expect(file.participantCount, 14);
         expect(rows.length, 14);
         String col(List<String> r, int i) => i < r.length ? r[i] : '';
@@ -328,7 +337,7 @@ void main() {
     );
 
     test('予定人数・予定時間・受付済/未受付・実来場人数(訂正後)・受付時刻(日本時間)・受付取消・イベント来場状況', () {
-      final rows = _readBack(
+      final rows = _readReport(
         buildAttendanceReportXlsx(
           _report(),
           exportedAt: DateTime.utc(2026, 11, 30),
@@ -406,7 +415,7 @@ void main() {
         empty,
         exportedAt: DateTime.utc(2026, 11, 30),
       );
-      final sheet = _readBack(file.bytes);
+      final sheet = _readReport(file.bytes);
       expect(file.participantCount, 0);
       expect(sheet.rows.length, 1);
       expect(
@@ -425,7 +434,7 @@ void main() {
       for (final p in json['participants'] as List) {
         (p as Map).remove('hebelResidence');
       }
-      final rows = _readBack(
+      final rows = _readReport(
         buildAttendanceReportXlsx(
           AttendanceReport.fromJson(json),
           exportedAt: DateTime.utc(2026),
@@ -440,6 +449,168 @@ void main() {
         ]),
       );
       expect(rows.skip(1).every((r) => r.length < 5 || r[4] == ''), isTrue);
+    });
+  });
+
+  group('最終実績Excel: 欠席(受付状況一覧と同じ判定)と出力情報シート', () {
+    // 開催日 2026/11/30(日本時間)。開始 10:00・終了 17:00 JST
+    final start = DateTime.utc(2026, 11, 30, 1);
+    final end = DateTime.utc(2026, 11, 30, 8);
+    DateTime jst(int h, int m) => DateTime.utc(2026, 11, 30, h, m).subtract(const Duration(hours: 9));
+    Map<String, dynamic> e(String id, {String? time, bool checkedIn = false}) => {
+      'programId': id, 'plannedCount': 2, 'timeText': time, 'checkedIn': checkedIn,
+      'attendedCount': checkedIn ? 2 : null, 'checkedInAt': checkedIn ? '2026-11-30T01:30:00.000Z' : null,
+    };
+    Map<String, dynamic> person(String id, List<Map<String, dynamic>> programs, {String status = 'active', bool committed = true}) => {
+      'participantId': id, 'importSequence': 1, 'batchCommitted': committed, 'importRow': 2, 'name': '架空 $id', 'kana': 'かくう',
+      'email': '$id@example.invalid', 'status': status, 'programs': programs,
+    };
+    AttendanceReport report({bool bCheckedIn = false}) => AttendanceReport.fromJson(jsonDecode(jsonEncode({
+      'eventId': 'evReport0123456789',
+      'eventName': '架空イベント',
+      'programs': [
+        {'programId': 'p1', 'name': '架空ねこ', 'inEvent': true},
+        {'programId': 'p2', 'name': '架空いぬ', 'inEvent': true},
+        {'programId': 'p3', 'name': '架空トーク', 'inEvent': true},
+      ],
+      'participants': [
+        person('a', [e('p1', time: '10:30-11:10', checkedIn: true), e('p2', time: '14:10-14:50')]), // 複数program
+        person('b', [e('p1', time: '11:10-11:50', checkedIn: bCheckedIn)]), // 受付取消(未受付)→ 再受付
+        person('c', [e('p3')]), // 時間帯なし(トーク)
+        person('d', [e('p1', time: '10:30-11:10')], status: 'inactive'), // 対象外: 有効でない
+        person('e', [e('p1', time: '10:30-11:10')], committed: false), // 対象外: 取込回が未確定
+        person('f', [e('p2', time: '午後の部')]), // 読めない時間帯
+      ],
+    })) as Map<String, dynamic>);
+    Map<String, String> reception(AttendanceReportFile file) {
+      final rows = _readReport(file.bytes).rows;
+      final header = rows.first;
+      final out = <String, String>{};
+      for (final row in rows.skip(1)) {
+        for (final (p, name) in [('p1', '架空ねこ'), ('p2', '架空いぬ'), ('p3', '架空トーク')]) {
+          final value = row[header.indexOf('$name：受付')];
+          if (value.isNotEmpty) out['${row[1]}/$p'] = value;
+        }
+      }
+      return out;
+    }
+
+    test('終了前・終了後・受付済み・複数program・対象外・終了時刻不明(判定時刻=データ取得日時)', () {
+      expect(reception(buildAttendanceReportXlsx(report(), exportedAt: jst(12, 0), eventStartAt: start, eventEndAt: end)), {
+        '架空 a/p1': '受付済', '架空 a/p2': '未受付', '架空 b/p1': '欠席', '架空 c/p3': '未受付',
+        '架空 d/p1': '未受付', '架空 e/p1': '未受付', '架空 f/p2': '未受付',
+      });
+      expect(reception(buildAttendanceReportXlsx(report(), exportedAt: jst(18, 0), eventStartAt: start, eventEndAt: end)), {
+        '架空 a/p1': '受付済', '架空 a/p2': '欠席', '架空 b/p1': '欠席', '架空 c/p3': '欠席',
+        '架空 d/p1': '未受付', '架空 e/p1': '未受付', '架空 f/p2': '欠席',
+      }, reason: '対象外(有効でない・取込回が未確定)は従来どおり未受付。読めない時間帯・トークはイベント終了日時で判定');
+      expect(reception(buildAttendanceReportXlsx(report(), exportedAt: jst(18, 0), eventStartAt: start)), {
+        '架空 a/p1': '受付済', '架空 a/p2': '欠席', '架空 b/p1': '欠席', '架空 c/p3': '未受付',
+        '架空 d/p1': '未受付', '架空 e/p1': '未受付', '架空 f/p2': '未受付',
+      }, reason: 'イベント終了日時が無ければ、時間帯で決められないprogramは欠席にしない');
+      expect(reception(buildAttendanceReportXlsx(report(), exportedAt: jst(18, 0))).values.toSet(), {'受付済', '未受付'},
+          reason: '開催日時が不明なら欠席にしない(従来の出力と同じ)');
+      expect(reception(buildAttendanceReportXlsx(report(bCheckedIn: true), exportedAt: jst(18, 0), eventStartAt: start, eventEndAt: end))['架空 b/p1'],
+          '受付済', reason: '終了後の再受付は受付済');
+    });
+
+    test('受付状況一覧と同じ判定(同じ関数・同じ入力なら同じ結果)。境界: 終了時刻ちょうどは未受付', () {
+      for (final at in [jst(11, 50), jst(11, 51), jst(18, 0)]) {
+        final status = buildReceptionStatus(report(), judgedAt: at, eventStartAt: start, eventEndAt: end);
+        final excel = reception(buildAttendanceReportXlsx(report(), exportedAt: at, eventStartAt: start, eventEndAt: end));
+        for (final r in status.rows) {
+          final label = switch (r.state) {
+            ReceptionAttendanceState.attended => '受付済',
+            ReceptionAttendanceState.pending => '未受付',
+            ReceptionAttendanceState.absent => '欠席',
+          };
+          expect(excel['架空 ${r.participantId}/${r.programId}'], label, reason: '$at ${r.participantId}/${r.programId}');
+        }
+      }
+      expect(reception(buildAttendanceReportXlsx(report(), exportedAt: jst(11, 50), eventStartAt: start, eventEndAt: end))['架空 b/p1'], '未受付');
+    });
+
+    test('明細表の構造は不変(列・行・イベント来場状況・数値/日時セル)。2枚目「出力情報」にデータ取得日時(日本時間)', () {
+      final plain = buildAttendanceReportXlsx(report(), exportedAt: jst(18, 0));
+      final judged = buildAttendanceReportXlsx(report(), exportedAt: jst(18, 0), eventStartAt: start, eventEndAt: end);
+      final a = _readReport(plain.bytes).rows;
+      final b = _readReport(judged.bytes).rows;
+      expect(b.first, a.first, reason: '列名・列数は同じ');
+      expect(b.length, a.length);
+      expect(b.map((r) => r.length), a.map((r) => r.length));
+      final col = b.first.indexOf('イベント来場状況');
+      expect([for (final r in b.skip(1)) r[col]], ['受付あり', '未来場', '未来場', '未来場', '未来場', '未来場'], reason: '既存の表示仕様のまま');
+      final sheet1 = _part(judged.bytes, 'xl/worksheets/sheet1.xml');
+      expect(sheet1, contains('<autoFilter ref="A1:'));
+      expect(sheet1, contains('state="frozen"'));
+      final sheet2 = _part(judged.bytes, 'xl/worksheets/sheet2.xml');
+      expect(sheet2, isNot(contains('autoFilter')));
+      expect(sheet2, isNot(contains('frozen')));
+      expect(_part(judged.bytes, 'xl/workbook.xml'), contains('localSheetId="0"'), reason: 'フィルターは1枚目のまま');
+      final info = readXlsxSheets(judged.bytes)[1].rows;
+      expect(info.first, ['項目', '値']);
+      expect(info[1], ['イベント名', '架空イベント']);
+      expect(info[2], ['イベントID', 'evReport0123456789']);
+      expect(info[3], ['データ取得日時（日本時間）', '2026-11-30 18:00:00']);
+      expect(info[4], ['参加者数', '6']);
+      expect(info[5].first, '「受付」列の欠席');
+      expect(_part(judged.bytes, 'xl/worksheets/sheet2.xml'), contains('s="2"'), reason: 'データ取得日時は日時のセル');
+    });
+
+    test('xlsx書き出し器: 情報シートの有無で1枚目のXMLは同一(既存の明細表の構造を変えない)', () {
+      final columns = <XlsxColumn>[(header: 'A', width: 10), (header: 'B', width: 10)];
+      final rows = [<Object?>['x', 1]];
+      final without = buildXlsx(sheetName: '最終実績', columns: columns, rows: rows);
+      final withInfo = buildXlsx(sheetName: '最終実績', columns: columns, rows: rows,
+          infoSheet: (name: '出力情報', columns: columns, rows: [<Object?>['k', 'v']]));
+      expect(_part(withInfo, 'xl/worksheets/sheet1.xml'), _part(without, 'xl/worksheets/sheet1.xml'));
+      expect(readXlsxSheets(without).length, 1);
+      expect(readXlsxSheets(withInfo).map((s) => s.name), ['最終実績', '出力情報']);
+    });
+
+    testWidgets('画面: データ取得直後の時刻で判定・記録する(取得は1回だけ)。イベント管理画面から開始・終了日時を渡す', (tester) async {
+      final service = _FakeReportService(report: report());
+      final saved = <Uint8List>[];
+      await tester.pumpWidget(MaterialApp(
+        home: AttendanceReportPage(
+          eventId: 'evReport0123456789', eventName: '架空イベント', service: service,
+          now: () => jst(18, 0), saver: (bytes, name, mime) => saved.add(bytes),
+          eventStartAt: start, eventEndAt: end,
+        ),
+      ));
+      await tester.tap(find.byKey(const Key('export-final-report')));
+      await tester.pumpAndSettle();
+      expect(service.calls.length, 1);
+      expect(reception(AttendanceReportFile(fileName: 'x.xlsx', bytes: saved.single, participantCount: 6))['架空 b/p1'], '欠席');
+      expect(readXlsxSheets(saved.single)[1].rows[3], ['データ取得日時（日本時間）', '2026-11-30 18:00:00']);
+
+      // 入口: イベント管理画面が取得済みの開始・終了日時を渡す(追加の通信なし)
+      final summary = ImportEventSummary.fromJson({
+        'eventId': 'evfixture0123456789', 'eventName': '架空イベント', 'venue': '架空会場', 'programs': <Object>[],
+        'startAt': '2026-11-30T01:00:00.000Z', 'endAt': '2026-11-30T08:00:00.000Z',
+      });
+      final reports = _FakeReportService(report: report());
+      await tester.pumpWidget(MaterialApp(
+        home: ConfirmedConsolePage(
+          initialEventId: 'evfixture0123456789',
+          authClient: FakeAuthClient(signedIn: true),
+          accessService: FakeAccessService([const AccessCheck.granted(AccessRole.admin)]),
+          receptionStaffKeyIssuer: FakeReceptionStaffKeyIssuer(),
+          eventSummaryService: FakeImportService(event: summary),
+          winnerMailService: FakeWinnerMailService(),
+          winnerSendService: FakeSendService(),
+          reminderService: FakeReminderService(),
+          attendanceReportService: reports,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('最終実績Excel出力'));
+      await tester.tap(find.text('最終実績Excel出力'));
+      await tester.pumpAndSettle();
+      final page = tester.widget<AttendanceReportPage>(find.byType(AttendanceReportPage));
+      expect(page.eventStartAt!.toUtc(), start);
+      expect(page.eventEndAt!.toUtc(), end);
+      expect(reports.calls, isEmpty, reason: '開いただけでは取得しない');
     });
   });
 
@@ -528,8 +699,8 @@ void main() {
       expect(find.text('参加者・受付結果をExcelで出力します。データは変更されません。'), findsOneWidget);
       expect(
         find.text('参加者管理'),
-        findsOneWidget,
-        reason: '参加者管理は準備中のまま(別機能を同時に作らない)',
+        findsNothing,
+        reason: '参加者管理(準備中)はメニューから削除した(別機能を作らない)',
       );
       await tester.ensureVisible(find.text('最終実績Excel出力'));
       await tester.tap(find.text('最終実績Excel出力'));

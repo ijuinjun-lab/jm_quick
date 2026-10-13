@@ -48,6 +48,8 @@ class ReceptionStatusPage extends StatefulWidget {
     required this.service,
     DateTime Function()? now,
     ReceptionStatusCsvSaver? csvSaver,
+    this.eventStartAt,
+    this.eventEndAt,
   }) : now = now ?? DateTime.now,
        csvSaver = csvSaver ?? _saveWithBrowser;
 
@@ -56,6 +58,10 @@ class ReceptionStatusPage extends StatefulWidget {
   final AttendanceReportService service;
   final DateTime Function() now;
   final ReceptionStatusCsvSaver csvSaver;
+
+  /// イベントの開始(時間帯の日付)・終了(終了時刻の③)。イベント管理画面が取得済みの値を渡す(この画面では取得しない)。
+  final DateTime? eventStartAt;
+  final DateTime? eventEndAt;
 
   @override
   State<ReceptionStatusPage> createState() => _ReceptionStatusPageState();
@@ -66,6 +72,8 @@ const Color _checkedInColor = Color(0xff067647);
 const Color _checkedInBackground = Color(0xffe7f5ec);
 const Color _pendingColor = Color(0xffb54708);
 const Color _pendingBackground = Color(0xfffff1cf);
+const Color _absentColor = Color(0xff5c6670);
+const Color _absentBackground = Color(0xffe5e7eb);
 const Duration _jst = Duration(hours: 9);
 
 String _two(int v) => v.toString().padLeft(2, '0');
@@ -127,11 +135,18 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
     });
     try {
       final report = await widget.service.getReport(widget.eventId);
-      final built = buildReceptionStatus(report);
+      // 欠席の判定時刻 = このデータを取得した時刻(最終更新)。画面・絞り込み・CSVで同じ時点になる。
+      final fetchedAt = widget.now();
+      final built = buildReceptionStatus(
+        report,
+        judgedAt: fetchedAt,
+        eventStartAt: widget.eventStartAt,
+        eventEndAt: widget.eventEndAt,
+      );
       if (!mounted) return;
       setState(() {
         status = built;
-        updatedAt = widget.now();
+        updatedAt = fetchedAt;
         if (programFilter != null &&
             !built.programs.any((p) => p.programId == programFilter)) {
           programFilter = null;
@@ -601,6 +616,12 @@ class _TotalsSection extends StatelessWidget {
                 value: '${totals.notCheckedInApplications}件',
               ),
               _StatTile(
+                tileKey: const Key('total-absent'),
+                label: '欠席申込件数',
+                value: '${totals.absentApplications}件',
+                note: '未受付のうち、全プログラムが終了',
+              ),
+              _StatTile(
                 tileKey: const Key('total-rate'),
                 label: '受付率',
                 value: formatRate(totals.rate),
@@ -610,7 +631,8 @@ class _TotalsSection extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           const Text(
-            '申込件数は参加者単位です(複数のプログラムに申し込んだ方も1件)。いずれかのプログラムを受付済みなら「受付済み」です。',
+            '申込件数は参加者単位です(複数のプログラムに申し込んだ方も1件)。いずれかのプログラムを受付済みなら「受付済み」です。'
+            '欠席は、受付が無いままプログラムの終了時刻を過ぎたものです(判定時点は最終更新。終了時刻が分からないプログラムは欠席にしません)。',
             style: TextStyle(color: _muted, fontSize: 12),
           ),
         ],
@@ -664,7 +686,7 @@ class _HebelSection extends StatelessWidget {
   const _HebelSection({required this.groups});
   final List<ReceptionHebelStatus> groups;
 
-  static const _flexes = [5, 2, 2, 2, 2];
+  static const _flexes = [5, 2, 2, 2, 2, 2];
 
   @override
   Widget build(BuildContext context) => Card(
@@ -685,7 +707,7 @@ class _HebelSection extends StatelessWidget {
           const _TableLine(
             header: true,
             flexes: _flexes,
-            cells: ['HEBEL属性', '申込件数', '受付済み件数', '未受付件数', '受付率'],
+            cells: ['HEBEL属性', '申込件数', '受付済み件数', '未受付件数', 'うち欠席', '受付率'],
           ),
           for (final g in groups)
             _TableLine(
@@ -696,6 +718,7 @@ class _HebelSection extends StatelessWidget {
                 '${g.applications}件',
                 '${g.checkedInApplications}件',
                 '${g.notCheckedInApplications}件',
+                '${g.absentApplications}件',
                 formatRate(g.rate),
               ],
             ),
@@ -709,7 +732,7 @@ class _ProgramSection extends StatelessWidget {
   const _ProgramSection({required this.programs});
   final List<ReceptionProgramStatus> programs;
 
-  static const _flexes = [4, 2, 2, 2, 2, 2];
+  static const _flexes = [4, 2, 2, 2, 2, 2, 2];
 
   @override
   Widget build(BuildContext context) => Card(
@@ -729,7 +752,7 @@ class _ProgramSection extends StatelessWidget {
           const _TableLine(
             header: true,
             flexes: _flexes,
-            cells: ['プログラム', '予定人数', '受付済み件数', '実来場人数', '未受付件数', '受付率'],
+            cells: ['プログラム', '予定人数', '受付済み件数', '実来場人数', '未受付件数', 'うち欠席', '受付率'],
           ),
           for (final p in programs)
             _TableLine(
@@ -741,6 +764,7 @@ class _ProgramSection extends StatelessWidget {
                 '${p.checkedInEntries}件',
                 '${p.attendedTotal}名',
                 '${p.notCheckedInEntries}件',
+                '${p.absentEntries}件',
                 formatRate(p.rate),
               ],
             ),
@@ -754,7 +778,7 @@ class _SlotSection extends StatelessWidget {
   const _SlotSection({required this.programs});
   final List<ReceptionProgramStatus> programs;
 
-  static const _flexes = [4, 2, 2, 2, 2];
+  static const _flexes = [4, 2, 2, 2, 2, 2];
 
   @override
   Widget build(BuildContext context) => Card(
@@ -772,7 +796,7 @@ class _SlotSection extends StatelessWidget {
             const _TableLine(
               header: true,
               flexes: _flexes,
-              cells: ['時間帯', '予定人数', '実来場人数', '受付済み件数', '対象件数'],
+              cells: ['時間帯', '予定人数', '実来場人数', '受付済み件数', '対象件数', '欠席件数'],
             ),
             for (final slot in p.slots)
               _TableLine(
@@ -784,6 +808,7 @@ class _SlotSection extends StatelessWidget {
                   '${slot.attendedTotal}名',
                   '${slot.checkedInEntries}件',
                   '${slot.entries}件',
+                  '${slot.absentEntries}件',
                 ],
               ),
           ],
@@ -860,14 +885,22 @@ class _StatusRowTile extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
-                  color: row.checkedIn ? _checkedInBackground : _pendingBackground,
+                  color: switch (row.state) {
+                    ReceptionAttendanceState.attended => _checkedInBackground,
+                    ReceptionAttendanceState.pending => _pendingBackground,
+                    ReceptionAttendanceState.absent => _absentBackground,
+                  },
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
-                  row.checkedIn ? '受付済み' : '未受付',
+                  row.state.label,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: row.checkedIn ? _checkedInColor : _pendingColor,
+                    color: switch (row.state) {
+                      ReceptionAttendanceState.attended => _checkedInColor,
+                      ReceptionAttendanceState.pending => _pendingColor,
+                      ReceptionAttendanceState.absent => _absentColor,
+                    },
                     fontWeight: FontWeight.bold,
                     fontSize: 12,
                   ),

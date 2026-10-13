@@ -12,6 +12,73 @@ import 'attendance_report_service.dart';
 /// ■ program名・表示順はイベント設定(応答のprograms)から。時間帯は応答の timeText(slotLabel・startAt/endAt由来)。
 /// ■ HEBEL属性は、この画面の表示・集計だけ3分類にまとめる([ReceptionHebelGroup])。保存されている分類・原文は変えず、
 ///   受付画面・最終実績Excel・取込の分類(hebel_residence.js の5分類)にも影響しない。
+/// ■ 出欠(表示・集計時に判定する。Firestoreには保存しない・定期的な書込みもしない):
+///     受付済み(出席) = checkedIn / 欠席 = 未受付のまま終了時刻を過ぎた / 未受付 = それ以外(終了前・終了時刻が不明)。
+///   判定時刻は画面が最後にデータを取得した時刻(画面・絞り込み・CSVで同じ時点)。終了後に受付・取消された場合も、
+///   次の取得で受付状態(正本)から判定し直す。終了時刻は [programEndAt] の優先順位で決め、決められなければ欠席にしない。
+
+/// 出欠の表示状態。
+enum ReceptionAttendanceState {
+  attended('受付済み'),
+  pending('未受付'),
+  absent('欠席');
+
+  const ReceptionAttendanceState(this.label);
+  final String label;
+}
+
+const Duration _jstOffset = Duration(hours: 9);
+
+/// 時間帯の表示(「14:10-14:50」「14時10分～14時50分」等)から、終了時刻(UTC)を求める。
+/// 開催日([eventStartAt]の日本時間の日付)と組み合わせる。開始・終了とも読み取れ、終了>開始のときだけ返す
+/// (日付をまたぐ時間帯・長さ0・読めない文字列・開催日が不明はnull=この方法では決めない)。
+/// 時間帯の表示は、サーバーが programAttendances の slotLabel、無ければ startAt/endAt(日本時間)から作ったもの。
+DateTime? slotEndAt(String? label, DateTime? eventStartAt) {
+  if (label == null || eventStartAt == null) return null;
+  final text = _nfkcLite(label).trim();
+  final m = RegExp(
+    r'^(\d{1,2})\s*(?::|時)\s*(\d{2})\s*分?\s*[-~〜–—−]\s*(\d{1,2})\s*(?::|時)\s*(\d{2})\s*分?$',
+  ).firstMatch(text);
+  if (m == null) return null;
+  final [sh, sm, eh, em] = [for (var i = 1; i <= 4; i++) int.parse(m.group(i)!)];
+  if (sh > 23 || eh > 23 || sm > 59 || em > 59) return null;
+  if (eh * 60 + em <= sh * 60 + sm) return null;
+  final day = eventStartAt.toUtc().add(_jstOffset);
+  return DateTime.utc(day.year, day.month, day.day, eh, em).subtract(_jstOffset);
+}
+
+/// 全角の数字・コロン・チルダ・ハイフンを半角へ(時間帯の読み取り用。表示は変えない)。
+String _nfkcLite(String value) => String.fromCharCodes([
+  for (final c in value.runes)
+    if (c >= 0xff10 && c <= 0xff19) c - 0xff10 + 0x30
+    else if (c == 0xff1a) 0x3a
+    else if (c == 0xff5e) 0x7e
+    else if (c == 0xff0d) 0x2d
+    else if (c == 0x3000) 0x20
+    else c,
+]);
+
+/// programの終了時刻(UTC)。優先順位:
+///   ① 受付記録の終了日時・② slotLabel(いずれも応答の時間帯の表示に反映されている。[slotEndAt]で正確に読めた場合)
+///   ③ イベント全体の終了日時。どれも無ければnull(欠席と判定しない)。開催日の24:00等で補完しない。
+DateTime? programEndAt({
+  String? timeText,
+  DateTime? eventStartAt,
+  DateTime? eventEndAt,
+}) => slotEndAt(timeText, eventStartAt) ?? eventEndAt?.toUtc();
+
+/// 1つの受付記録の出欠。終了時刻ちょうどは未受付(過ぎてから欠席)。
+ReceptionAttendanceState attendanceStateOf({
+  required bool checkedIn,
+  required DateTime? endAt,
+  required DateTime? judgedAt,
+}) {
+  if (checkedIn) return ReceptionAttendanceState.attended;
+  if (endAt != null && judgedAt != null && judgedAt.toUtc().isAfter(endAt)) {
+    return ReceptionAttendanceState.absent;
+  }
+  return ReceptionAttendanceState.pending;
+}
 
 /// 主催者用受付状況一覧のHEBEL属性(3分類)。
 ///   hebelHaus → ヘーベルハウス居住(メゾンオーナー含む)、hebelMaison → ヘーベルメゾン居住、
@@ -43,6 +110,8 @@ class ReceptionStatusRow {
     required this.order,
     required this.checkedIn,
     required this.hebel,
+    this.state = ReceptionAttendanceState.pending,
+    this.endAt,
     this.timeText,
     this.plannedCount,
     this.attendedCount,
@@ -73,6 +142,12 @@ class ReceptionStatusRow {
 
   /// 受付時刻(UTC。受付済みのときだけ)。
   final DateTime? checkedInAt;
+
+  /// 出欠(判定時刻の時点)。
+  final ReceptionAttendanceState state;
+
+  /// 判定に使ったprogramの終了時刻(UTC。不明はnull)。
+  final DateTime? endAt;
 }
 
 /// 全体の集計。申込件数は参加者単位、予定人数・実来場人数は延べ(program別の合計)。
@@ -82,6 +157,7 @@ class ReceptionTotals {
     required this.plannedTotal,
     required this.checkedInApplications,
     required this.attendedTotal,
+    this.absentApplications = 0,
   });
 
   /// 申込件数(参加者単位。複数programでも1件)。
@@ -96,8 +172,11 @@ class ReceptionTotals {
   /// 実来場人数(延べ)。
   final int attendedTotal;
 
-  /// 未受付申込件数。
+  /// 未受付申込件数(受付の無い参加者。欠席を含む)。
   int get notCheckedInApplications => applications - checkedInApplications;
+
+  /// 欠席申込件数(受付が無く、申し込んだ全programの終了時刻を過ぎた参加者。未受付申込件数の内数)。
+  final int absentApplications;
 
   /// 受付率(%)= 受付済み申込件数 ÷ 申込件数 × 100。申込0件ならnull。
   double? get rate => ratePercent(checkedInApplications, applications);
@@ -109,6 +188,7 @@ class ReceptionHebelStatus {
     required this.group,
     required this.applications,
     required this.checkedInApplications,
+    this.absentApplications = 0,
   });
 
   final ReceptionHebelGroup group;
@@ -120,6 +200,9 @@ class ReceptionHebelStatus {
   final int checkedInApplications;
 
   int get notCheckedInApplications => applications - checkedInApplications;
+
+  /// 欠席件数(全体と同じ定義。未受付件数の内数)。
+  final int absentApplications;
 
   /// 受付率(%)= 受付済み件数 ÷ 申込件数 × 100。申込0件ならnull。
   double? get rate => ratePercent(checkedInApplications, applications);
@@ -133,6 +216,7 @@ class ReceptionSlotStatus {
     required this.checkedInEntries,
     required this.plannedTotal,
     required this.attendedTotal,
+    this.absentEntries = 0,
   });
 
   /// 時間帯の表示(時間の無い申込は「時間未設定」)。
@@ -141,6 +225,9 @@ class ReceptionSlotStatus {
   final int checkedInEntries;
   final int plannedTotal;
   final int attendedTotal;
+
+  /// 欠席の参加者×program件数。
+  final int absentEntries;
 }
 
 /// program別の集計。件数は参加者×program単位。
@@ -154,6 +241,7 @@ class ReceptionProgramStatus {
     required this.plannedTotal,
     required this.attendedTotal,
     required this.slots,
+    this.absentEntries = 0,
   });
 
   final String programId;
@@ -172,6 +260,9 @@ class ReceptionProgramStatus {
   final List<ReceptionSlotStatus> slots;
 
   int get notCheckedInEntries => entries - checkedInEntries;
+
+  /// 欠席の参加者×program件数(未受付件数の内数)。
+  final int absentEntries;
 
   /// 受付率(%)= 受付済み件数 ÷ 対象件数 × 100(件数ベース。人数ベースではない)。対象0件ならnull。
   double? get rate => ratePercent(checkedInEntries, entries);
@@ -226,7 +317,14 @@ int _compareSlots(String a, String b) {
   return a.compareTo(b);
 }
 
-ReceptionStatus buildReceptionStatus(AttendanceReport report) {
+/// [judgedAt]: 欠席の判定時刻(画面が最後にデータを取得した時刻)。nullなら欠席と判定しない。
+/// [eventStartAt]・[eventEndAt]: イベントの開始(時間帯の日付に使う)・終了(終了時刻の③)。
+ReceptionStatus buildReceptionStatus(
+  AttendanceReport report, {
+  DateTime? judgedAt,
+  DateTime? eventStartAt,
+  DateTime? eventEndAt,
+}) {
   final programIndex = <String, int>{
     for (final (i, p) in report.programs.indexed) p.programId: i,
   };
@@ -235,6 +333,8 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
   var checkedInApplications = 0;
   final hebelApplications = {for (final g in ReceptionHebelGroup.values) g: 0};
   final hebelCheckedIn = {for (final g in ReceptionHebelGroup.values) g: 0};
+  var absentApplications = 0;
+  final hebelAbsent = {for (final g in ReceptionHebelGroup.values) g: 0};
   for (final p in report.participants) {
     if (!isReceptionTarget(p) || p.programs.isEmpty) continue;
     final hebel = ReceptionHebelGroup.fromCategory(p.hebelCategory);
@@ -251,9 +351,11 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
           programIndex[b.programId] ?? 1 << 30,
         ),
       );
+    final firstRow = rows.length;
     for (final e in entries) {
       final index = programIndex[e.programId];
       final time = e.timeText?.trim();
+      final endAt = programEndAt(timeText: time, eventStartAt: eventStartAt, eventEndAt: eventEndAt);
       rows.add(
         ReceptionStatusRow(
           participantId: p.participantId,
@@ -269,12 +371,20 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
           plannedCount: e.plannedCount,
           checkedIn: e.checkedIn,
           hebel: hebel,
+          state: attendanceStateOf(checkedIn: e.checkedIn, endAt: endAt, judgedAt: judgedAt),
+          endAt: endAt,
           attendedCount: e.checkedIn ? e.attendedCount : null,
           checkedInAt: e.checkedIn ? e.checkedInAt : null,
         ),
       );
     }
+    // 参加者単位の欠席: 受付が無く、申し込んだ全programが欠席(終了済み)
+    if (rows.sublist(firstRow).every((r) => r.state == ReceptionAttendanceState.absent)) {
+      absentApplications += 1;
+      hebelAbsent[hebel] = hebelAbsent[hebel]! + 1;
+    }
   }
+  bool absent(ReceptionStatusRow r) => r.state == ReceptionAttendanceState.absent;
 
   final programs = <ReceptionProgramStatus>[];
   final known = [
@@ -301,6 +411,7 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
         checkedInEntries: ofProgram.where((r) => r.checkedIn).length,
         plannedTotal: _sum(ofProgram.map((r) => r.plannedCount)),
         attendedTotal: _sum(ofProgram.map((r) => r.attendedCount)),
+        absentEntries: ofProgram.where(absent).length,
         slots: [
           for (final label in labels)
             ReceptionSlotStatus(
@@ -309,6 +420,7 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
               checkedInEntries: bySlot[label]!.where((r) => r.checkedIn).length,
               plannedTotal: _sum(bySlot[label]!.map((r) => r.plannedCount)),
               attendedTotal: _sum(bySlot[label]!.map((r) => r.attendedCount)),
+              absentEntries: bySlot[label]!.where(absent).length,
             ),
         ],
       ),
@@ -321,6 +433,7 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
       plannedTotal: _sum(rows.map((r) => r.plannedCount)),
       checkedInApplications: checkedInApplications,
       attendedTotal: _sum(rows.map((r) => r.attendedCount)),
+      absentApplications: absentApplications,
     ),
     hebelGroups: [
       for (final g in ReceptionHebelGroup.values)
@@ -328,6 +441,7 @@ ReceptionStatus buildReceptionStatus(AttendanceReport report) {
           group: g,
           applications: hebelApplications[g]!,
           checkedInApplications: hebelCheckedIn[g]!,
+          absentApplications: hebelAbsent[g]!,
         ),
     ],
     programs: programs,
@@ -343,7 +457,8 @@ int _sum(Iterable<int?> values) =>
 enum ReceptionStateFilter {
   all('すべて'),
   checkedIn('受付済み'),
-  notCheckedIn('未受付');
+  notCheckedIn('未受付'),
+  absent('欠席');
 
   const ReceptionStateFilter(this.label);
   final String label;
@@ -375,7 +490,9 @@ List<ReceptionStatusRow> filterReceptionRows(
   final result = rows.where((r) {
     if (programId != null && r.programId != programId) return false;
     if (state == ReceptionStateFilter.checkedIn && !r.checkedIn) return false;
-    if (state == ReceptionStateFilter.notCheckedIn && r.checkedIn) return false;
+    // 未受付 = 受付が無く、終了前(または終了時刻が不明)。欠席は含めない。
+    if (state == ReceptionStateFilter.notCheckedIn && r.state != ReceptionAttendanceState.pending) return false;
+    if (state == ReceptionStateFilter.absent && r.state != ReceptionAttendanceState.absent) return false;
     if (hebel != null && r.hebel != hebel) return false;
     if (q.isNotEmpty && !_normalizeName(r.name).contains(q)) return false;
     return true;

@@ -481,7 +481,7 @@ void main() {
             'programs': [{'programId': 'program-2', 'plannedCount': 2, 'timeText': '15:30-16:10', 'checkedIn': false}]},
         ],
       });
-      final rows = readXlsxSheets(buildAttendanceReportXlsx(report, exportedAt: DateTime.utc(2026, 11, 30)).bytes).single.rows;
+      final rows = readXlsxSheets(buildAttendanceReportXlsx(report, exportedAt: DateTime.utc(2026, 11, 30)).bytes).first.rows;
       final col = rows.first.indexOf('通知種別');
       expect(col, 6);
       expect(rows[1][col], '通常当選');

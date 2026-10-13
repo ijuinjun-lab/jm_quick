@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import '../services/participant_csv_export_service.dart'
     show safeExportFileName;
 import 'attendance_report_service.dart';
+import 'reception_status_summary.dart'
+    show attendanceStateOf, isReceptionTarget, programEndAt, ReceptionAttendanceState;
 import 'xlsx_writer.dart';
 
 /// 最終実績(サーバーの[AttendanceReport])→ Excel(.xlsx)。1行 = 1 participant(同じメールアドレスでも統合しない)。
@@ -13,6 +15,10 @@ import 'xlsx_writer.dart';
 ///     最後に イベント来場状況。
 /// ■ 受付時刻は日本時間(Excelの日時の値。並べ替え・フィルターができる)。
 /// ■ 取消済みのprogramは「未受付」(サーバーの正本で受付状態が戻っている)。人数は訂正後の最新の値。
+/// ■ 「受付」列は 受付済 / 未受付 / 欠席。欠席の判定は受付状況一覧と同じ関数(reception_status_summary.dart)で、
+///   判定時刻はデータ取得日時。終了時刻が確認できないprogramは欠席にしない(未受付)。
+///   受付の対象外の参加者(有効でない・取込回が未確定)は、従来どおり 受付済 / 未受付 だけ(欠席と判定しない)。
+/// ■ 2枚目のシート「出力情報」に、データ取得日時(日本時間)等を記録する(1枚目の明細表の列構成・フィルターは変えない)。
 /// ■ 文字列はすべて文字列のセル(電話番号風・数字だけ・「=」始まりの値も、数値・数式にしない)。
 class AttendanceReportFile {
   const AttendanceReportFile({
@@ -26,6 +32,7 @@ class AttendanceReportFile {
 }
 
 const attendanceReportSheetName = '最終実績';
+const attendanceReportInfoSheetName = '出力情報';
 
 /// 受付画面と同じ意味の表示値(サーバーの表示名を使う)。未知は原文を併記。属性フィールドの無い参加者は空欄。
 String hebelCellOf(AttendanceReportParticipant p) {
@@ -92,10 +99,38 @@ List<String> _programNames(List<AttendanceReportProgram> programs) {
   ];
 }
 
+/// 欠席の判定に使う時点・イベントの開始/終了(受付状況一覧と同じ入力)。
+typedef AttendanceJudgement = ({
+  DateTime? judgedAt,
+  DateTime? eventStartAt,
+  DateTime? eventEndAt,
+});
+
+/// 「受付」列の値。受付状況一覧と同じ判定(受付済 / 未受付 / 欠席)。受付の対象外の参加者は欠席と判定しない。
+String receptionCellOf(
+  AttendanceReportParticipant p,
+  AttendanceReportEntry entry,
+  AttendanceJudgement judgement,
+) {
+  if (entry.checkedIn) return '受付済';
+  if (!isReceptionTarget(p)) return '未受付';
+  final state = attendanceStateOf(
+    checkedIn: false,
+    endAt: programEndAt(
+      timeText: entry.timeText?.trim(),
+      eventStartAt: judgement.eventStartAt,
+      eventEndAt: judgement.eventEndAt,
+    ),
+    judgedAt: judgement.judgedAt,
+  );
+  return state == ReceptionAttendanceState.absent ? '欠席' : '未受付';
+}
+
 /// 1つのprogramの6列: 参加予定 / 予定人数 / 予定時間 / 受付 / 実来場人数 / 受付時刻(日本時間)。
 List<Object?> _programCells(
   AttendanceReportParticipant p,
   AttendanceReportProgram program,
+  AttendanceJudgement judgement,
 ) {
   final entry = p.programs
       .where((e) => e.programId == program.programId)
@@ -106,16 +141,25 @@ List<Object?> _programCells(
     'あり',
     entry.plannedCount,
     entry.timeText,
-    entry.checkedIn ? '受付済' : '未受付',
+    receptionCellOf(p, entry, judgement),
     entry.checkedIn ? entry.attendedCount : null,
     at == null ? null : XlsxDateTime(at.toUtc().add(_jst)),
   ];
 }
 
+/// [exportedAt] はデータ取得日時(サーバーから明細を受け取った時刻)。欠席の判定時刻にも使い、出力情報シートに記録する。
+/// [eventStartAt]・[eventEndAt]: イベントの開始(時間帯の日付)・終了(終了時刻の③)。無ければその方法では判定しない。
 AttendanceReportFile buildAttendanceReportXlsx(
   AttendanceReport report, {
   required DateTime exportedAt,
+  DateTime? eventStartAt,
+  DateTime? eventEndAt,
 }) {
+  final AttendanceJudgement judgement = (
+    judgedAt: exportedAt,
+    eventStartAt: eventStartAt,
+    eventEndAt: eventEndAt,
+  );
   final names = _programNames(report.programs);
   final columns = <XlsxColumn>[
     (header: '取込回', width: 8),
@@ -148,7 +192,8 @@ AttendanceReportFile buildAttendanceReportXlsx(
         hebelCellOf(p),
         participantStateOf(p),
         notificationTypeCellOf(p),
-        for (final program in report.programs) ..._programCells(p, program),
+        for (final program in report.programs)
+          ..._programCells(p, program, judgement),
         eventAttendanceOf(p),
       ],
   ];
@@ -158,6 +203,21 @@ AttendanceReportFile buildAttendanceReportXlsx(
       sheetName: attendanceReportSheetName,
       columns: columns,
       rows: rows,
+      infoSheet: (
+        name: attendanceReportInfoSheetName,
+        columns: const [(header: '項目', width: 22), (header: '値', width: 60)],
+        rows: [
+          ['イベント名', report.eventName],
+          ['イベントID', report.eventId],
+          ['データ取得日時（日本時間）', XlsxDateTime(exportedAt.toUtc().add(_jst))],
+          ['参加者数', report.participants.length],
+          [
+            '「受付」列の欠席',
+            '受付が無いまま、プログラムの終了時刻(時間帯、無ければイベント終了日時)を、データ取得日時の時点で過ぎたもの。'
+                '終了時刻が確認できないプログラムと、受付の対象外の参加者は「未受付」。',
+          ],
+        ],
+      ),
     ),
     participantCount: report.participants.length,
   );
