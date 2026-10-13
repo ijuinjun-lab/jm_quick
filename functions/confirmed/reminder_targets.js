@@ -16,11 +16,13 @@
 //     shared-address(別の氏名。家族等の共有と推定)/ different-programs(同じ氏名・別のprogram)/
 //     undetermined(氏名が空、または同じ氏名・同じprogramで時間帯だけ違う。推測で確定しない)/
 //     suspected-duplicate(同じ氏名・同じprogram・同じ時間帯。重複登録の疑い。未解決の間はジョブを作らない)
-//   照合値(fingerprint): 全参加者の 参加者ID・当選メールの状態・メールアドレス・氏名・当選種別・program・時間帯・予定人数 から作る
-//   sha256(値そのものは含まない)。確認時とジョブ作成時で比べ、違えば古い確認で送らない。
+//   program名・時間は、メール本文と同じ規則(mail_view_model の mailPrograms / mailTimeText)で決める。参加者別の時間が無いトークは、
+//   当選メール設定のトーク共通時間(confirmedMailSettings.talkTimeText)を表示する(未設定なら補完しない)。
+//   照合値(fingerprint): 全参加者の 参加者ID・当選メールの状態・メールアドレス・氏名・当選種別・program・時間帯(トーク共通時間を含む)・
+//   予定人数 から作るsha256(値そのものは含まない)。確認時とジョブ作成時で比べ、違えば古い確認で送らない。
 
 const crypto = require("node:crypto");
-const {normalizePrograms, programTimeText} = require("./mail_view_model");
+const {mailPrograms, talkTimeTextOf, mailTimeText, programTimeText} = require("./mail_view_model");
 const {notificationTypeOf} = require("./notification_type");
 
 const PARTICIPANT_SCHEMA_VERSION = 2;
@@ -132,7 +134,9 @@ async function collectReminderRecipients(db, eventId, {event} = {}) {
       attendancesBy.get(a.participantId).push(a);
     }
   }
-  const programs = normalizePrograms(loadedEvent.programs);
+  // program名・時間はメール本文と同じ規則(役割別の名称・トークの共通時間)。宛先一覧で確認した内容 = 送られる本文
+  const programs = mailPrograms(eventId, loadedEvent);
+  const talkTimeText = talkTimeTextOf(loadedEvent);
   const programById = new Map(programs.map((p) => [p.programId, p]));
 
   const recipients = eligible.map((doc, index) => {
@@ -145,7 +149,7 @@ async function collectReminderRecipients(db, eventId, {event} = {}) {
         const program = programById.get(a.programId) || {};
         return {
           programId: a.programId, name: program.name || a.programId, order: Number.isInteger(program.order) ? program.order : 9999,
-          timeText: programTimeText(a, program) || null, plannedCount: Number.isInteger(a.plannedCount) ? a.plannedCount : null,
+          timeText: mailTimeText(programTimeText(a, program), program.role, talkTimeText), plannedCount: Number.isInteger(a.plannedCount) ? a.plannedCount : null,
         };
       })
       .sort((a, b) => (a.order - b.order) || (a.programId < b.programId ? -1 : a.programId > b.programId ? 1 : 0))

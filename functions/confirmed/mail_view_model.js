@@ -71,6 +71,18 @@ function normalizePrograms(rawPrograms) {
     }));
 }
 
+// メールに表示するprogram定義(参加形態の割当があるイベントでは役割別の名称・role付き)。
+// buildMailSnapshot と前日リマインドの宛先一覧(reminder_targets.js)が共通で使う(宛先一覧と本文が食い違わない)。
+function mailPrograms(eventId, event) {
+  const roles = rolesFor(eventId, event);
+  return normalizePrograms(event && event.programs).map((p) => roles && roles[p.programId]
+    ? {...p, name: NAMES[roles[p.programId]], role: roles[p.programId]} : p);
+}
+// トークの共通時間(当選メール設定 confirmedMailSettings.talkTimeText)。未設定ならnull。
+const talkTimeTextOf = (event) => optionalText(event && event.confirmedMailSettings && event.confirmedMailSettings.talkTimeText);
+// メールに表示する時間: 参加者別の時間(programTimeText)が無いtalkだけ、トークの共通時間で補う。共通時間も未設定なら補完しない(null)。
+const mailTimeText = (timeText, role, talkTimeText) => timeText || (role === "talk" ? talkTimeText || null : null);
+
 // 参加者のprogramAttendancesから、表示するprogram一覧を作る。メール・Web参加証・受付画面で共通。
 //   - 参加するprogram(attendanceがあるもの)だけ。1 attendance = 1 項目(重複排除しない)
 //   - 表示順はevent.programsのorder(同順ならprogramId)。Firestoreからの取得順には依存しない
@@ -112,9 +124,7 @@ function buildMailSnapshot(eventId, event, {templateField = "winnerMailTemplate"
   if (!optionalText(event && event.venue)) problems.push("event-venue-missing");
   if (problems.length > 0) return {ok: false, problems};
   const venueInfo = event.venueInfo || {};
-  const roles = rolesFor(eventId, event);
-  const programs = normalizePrograms(event.programs).map((p) => roles && roles[p.programId]
-    ? {...p, name: NAMES[roles[p.programId]], role: roles[p.programId]} : p);
+  const programs = mailPrograms(eventId, event);
   return {
     ok: true,
     snapshot: {
@@ -127,7 +137,7 @@ function buildMailSnapshot(eventId, event, {templateField = "winnerMailTemplate"
         participationMapping: mappingFor(eventId, event),
         eventId, eventName: event.eventName.trim(), senderName: optionalText(event.senderName) || event.eventName.trim(),
         startAt: start.toISOString(), endAt: toIso(event.endAt), venue: event.venue.trim(),
-        talkTimeText: optionalText(event.confirmedMailSettings && event.confirmedMailSettings.talkTimeText),
+        talkTimeText: talkTimeTextOf(event),
         contact: optionalText(event.contact), address: optionalText(venueInfo.address), access: optionalText(venueInfo.access),
       },
       programs,
@@ -161,7 +171,7 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
     for (const item of items) {
       const role = roles[item.programId];
       if (!role) problems.push("attendance-program-role-unknown");
-      if (!item.timeText && role === "talk") item.timeText = event.talkTimeText || null;
+      item.timeText = mailTimeText(item.timeText, role, event.talkTimeText);
       if (!item.timeText) problems.push("attendance-time-missing");
     }
   }
@@ -201,4 +211,5 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
   };
 }
 
-module.exports = {toDate, formatEventDateTime, programTimeText, normalizePrograms, buildProgramItems, buildMailSnapshot, missingOptionalFields, buildMailViewModel};
+module.exports = {toDate, formatEventDateTime, programTimeText, normalizePrograms, mailPrograms, talkTimeTextOf, mailTimeText, buildProgramItems, buildMailSnapshot,
+  missingOptionalFields, buildMailViewModel};

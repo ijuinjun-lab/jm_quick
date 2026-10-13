@@ -296,6 +296,95 @@ describe("前日リマインドの送信対象の安全確認(Emulator)", {skip:
     assert.deepEqual([...targets], [ids[0]]);
   });
 
+  // 参加形態の割当があるイベント(alpha=猫・beta=犬・gamma=トーク)。トークは参加者別の時間が無く、当選メール設定の共通時間を使う
+  const TALK = {"トークショー": "参加を希望する", "トークショー人数": "1"};
+  const NO_AM = {"午前参加時間": NOT_ATTENDING, "午前参加人数": ""};
+  const DOG = {"午後参加時間": "15:30-16:10", "午後参加人数": "1"};
+  const NO_TALK = {"トークショー": NOT_ATTENDING, "トークショー人数": ""};
+  const useParticipationMapping = (talkTimeText) => db.doc("events/event1").update({
+    participationMapping: {catProgramId: "alpha", dogProgramId: "beta", talkProgramId: "gamma"},
+    confirmedMailSettings: talkTimeText === undefined ? {} : {talkTimeText},
+  });
+  async function importTalkCombos() {
+    const normal = await importRows("batchN", [
+      person(1, {...NO_AM, ...TALK}), // トークのみ
+      person(2, {...NO_AM, ...DOG, ...TALK}), // 犬+トーク
+      person(3, {...TALK}), // 猫+トーク(既定の午前)
+      person(4, {...DOG, ...TALK}), // 犬+猫+トーク
+      person(5, {...NO_TALK}), // 猫のみ
+    ]);
+    const waitlist = await importRows("batchW", [person(6, {...NO_AM, ...DOG, ...TALK}), person(7, {...NO_AM, ...DOG, ...NO_TALK})]);
+    await db.doc("importBatches/batchW").update({notificationType: "waitlistPromotion"});
+    for (const id of [...normal, ...waitlist]) await winner(id, "sent");
+    return {normal, waitlist};
+  }
+
+  test("トークの時間: 宛先一覧はメール本文と同じ時間・名称(トークの共通時間)を表示する。トークのみ・犬/猫+トーク・犬+猫+トーク、通常当選・繰り上げ当選", async () => {
+    await useParticipationMapping("13:00〜14:00");
+    const {normal, waitlist} = await importTalkCombos();
+    const s = await settings();
+    assert.deepEqual(s.targets.countsByNotificationType, {normal: 5, waitlistPromotion: 2});
+    assert.deepEqual(s.targets.blocked, {unknownWinnerMail: 0, suspectedDuplicates: 0});
+    const listed = (id) => s.recipients.find((r) => r.participantId === id).programs.map((p) => [p.name, p.timeText, p.plannedCount]);
+    const cat = ["譲渡会（ねこ）", "10:00-11:00", 2];
+    const dog = ["譲渡会（いぬ）", "15:30-16:10", 1];
+    const talk = ["トークセッション", "13:00〜14:00", 1];
+    assert.deepEqual([...normal, ...waitlist].map(listed), [[talk], [dog, talk], [cat, talk], [cat, dog, talk], [cat], [dog, talk], [dog]]);
+    // 宛先一覧の各項目 = 実際の本文(プレビューと実送信は同じレンダラー)。氏名・program・時間・人数・イベント名・日時・会場
+    for (const r of s.recipients) {
+      const mail = await api.preview(asAdmin({eventId: "event1", participantId: r.participantId}));
+      assert.equal(mail.ready, true, r.participantId);
+      assert.ok(mail.text.includes(`${r.name} 様`));
+      for (const p of r.programs) {
+        assert.ok(mail.text.includes(`■ ${p.name}\n${p.name === "トークセッション" ? "開催時間" : "参加時間"}：${p.timeText}\n参加人数：${p.plannedCount}名`), `${r.participantId} ${p.name}`);
+      }
+      assert.equal((mail.text.match(/^■ /gm) || []).length, r.programs.length, "本文のprogram数 = 宛先一覧のprogram数");
+      assert.ok(mail.text.includes(`【${s.eventName}】`) && mail.text.includes("開催日時：2026年11月30日(月) 10:00〜16:00") && mail.text.includes("会場：架空会場"));
+      assert.ok(mail.text.includes("住所：架空県架空市1-2-3") && mail.text.includes("アクセス：架空駅から徒歩5分"));
+    }
+    // 宛先一覧どおりのジョブを作れる(手動開始・照合値一致)。二重に開始しても同じジョブ・1人1通
+    await start(s.targets.fingerprint, {expectedTargetCount: 7});
+    const again = await start(s.targets.fingerprint, {expectedTargetCount: 7});
+    assert.equal(again.alreadyExisted, true);
+    assert.equal((await db.collection("sendJobs/reminder-event1/items").get()).size, 7);
+    await reminder.startDelivery({identity: {uid: "u-admin"}, data: {eventId: "event1"}});
+    await send.runSweep();
+    assert.equal(sends.length, 7, "1人1通");
+    assert.equal(new Set(sends.map((m) => m.metadata.participantId)).size, 7);
+    // 当選メールの配送記録・参加者データは変えない
+    for (const id of [...normal, ...waitlist]) assert.equal((await db.doc(`mailDeliveries/${id}_winner`).get()).data().status, "sent");
+  });
+
+  test("トークの時間の変更は照合値で検出し、古い確認では作らない。共通時間が未設定なら補完しない(宛先一覧は空欄・本文は作らない)", async () => {
+    await useParticipationMapping("13:00〜14:00");
+    await importTalkCombos();
+    const beforeSettings = await settings();
+    const before = beforeSettings.targets;
+    await db.doc("events/event1").update({confirmedMailSettings: {talkTimeText: "14:00〜15:00"}});
+    const changed = await settings();
+    assert.notEqual(changed.targets.fingerprint, before.fingerprint);
+    assert.equal(changed.targets.targetCount, before.targetCount, "件数は同じでも検出する");
+    assert.equal(await errorCode(start(before.fingerprint, {expectedTargetCount: before.targetCount})), "targets-changed");
+    assert.equal(await jobExists(), false);
+    assert.ok(changed.recipients.filter((r) => r.programs.some((p) => p.name === "トークセッション"))
+      .every((r) => r.programs.find((p) => p.name === "トークセッション").timeText === "14:00〜15:00"));
+    // 犬・猫の時間はトークの共通時間に影響されない
+    const nonTalk = (x) => x.recipients.map((r) => r.programs.filter((p) => p.name !== "トークセッション").map((p) => [p.name, p.timeText, p.plannedCount]));
+    assert.deepEqual(nonTalk(changed), nonTalk(beforeSettings));
+    // 共通時間が未設定: 時刻を補完しない(null)。本文は「時間なし」で作らない(既存の attendance-time-missing)
+    await useParticipationMapping(undefined);
+    const unset = await settings();
+    const talkOnly = unset.recipients.find((r) => r.name === "架空 参加者1");
+    assert.deepEqual(talkOnly.programs, [{programId: "gamma", name: "トークセッション", timeText: null, plannedCount: 1}]);
+    assert.notEqual(unset.targets.fingerprint, changed.targets.fingerprint);
+    const preview = await api.preview(asAdmin({eventId: "event1", participantId: talkOnly.participantId}));
+    assert.equal(preview.ready, false);
+    assert.ok(preview.problems.includes("attendance-time-missing"));
+    const catOnly = unset.recipients.find((r) => r.name === "架空 参加者5");
+    assert.deepEqual(catOnly.programs.map((p) => p.timeText), ["10:00-11:00"]);
+    assert.equal((await api.preview(asAdmin({eventId: "event1", participantId: catOnly.participantId}))).ready, true);
+  });
+
   test("Firestoreの読取件数(実測): 設定画面・プレビュー・ジョブ作成・送信状況。プレビューはイベント全体を読まない", async () => {
     // 読取を数えるため、実際のAdmin SDKのクラス(このテストのdbのもの)の読み取りメソッドを一時的に包む。
     // require("firebase-admin/firestore") は使わない(同じファイルの権限テストで loadIndex が require.cache を
