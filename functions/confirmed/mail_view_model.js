@@ -71,12 +71,19 @@ function normalizePrograms(rawPrograms) {
     }));
 }
 
-// メールに表示するprogram定義(参加形態の割当があるイベントでは役割別の名称・role付き)。
+// メールに表示するprogram定義(参加形態の割当があるイベントではrole付き)。
 // buildMailSnapshot と前日リマインドの宛先一覧(reminder_targets.js)が共通で使う(宛先一覧と本文が食い違わない)。
+// 名称: 割当の無いprogramはイベントに登録された名称。割当のある犬・猫は役割別の名称(NAMES)。
+//   トークはイベントに登録された名称(イベントごとに尊重する。Web参加証・受付と同じ)。登録名が空の場合だけ役割別の名称。
 function mailPrograms(eventId, event) {
   const roles = rolesFor(eventId, event);
-  return normalizePrograms(event && event.programs).map((p) => roles && roles[p.programId]
-    ? {...p, name: NAMES[roles[p.programId]], role: roles[p.programId]} : p);
+  const registered = new Map((Array.isArray(event && event.programs) ? event.programs : [])
+    .filter((p) => p && typeof p.programId === "string").map((p) => [p.programId, optionalText(p.name)]));
+  return normalizePrograms(event && event.programs).map((p) => {
+    const role = roles && roles[p.programId];
+    if (!role) return p;
+    return {...p, name: (role === "talk" && registered.get(p.programId)) || NAMES[role], role};
+  });
 }
 // トークの共通時間(当選メール設定 confirmedMailSettings.talkTimeText)。未設定ならnull。
 const talkTimeTextOf = (event) => optionalText(event && event.confirmedMailSettings && event.confirmedMailSettings.talkTimeText);

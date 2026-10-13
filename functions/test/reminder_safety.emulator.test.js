@@ -301,9 +301,13 @@ describe("前日リマインドの送信対象の安全確認(Emulator)", {skip:
   const NO_AM = {"午前参加時間": NOT_ATTENDING, "午前参加人数": ""};
   const DOG = {"午後参加時間": "15:30-16:10", "午後参加人数": "1"};
   const NO_TALK = {"トークショー": NOT_ATTENDING, "トークショー人数": ""};
-  const useParticipationMapping = (talkTimeText) => db.doc("events/event1").update({
+  // トークはイベントに登録された名称(ここでは「トークショー」)、犬・猫は役割別の名称でメールに出る
+  const programsNamed = (talkName) => [{programId: "alpha", name: "プログラムA", order: 0}, {programId: "beta", name: "プログラムB", order: 1},
+    {programId: "gamma", name: talkName, order: 2}];
+  const useParticipationMapping = (talkTimeText, talkName = "トークショー") => db.doc("events/event1").update({
     participationMapping: {catProgramId: "alpha", dogProgramId: "beta", talkProgramId: "gamma"},
     confirmedMailSettings: talkTimeText === undefined ? {} : {talkTimeText},
+    programs: programsNamed(talkName),
   });
   async function importTalkCombos() {
     const normal = await importRows("batchN", [
@@ -312,6 +316,7 @@ describe("前日リマインドの送信対象の安全確認(Emulator)", {skip:
       person(3, {...TALK}), // 猫+トーク(既定の午前)
       person(4, {...DOG, ...TALK}), // 犬+猫+トーク
       person(5, {...NO_TALK}), // 猫のみ
+      person(8, {...DOG, ...NO_TALK}), // 犬+猫
     ]);
     const waitlist = await importRows("batchW", [person(6, {...NO_AM, ...DOG, ...TALK}), person(7, {...NO_AM, ...DOG, ...NO_TALK})]);
     await db.doc("importBatches/batchW").update({notificationType: "waitlistPromotion"});
@@ -323,34 +328,34 @@ describe("前日リマインドの送信対象の安全確認(Emulator)", {skip:
     await useParticipationMapping("13:00〜14:00");
     const {normal, waitlist} = await importTalkCombos();
     const s = await settings();
-    assert.deepEqual(s.targets.countsByNotificationType, {normal: 5, waitlistPromotion: 2});
+    assert.deepEqual(s.targets.countsByNotificationType, {normal: 6, waitlistPromotion: 2});
     assert.deepEqual(s.targets.blocked, {unknownWinnerMail: 0, suspectedDuplicates: 0});
     const listed = (id) => s.recipients.find((r) => r.participantId === id).programs.map((p) => [p.name, p.timeText, p.plannedCount]);
     const cat = ["譲渡会（ねこ）", "10:00-11:00", 2];
     const dog = ["譲渡会（いぬ）", "15:30-16:10", 1];
-    const talk = ["トークセッション", "13:00〜14:00", 1];
-    assert.deepEqual([...normal, ...waitlist].map(listed), [[talk], [dog, talk], [cat, talk], [cat, dog, talk], [cat], [dog, talk], [dog]]);
+    const talk = ["トークショー", "13:00〜14:00", 1];
+    assert.deepEqual([...normal, ...waitlist].map(listed), [[talk], [dog, talk], [cat, talk], [cat, dog, talk], [cat], [cat, dog], [dog, talk], [dog]]);
     // 宛先一覧の各項目 = 実際の本文(プレビューと実送信は同じレンダラー)。氏名・program・時間・人数・イベント名・日時・会場
     for (const r of s.recipients) {
       const mail = await api.preview(asAdmin({eventId: "event1", participantId: r.participantId}));
       assert.equal(mail.ready, true, r.participantId);
       assert.ok(mail.text.includes(`${r.name} 様`));
       for (const p of r.programs) {
-        assert.ok(mail.text.includes(`■ ${p.name}\n${p.name === "トークセッション" ? "開催時間" : "参加時間"}：${p.timeText}\n参加人数：${p.plannedCount}名`), `${r.participantId} ${p.name}`);
+        assert.ok(mail.text.includes(`■ ${p.name}\n${p.name === "トークショー" ? "開催時間" : "参加時間"}：${p.timeText}\n参加人数：${p.plannedCount}名`), `${r.participantId} ${p.name}`);
       }
       assert.equal((mail.text.match(/^■ /gm) || []).length, r.programs.length, "本文のprogram数 = 宛先一覧のprogram数");
       assert.ok(mail.text.includes(`【${s.eventName}】`) && mail.text.includes("開催日時：2026年11月30日(月) 10:00〜16:00") && mail.text.includes("会場：架空会場"));
       assert.ok(mail.text.includes("住所：架空県架空市1-2-3") && mail.text.includes("アクセス：架空駅から徒歩5分"));
     }
     // 宛先一覧どおりのジョブを作れる(手動開始・照合値一致)。二重に開始しても同じジョブ・1人1通
-    await start(s.targets.fingerprint, {expectedTargetCount: 7});
-    const again = await start(s.targets.fingerprint, {expectedTargetCount: 7});
+    await start(s.targets.fingerprint, {expectedTargetCount: 8});
+    const again = await start(s.targets.fingerprint, {expectedTargetCount: 8});
     assert.equal(again.alreadyExisted, true);
-    assert.equal((await db.collection("sendJobs/reminder-event1/items").get()).size, 7);
+    assert.equal((await db.collection("sendJobs/reminder-event1/items").get()).size, 8);
     await reminder.startDelivery({identity: {uid: "u-admin"}, data: {eventId: "event1"}});
     await send.runSweep();
-    assert.equal(sends.length, 7, "1人1通");
-    assert.equal(new Set(sends.map((m) => m.metadata.participantId)).size, 7);
+    assert.equal(sends.length, 8, "1人1通");
+    assert.equal(new Set(sends.map((m) => m.metadata.participantId)).size, 8);
     // 当選メールの配送記録・参加者データは変えない
     for (const id of [...normal, ...waitlist]) assert.equal((await db.doc(`mailDeliveries/${id}_winner`).get()).data().status, "sent");
   });
@@ -366,16 +371,16 @@ describe("前日リマインドの送信対象の安全確認(Emulator)", {skip:
     assert.equal(changed.targets.targetCount, before.targetCount, "件数は同じでも検出する");
     assert.equal(await errorCode(start(before.fingerprint, {expectedTargetCount: before.targetCount})), "targets-changed");
     assert.equal(await jobExists(), false);
-    assert.ok(changed.recipients.filter((r) => r.programs.some((p) => p.name === "トークセッション"))
-      .every((r) => r.programs.find((p) => p.name === "トークセッション").timeText === "14:00〜15:00"));
+    assert.ok(changed.recipients.filter((r) => r.programs.some((p) => p.name === "トークショー"))
+      .every((r) => r.programs.find((p) => p.name === "トークショー").timeText === "14:00〜15:00"));
     // 犬・猫の時間はトークの共通時間に影響されない
-    const nonTalk = (x) => x.recipients.map((r) => r.programs.filter((p) => p.name !== "トークセッション").map((p) => [p.name, p.timeText, p.plannedCount]));
+    const nonTalk = (x) => x.recipients.map((r) => r.programs.filter((p) => p.name !== "トークショー").map((p) => [p.name, p.timeText, p.plannedCount]));
     assert.deepEqual(nonTalk(changed), nonTalk(beforeSettings));
     // 共通時間が未設定: 時刻を補完しない(null)。本文は「時間なし」で作らない(既存の attendance-time-missing)
     await useParticipationMapping(undefined);
     const unset = await settings();
     const talkOnly = unset.recipients.find((r) => r.name === "架空 参加者1");
-    assert.deepEqual(talkOnly.programs, [{programId: "gamma", name: "トークセッション", timeText: null, plannedCount: 1}]);
+    assert.deepEqual(talkOnly.programs, [{programId: "gamma", name: "トークショー", timeText: null, plannedCount: 1}]);
     assert.notEqual(unset.targets.fingerprint, changed.targets.fingerprint);
     const preview = await api.preview(asAdmin({eventId: "event1", participantId: talkOnly.participantId}));
     assert.equal(preview.ready, false);
@@ -383,6 +388,47 @@ describe("前日リマインドの送信対象の安全確認(Emulator)", {skip:
     const catOnly = unset.recipients.find((r) => r.name === "架空 参加者5");
     assert.deepEqual(catOnly.programs.map((p) => p.timeText), ["10:00-11:00"]);
     assert.equal((await api.preview(asAdmin({eventId: "event1", participantId: catOnly.participantId}))).ready, true);
+  });
+
+  test("トークの名称: イベントに登録された名称を使う(イベントごと)。名称の変更は照合値で検出。対象・QR・Web参加証は名称に影響されない", async () => {
+    await useParticipationMapping("13:00〜14:00", "トークショー");
+    const {normal} = await importTalkCombos();
+    const talkOnlyId = normal[0];
+    const s = await settings();
+    const mail = await api.preview(asAdmin({eventId: "event1", participantId: normal[3]})); // 犬+猫+トーク
+    assert.ok(mail.text.includes("■ トークショー\n開催時間：13:00〜14:00") && !mail.text.includes("トークセッション"));
+    assert.ok(mail.text.includes("■ 譲渡会（ねこ）") && mail.text.includes("■ 譲渡会（いぬ）"), "犬・猫は役割別の名称のまま");
+    // 名称の変更(別の名称を登録したイベントと同じ状態): 宛先一覧・本文とも新しい名称。古い確認の照合値では作らない
+    await db.doc("events/event1").update({programs: programsNamed("トーク講演")});
+    const renamed = await settings();
+    assert.notEqual(renamed.targets.fingerprint, s.targets.fingerprint);
+    assert.equal(renamed.targets.targetCount, s.targets.targetCount, "名称は送信対象に影響しない");
+    assert.deepEqual(renamed.recipients.map((r) => r.target), s.recipients.map((r) => r.target));
+    assert.equal(await errorCode(start(s.targets.fingerprint, {expectedTargetCount: s.targets.targetCount})), "targets-changed");
+    assert.equal(await jobExists(), false);
+    assert.deepEqual(renamed.recipients.find((r) => r.participantId === talkOnlyId).programs.map((p) => p.name), ["トーク講演"]);
+    const renamedMail = await api.preview(asAdmin({eventId: "event1", participantId: talkOnlyId}));
+    assert.ok(renamedMail.text.includes("■ トーク講演\n開催時間：13:00〜14:00"));
+    // 登録名が空なら、役割別の名称(従来の表示)
+    await db.doc("events/event1").update({programs: programsNamed("")});
+    assert.deepEqual((await settings()).recipients.find((r) => r.participantId === talkOnlyId).programs.map((p) => p.name), ["トークセッション"]);
+    // 別イベントの名称は、そのイベントの登録名(イベント間で混ざらない)
+    const {buildMailSnapshot} = require("../confirmed/mail_view_model");
+    const mapping = {catProgramId: "alpha", dogProgramId: "beta", talkProgramId: "gamma"};
+    const base = {eventName: "x", venue: "x", startAt: new Date("2026-11-30T01:00:00Z"), participationMapping: mapping,
+      reminderMailTemplate: {subject: "s", introBody: "i", closingBody: "c", version: 1}};
+    const talkName = (eventId, name) => buildMailSnapshot(eventId, {...base, programs: programsNamed(name)}, {templateField: "reminderMailTemplate"})
+      .snapshot.programs.find((p) => p.programId === "gamma").name;
+    assert.deepEqual([talkName("eventA", "トークショー"), talkName("eventB", "特別講演")], ["トークショー", "特別講演"]);
+    // QR・Web参加証: 名称に関係なく同じQR。Web参加証は従来どおりイベントの登録名を表示する
+    await db.doc("events/event1").update({programs: programsNamed("トークショー")});
+    const {createPassApi} = require("../confirmed/pass_api");
+    const pass = createPassApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp(), getAppBaseUrl: () => "https://app.invalid", logger: silent});
+    const publicId = (await db.doc(`participants/${normal[3]}`).get()).data().publicId;
+    const view = await pass.getPass({data: {participantId: normal[3], publicId}, request: {}});
+    assert.equal(view.qrPayload, mail.qrPayload);
+    assert.equal(view.webPassUrl, mail.webPassUrl);
+    assert.deepEqual(view.programs.map((p) => p.name), ["プログラムA", "プログラムB", "トークショー"]);
   });
 
   test("Firestoreの読取件数(実測): 設定画面・プレビュー・ジョブ作成・送信状況。プレビューはイベント全体を読まない", async () => {

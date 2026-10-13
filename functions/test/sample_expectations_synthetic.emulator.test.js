@@ -101,7 +101,9 @@ test("匿名fixtureのみ: 120行を現行import APIで照合し、一致後に7
         assert.equal(mail.viewModel.address, savedEvent.venueInfo.address);
         assert.equal(mail.viewModel.access, savedEvent.venueInfo.access);
         assert.equal(mail.viewModel.dateTimeText, "2026年11月30日(月) 10:00〜16:00"); // 架空event設定の日時
-        for (const [id, name] of [["program-1", "譲渡会（ねこ）"], ["program-2", "譲渡会（いぬ）"], ["program-3", "トークセッション"]]) {
+        // 犬・猫は役割別の名称、トークはイベントに登録された名称
+        const talkName = savedEvent.programs.find((p) => p.programId === "program-3").name;
+        for (const [id, name] of [["program-1", "譲渡会（ねこ）"], ["program-2", "譲渡会（いぬ）"], ["program-3", talkName]]) {
           const expected = row.expectedAttendances.find((a) => a.programId === id);
           assert.equal(new RegExp(`■ ?${name}`).test(mail.text), Boolean(expected));
           assert.equal(new RegExp(`■ ?${name}`).test(mail.html), Boolean(expected));

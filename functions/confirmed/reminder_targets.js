@@ -18,7 +18,7 @@
 //     suspected-duplicate(同じ氏名・同じprogram・同じ時間帯。重複登録の疑い。未解決の間はジョブを作らない)
 //   program名・時間は、メール本文と同じ規則(mail_view_model の mailPrograms / mailTimeText)で決める。参加者別の時間が無いトークは、
 //   当選メール設定のトーク共通時間(confirmedMailSettings.talkTimeText)を表示する(未設定なら補完しない)。
-//   照合値(fingerprint): 全参加者の 参加者ID・当選メールの状態・メールアドレス・氏名・当選種別・program・時間帯(トーク共通時間を含む)・
+//   照合値(fingerprint): 全参加者の 参加者ID・当選メールの状態・メールアドレス・氏名・当選種別・program(ID・本文に出る名称)・時間帯(トーク共通時間を含む)・
 //   予定人数 から作るsha256(値そのものは含まない)。確認時とジョブ作成時で比べ、違えば古い確認で送らない。
 
 const crypto = require("node:crypto");
@@ -196,7 +196,7 @@ async function collectReminderRecipients(db, eventId, {event} = {}) {
   // 照合値: 送信内容・宛先に関わる値すべて(個人情報そのものは含めず、ハッシュだけ)
   const fingerprint = crypto.createHash("sha256").update(JSON.stringify(recipients.map((r) => [
     r.participantId, r.winnerStatus, r.emailKey, r.nameKey, r.name, r.notificationType,
-    r.programs.map((x) => [x.programId, x.timeText, x.plannedCount]),
+    r.programs.map((x) => [x.programId, x.name, x.timeText, x.plannedCount]),
   ]))).digest("hex");
   return {
     targets, excludedByReason: merged, excludedCount: participants.length - targets.length, totalParticipants: participants.length,

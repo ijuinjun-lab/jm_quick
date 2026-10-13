@@ -8,6 +8,9 @@ const {receptionQrPayload} = require("../pass_urls");
 const {mapping, cells, event, person} = require("../test_support/participation_fixture");
 const {fakeQrPng, APP_BASE_URL} = require("../test_support/mail_fixtures");
 const plan = (value, overrides) => planImportRows({rows: [{sourceRowNumber: 2, cells: cells(value, overrides)}], mapping}).results[0];
+// メールの名称: 犬・猫は役割別の名称、トークはイベントに登録された名称
+const TALK_NAME = event().programs.find((p) => ROLES[p.programId] === "talk").name;
+const mailName = (role) => (role === "talk" ? TALK_NAME : NAMES[role]);
 for (const type of TYPES) {
   test(`${type.label}: CSV分類・本文・人数・時間・不参加除外・単一QR・リマインド`, async () => {
     const row = plan(type.value);
@@ -29,8 +32,8 @@ for (const type of TYPES) {
       assert.equal(result.viewModel.participationType, type.value);
       for (const [programId, role] of Object.entries(ROLES)) {
         const expected = type.value.split("_").includes(role);
-        assert.equal(result.text.includes(`■${NAMES[role]}`), expected);
-        assert.equal(result.html.includes(`■${NAMES[role]}`), expected);
+        assert.equal(result.text.includes(`■${mailName(role)}`), expected);
+        assert.equal(result.html.includes(`■${mailName(role)}`), expected);
         const item = result.viewModel.programs.find((p) => p.programId === programId);
         if (expected) {
           assert.equal(item.plannedCount, {cat: 2, dog: 3, talk: 4}[role]);
@@ -104,7 +107,7 @@ for (const type of TYPES) {
       assert.equal(result.ok, true);
       assert.equal(result.viewModel.participationType, type.value);
       assert.equal((result.html.match(/<img /g) || []).length, 1);
-      for (const role of ["cat", "dog", "talk"]) assert.equal(result.text.includes(`■${NAMES[role]}`), type.value.split("_").includes(role));
+      for (const role of ["cat", "dog", "talk"]) assert.equal(result.text.includes(`■${mailName(role)}`), type.value.split("_").includes(role));
       // A later edit cannot alter an already-created delivery snapshot.
       assert.deepEqual(saved.event.participationMapping, e.participationMapping);
     }
