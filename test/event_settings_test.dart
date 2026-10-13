@@ -213,7 +213,7 @@ void main() {
       expect(_saveButton(tester).onPressed, isNull);
     });
 
-    testWidgets('同時更新の競合・権限なしはエラーを表示し、「最新の内容を読み込む」で読み直せる', (tester) async {
+    testWidgets('同時更新の競合・権限なしはエラーを表示し、「データベースに保存されたデータを読み込む」で読み直せる', (tester) async {
       final service = _FakeSettingsService([_view(_settings())],
           updateError: const WinnerSendException('ほかの操作でイベント設定が変更されています。最新の内容を読み込み直してから、もう一度保存してください。', code: 'event-settings-changed'));
       await _open(tester, service);
@@ -225,6 +225,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('event-settings-save-error')), findsOneWidget);
       expect(find.textContaining('ほかの操作でイベント設定が変更されています'), findsOneWidget);
+      expect(find.text('データベースに保存されたデータを読み込む'), findsOneWidget);
+      expect(find.text('最新の内容を読み込む'), findsNothing);
       await tester.tap(find.byKey(const Key('event-settings-reload')));
       await tester.pumpAndSettle();
       expect(service.getCalls, 2);

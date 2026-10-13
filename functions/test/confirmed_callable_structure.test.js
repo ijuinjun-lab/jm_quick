@@ -157,7 +157,10 @@ test("Phase 1B: dataEventIdで認可するハンドラは、participant・batch�
   assert.match(read("winner_mail_api.js"), /participant\.eventId !== request\.eventId\) throw new ApiError\("failed-precondition", "参加者がこのイベントのものではありません。"/);
   assert.match(read("winner_mail_api.js"), /batchSnapshot\.data\(\)\.eventId !== request\.eventId/);
   assert.match(read("send_jobs.js"), /if \(batch\.eventId !== eventId\) throw new ApiError\("failed-precondition", "取込回がこのイベントのものではありません。"/);
-  assert.match(read("reminder_api.js"), /if \(!targets\.includes\(request\.participantId\)\)/, "リマインドのプレビューは対象イベントの送信対象だけ");
+  // リマインドのプレビューは対象イベントの送信対象だけ(1人だけ判定する isReminderTarget が participant.eventId を照合する)
+  assert.match(read("reminder_api.js"), /const \{target, participant\} = await isReminderTarget\(db, request\.eventId, request\.participantId\);\s*if \(!target\)/,
+    "リマインドのプレビューは対象イベントの送信対象だけ");
+  assert.match(read("reminder_targets.js"), /if \(!p \|\| p\.eventId !== eventId\) return \{target: false/, "別イベントの参加者はプレビューの対象外");
   assert.match(read("import_commit.js"), /if \(existing\.eventId !== eventId \|\| existing\.requestHash !== hash\)/);
   assert.match(read("import_api.js"), /existingBatch: existing\.exists && existing\.data\(\)\.eventId === request\.eventId \?/, "別イベントの取込回の情報をpreviewで返さない");
 });

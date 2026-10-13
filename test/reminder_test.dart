@@ -25,6 +25,9 @@ class FakeReminderService implements ReminderService {
     this.targetCount = 150,
     this.excludedCount = 3,
     this.eventName = '架空イベント',
+    this.recipients = const [],
+    this.unknownWinnerMail = 0,
+    this.suspectedDuplicates = 0,
   });
   bool enabled;
   DateTime? sendAt;
@@ -32,6 +35,12 @@ class FakeReminderService implements ReminderService {
   int targetCount;
   int excludedCount;
   String eventName;
+
+  /// 送信前の宛先一覧・照合値・未解決の件数(サーバーの値を模す)。
+  List<ReminderRecipient> recipients;
+  int unknownWinnerMail;
+  int suspectedDuplicates;
+  String targetsFingerprint = 'f' * 64;
   int? currentTargetForChange;
 
   // ジョブ(作成済みの場合)
@@ -130,6 +139,11 @@ class FakeReminderService implements ReminderService {
       job: _job(),
       changedSinceJob: currentTargetForChange != null && states != null,
       currentTargetCount: currentTargetForChange,
+      recipients: recipients,
+      targetsFingerprint: targetsFingerprint,
+      normalCount: targetCount,
+      unknownWinnerMail: unknownWinnerMail,
+      suspectedDuplicates: suspectedDuplicates,
     );
   }
 
@@ -182,6 +196,7 @@ class FakeReminderService implements ReminderService {
     String eventId, {
     int? expectedTemplateVersion,
     int? expectedTargetCount,
+    String? expectedTargetsFingerprint,
     bool dispatch = true,
   }) async {
     startCalls++;
@@ -189,6 +204,7 @@ class FakeReminderService implements ReminderService {
       'version': expectedTemplateVersion,
       'count': expectedTargetCount,
       'dispatch': dispatch,
+      'fingerprint': expectedTargetsFingerprint,
     });
     if (startGate != null) await startGate!.future;
     if (states == null) {
@@ -364,41 +380,36 @@ void main() {
     );
   });
 
-  group('設定・対象・送信予定(サーバーの値を表示)', () {
-    testWidgets('送信予定・自動送信・対象・対象外・テンプレートversionがサーバーの値で表示される', (tester) async {
+  group('設定・対象(サーバーの値を表示。手動送信専用)', () {
+    testWidgets('対象・対象外・テンプレートversion・文面がサーバーの値で表示される。自動送信・送信予定日時の表示と入力欄は無い', (tester) async {
       setPhone(tester);
+      // 過去に自動送信が有効・送信予定日時が保存されていても、画面には出さない(手動送信専用)
       final service = FakeReminderService(
         enabled: true,
         sendAt: DateTime.utc(2026, 11, 29, 1),
       );
       await tester.pumpWidget(page(service));
       await settle(tester);
-      expect(find.text('2026/11/29 10:00'), findsWidgets); // 日本時間
-      expect(find.text('有効'), findsOneWidget);
       expect(find.text('150件'), findsOneWidget);
       expect(find.text('3件'), findsOneWidget);
       expect(find.text('v2'), findsOneWidget);
       expect(find.text('架空イベント'), findsOneWidget);
-      // 文面はサーバーの現在値
-      expect(find.text('【明日開催】ご案内'), findsOneWidget);
-      expect(
-        tester
-            .widget<SwitchListTile>(
-              find.byKey(const ValueKey('switch-enabled')),
-            )
-            .value,
-        isTrue,
-      );
+      expect(find.text('【明日開催】ご案内'), findsOneWidget, reason: '文面はサーバーの現在値');
+      expect(find.byType(SwitchListTile), findsNothing, reason: '自動送信の切替は無い');
+      expect(find.byKey(const ValueKey('switch-enabled')), findsNothing);
+      expect(find.widgetWithText(TextField, '送信予定日時(日本時間)'), findsNothing, reason: '送信予定日時の入力欄は無い');
+      expect(find.text('自動送信'), findsNothing);
+      expect(find.text('送信予定'), findsNothing);
+      expect(find.text('2026/11/29 10:00'), findsNothing, reason: '保存済みの送信予定日時も表示しない');
+      expect(find.text('有効'), findsNothing);
     });
 
-    testWidgets('自動送信が無効(既定)なら、自動では送信されない旨が分かる', (tester) async {
+    testWidgets('手動送信専用であることが分かる(自動送信は無い)', (tester) async {
       setPhone(tester);
       await tester.pumpWidget(page(FakeReminderService()));
       await settle(tester);
-      expect(find.text('無効'), findsOneWidget);
-      expect(find.byKey(const ValueKey('note-disabled')), findsOneWidget);
-      expect(find.textContaining('自動ではメールは送信されません'), findsOneWidget);
-      expect(find.text('未設定'), findsWidgets);
+      expect(find.byKey(const ValueKey('note-manual-only')), findsOneWidget);
+      expect(find.textContaining('自動送信はありません'), findsOneWidget);
     });
 
     testWidgets('テンプレート未設定は「未設定」と理由が表示される', (tester) async {
@@ -426,30 +437,24 @@ void main() {
     });
   });
 
-  group('設定の保存(保存だけでは送信しない)', () {
-    testWidgets('保存: 確認ダイアログ → 保存。メールは送られず、ジョブも作られず、引き渡しもされない', (tester) async {
+  group('文面の保存(保存だけでは送信しない。自動送信の設定は送らない)', () {
+    testWidgets('保存: 確認ダイアログ → 保存。送るのは文面だけ(自動送信の有効化・送信予定日時は送らない)。メールは送られず、ジョブも作られない', (tester) async {
       setPhone(tester);
       final service = FakeReminderService();
       await tester.pumpWidget(page(service));
       await settle(tester);
-      await tester.enterText(
-        find.widgetWithText(TextField, '送信予定日時(日本時間)'),
-        '2026/11/29 10:00',
-      );
-      await tester.tap(find.byKey(const ValueKey('switch-enabled')));
-      await tester.pump();
-      await tester.tap(find.text('設定を保存'));
+      await tester.enterText(find.widgetWithText(TextField, '件名'), '新しい件名');
+      await tester.tap(find.text('文面を保存'));
       await settle(tester);
-      expect(find.text('前日リマインドの設定を保存します'), findsOneWidget);
-      expect(find.text('自動送信：有効'), findsOneWidget);
-      expect(find.text('送信予定：2026/11/29 10:00'), findsOneWidget);
+      expect(find.text('前日リマインドの文面を保存します'), findsOneWidget);
+      expect(find.text('テンプレート：文面を更新します(v3)'), findsOneWidget);
       expect(find.textContaining('この保存では、メールは送信されません'), findsOneWidget);
+      expect(find.descendant(of: find.byType(AlertDialog), matching: find.textContaining('自動送信')), findsNothing,
+          reason: '保存の確認に自動送信の項目は無い');
       expect(service.updateCalls, 0, reason: '確認するまで保存しない');
       await tester.tap(find.text('保存').last);
       await settle(tester);
-      expect(service.updates.single['enabled'], true);
-      expect(service.updates.single['sendAt'], DateTime.utc(2026, 11, 29, 1));
-      expect(service.updates.single['acknowledgePast'], false);
+      expect(service.updates.single, {'enabled': null, 'sendAt': null, 'template': '新しい件名', 'acknowledgePast': false});
       expect(service.startCalls, 0, reason: '保存だけでは引き渡さない');
       expect(find.textContaining('メールは送信していません'), findsOneWidget);
     });
@@ -459,99 +464,59 @@ void main() {
       final service = FakeReminderService();
       await tester.pumpWidget(page(service));
       await settle(tester);
-      await tester.tap(find.byKey(const ValueKey('switch-enabled')));
-      await tester.enterText(
-        find.widgetWithText(TextField, '送信予定日時(日本時間)'),
-        '2026/11/29 10:00',
-      );
-      await tester.tap(find.text('設定を保存'));
+      await tester.enterText(find.widgetWithText(TextField, '件名'), '新しい件名');
+      await tester.tap(find.text('文面を保存'));
       await settle(tester);
       await tester.tap(find.text('キャンセル'));
       await settle(tester);
       expect(service.updateCalls, 0);
     });
 
-    testWidgets('過去の日時で有効化する場合は警告が出て、確認後に acknowledgePast つきで保存される', (
-      tester,
-    ) async {
+    testWidgets('文面に変更が無ければ保存しない(案内する)', (tester) async {
       setPhone(tester);
       final service = FakeReminderService();
       await tester.pumpWidget(page(service));
       await settle(tester);
-      await tester.tap(find.byKey(const ValueKey('switch-enabled')));
-      await tester.enterText(
-        find.widgetWithText(TextField, '送信予定日時(日本時間)'),
-        '2026/11/27 10:00',
-      ); // 現在(11/28 12:00)より過去
-      await tester.tap(find.text('設定を保存'));
+      await tester.tap(find.text('文面を保存'));
       await settle(tester);
-      expect(find.text('過去の日時です。設定を保存しますか?'), findsOneWidget);
-      expect(
-        find.textContaining('送信予定日時が過去です。有効にすると、直ちに全員へ送信されます。'),
-        findsOneWidget,
-      );
-      await tester.tap(find.text('保存').last);
-      await settle(tester);
-      expect(service.updates.single['acknowledgePast'], true);
-    });
-
-    testWidgets('日時の形式が不正・有効化なのに日時なしは、送信せず案内する', (tester) async {
-      setPhone(tester);
-      final service = FakeReminderService();
-      await tester.pumpWidget(page(service));
-      await settle(tester);
-      await tester.tap(find.byKey(const ValueKey('switch-enabled')));
-      await tester.tap(find.text('設定を保存'));
-      await settle(tester);
-      expect(find.textContaining('送信予定日時を入力してください'), findsOneWidget);
-      await tester.enterText(
-        find.widgetWithText(TextField, '送信予定日時(日本時間)'),
-        '明日の朝',
-      );
-      await tester.tap(find.text('設定を保存'));
-      await settle(tester);
-      expect(find.textContaining('「2026/11/29 10:00」の形式'), findsOneWidget);
+      expect(find.text('文面に変更がありません。'), findsOneWidget);
       expect(service.updateCalls, 0);
     });
 
-    testWidgets('サーバーが拒否した場合(過去日時の確認なし等)は理由が表示される', (tester) async {
+    testWidgets('サーバーが拒否した場合は理由が表示される', (tester) async {
       setPhone(tester);
       final service = FakeReminderService()
         ..updateError = const WinnerSendException(
-          '送信予定日時が過去です。有効にすると直ちに送信されます。',
-          code: 'send-at-in-past',
+          '前日リマインドの自動送信は使用できません。宛先一覧を確認してから、手動で送信してください。',
+          code: 'auto-send-disabled',
         );
       await tester.pumpWidget(page(service));
       await settle(tester);
       await tester.enterText(find.widgetWithText(TextField, '件名'), '新しい件名');
-      await tester.tap(find.text('設定を保存'));
+      await tester.tap(find.text('文面を保存'));
       await settle(tester);
       await tester.tap(find.text('保存').last);
       await settle(tester);
-      expect(find.textContaining('送信予定日時が過去です'), findsOneWidget);
+      expect(find.textContaining('自動送信は使用できません'), findsOneWidget);
     });
 
-    testWidgets('作成済みジョブがある場合の設定変更は、ジョブを作り直さない(保存の確認に明示される)', (tester) async {
+    testWidgets('作成済みジョブがある場合の文面変更は、ジョブを作り直さない(保存の確認に明示される)', (tester) async {
       setPhone(tester);
-      final service =
-          FakeReminderService(
-              enabled: true,
-              sendAt: DateTime.utc(2026, 11, 29, 1),
-            )
-            ..seedJob(FakeReminderService.ids({DeliveryState.pending: 5}))
-            ..dispatchActive = true;
+      final service = FakeReminderService()
+        ..seedJob(FakeReminderService.ids({DeliveryState.pending: 5}))
+        ..dispatchActive = true;
       await tester.pumpWidget(page(service));
       await settle(tester);
-      await tester.tap(find.byKey(const ValueKey('switch-enabled')));
-      await tester.pump();
-      await tester.tap(find.text('設定を保存'));
+      await tester.enterText(find.widgetWithText(TextField, '件名'), '新しい件名');
+      await tester.tap(find.text('文面を保存'));
       await settle(tester);
       expect(find.textContaining('この変更では止まりません・作り直されません'), findsOneWidget);
       await tester.tap(find.text('保存').last);
       await settle(tester);
-      expect(service.updates.single['enabled'], false);
+      expect(service.updates.single['template'], '新しい件名');
+      expect(service.updates.single['enabled'], isNull);
       expect(service.startCalls, 0);
-      expect(service.dispatchActive, isTrue, reason: '無効化しても配送中のジョブは止まらない');
+      expect(service.dispatchActive, isTrue, reason: '配送中のジョブは止まらない');
     });
   });
 
@@ -612,9 +577,10 @@ void main() {
         await settle(tester);
         expect(find.text('前日リマインドを今すぐ開始します'), findsOneWidget);
         expect(find.text('イベント：架空イベント'), findsOneWidget);
-        expect(find.text('送信対象：150件(イベント全体の有効な参加者)'), findsOneWidget);
+        expect(find.text('送信対象：150件(当選メール送信済みの参加者。通常当選150件・繰り上げ当選0件)'), findsOneWidget);
+        expect(find.textContaining('宛先は、この画面の宛先一覧のとおりです'), findsOneWidget);
         expect(find.text('テンプレート：v2'), findsOneWidget);
-        expect(find.textContaining('別便は作られません'), findsOneWidget);
+        expect(find.textContaining('二重には作られません'), findsOneWidget);
         await tester.tap(find.text('キャンセル'));
         await settle(tester);
         expect(service.startCalls, 0);
@@ -623,7 +589,7 @@ void main() {
         await tester.tap(find.text('送信を開始'));
         await settle(tester);
         expect(service.starts, [
-          {'version': 2, 'count': 150, 'dispatch': true},
+          {'version': 2, 'count': 150, 'dispatch': true, 'fingerprint': 'f' * 64},
         ]);
         expect(
           find.byKey(const ValueKey('reminder-server-running')),
@@ -1126,6 +1092,73 @@ void main() {
     });
   });
 
+  group('送信前の宛先一覧・誤送信防止', () {
+    ReminderRecipient r(String id, String name, {String email = 'x@example.invalid', String type = 'normal', String status = 'sent',
+        bool target = true, String duplicate = 'none', int size = 1}) => ReminderRecipient.fromJson({
+      'participantId': id, 'name': name, 'email': email, 'notificationType': type, 'winnerStatus': status, 'target': target,
+      'excludedReason': target ? null : 'winner-mail-not-sent', 'duplicate': duplicate, 'duplicateGroupSize': size,
+      'programs': [{'programId': 'alpha', 'name': '架空プログラムA', 'timeText': '10:00-11:00', 'plannedCount': 2}],
+    });
+
+    testWidgets('宛先一覧: 送信予定と対象外を分け、氏名・メール・当選種別・program・時間・人数・当選メールの状態・重複の判定を表示', (tester) async {
+      setPhone(tester, width: 1000, height: 8000);
+      final service = FakeReminderService(targetCount: 3, recipients: [
+        r('p1', '架空 一郎', email: 'family@example.invalid', duplicate: 'shared-address', size: 2),
+        r('p2', '架空 花子', email: 'family@example.invalid', duplicate: 'shared-address', size: 2),
+        r('p3', '架空 三郎', email: 'w3@example.invalid', type: 'waitlistPromotion'),
+        r('p4', '架空 四郎', email: 'n4@example.invalid', status: 'failed', target: false),
+        r('p5', '架空 五郎', email: 'n5@example.invalid', status: 'none', target: false),
+      ]);
+      await tester.pumpWidget(page(service));
+      await settle(tester);
+      expect(find.byKey(const ValueKey('reminder-recipients')), findsOneWidget);
+      expect(find.text('送信予定：3件(通常当選3件・繰り上げ当選0件)　送信対象外：2件'), findsOneWidget);
+      expect(find.text('送信予定(3件)'), findsOneWidget);
+      expect(find.text('送信対象外(2件。送信されません)'), findsOneWidget);
+      expect(find.text('架空 一郎　family@example.invalid'), findsOneWidget);
+      expect(find.text('繰り上げ当選　当選メール：送信済み'), findsOneWidget);
+      expect(find.text('通常当選　当選メール：送信失敗'), findsOneWidget);
+      expect(find.text('通常当選　当選メール：未送信(記録なし)'), findsOneWidget);
+      expect(find.text('架空プログラムA　10:00-11:00　2名'), findsNWidgets(5));
+      expect(find.text('同じアドレス(別の氏名・共有)(同じアドレス2件)'), findsNWidgets(2));
+      expect(find.byKey(const ValueKey('reminder-unknown-warning')), findsNothing);
+      expect(find.byKey(const ValueKey('reminder-duplicate-warning')), findsNothing);
+      // 参加者を選ぶ・除外する操作は無い
+      expect(find.byType(Checkbox), findsNothing);
+      expect(find.byType(Switch).evaluate().length, lessThanOrEqualTo(1), reason: '自動送信の切替だけ(宛先の選択は無い)');
+    });
+
+    testWidgets('当選メールの結果不明・重複登録の疑いがあれば警告し、開始できない(サーバーも作らない)', (tester) async {
+      for (final (unknown, suspected, key) in [(1, 0, 'reminder-unknown-warning'), (0, 2, 'reminder-duplicate-warning')]) {
+        setPhone(tester, width: 1000, height: 8000);
+        final service = FakeReminderService(targetCount: 2, unknownWinnerMail: unknown, suspectedDuplicates: suspected, recipients: [
+          r('p1', '架空 一郎', duplicate: suspected > 0 ? 'suspected-duplicate' : 'none', size: suspected > 0 ? 2 : 1),
+          r('p2', '架空 一郎', duplicate: suspected > 0 ? 'suspected-duplicate' : 'none', size: suspected > 0 ? 2 : 1),
+          if (unknown > 0) r('p3', '架空 三郎', status: 'unknown', target: false),
+        ]);
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpWidget(page(service));
+        await settle(tester);
+        expect(find.byKey(ValueKey(key)), findsOneWidget, reason: key);
+        await tester.tap(find.text('プレビューを表示'));
+        await settle(tester);
+        final button = find.widgetWithText(OutlinedButton, '今すぐリマインド送信を開始…');
+        expect(tester.widget<OutlinedButton>(button).onPressed, isNull, reason: 'プレビュー済みでも開始できない');
+        expect(find.byKey(const ValueKey('reminder-start-blocked')), findsOneWidget);
+        expect(service.startCalls, 0);
+        if (unknown > 0) expect(find.text('通常当選　当選メール：結果不明(要確認)'), findsOneWidget);
+        if (suspected > 0) expect(find.text('重複登録の疑い(同じアドレス2件)'), findsNWidgets(2));
+      }
+    });
+
+    test('サーバーの理由コード(確認後の変更・未解決・確認なし)を表示用のメッセージにする', () {
+      Map<String, dynamic> body(String code) => {'error': {'status': 'FAILED_PRECONDITION', 'details': {'code': code}}};
+      expect(CallableReminderService.errorFrom(400, body('targets-changed')).message, contains('宛先一覧をもう一度確認'));
+      expect(CallableReminderService.errorFrom(400, body('reminder-targets-unresolved')).message, contains('重複登録の疑い'));
+      expect(CallableReminderService.errorFrom(400, body('targets-fingerprint-required')).message, contains('宛先一覧を確認してから'));
+    });
+  });
+
   group('構造(ソース)の固定', () {
     String read(String path) => File(path).readAsStringSync();
     final files = [
@@ -1149,7 +1182,9 @@ void main() {
         expect(source.contains('toSet()'), isFalse, reason: f);
         expect(source.contains('distinct'), isFalse, reason: f);
         expect(source.contains('registeredCount'), isFalse, reason: f);
-        expect(source.contains('.email'), isFalse, reason: f);
+        // メールアドレスは、送信前の宛先一覧でサーバーの値を表示するだけ。クライアントで比較・正規化・まとめをしない
+        // (重複の判定はサーバー。以前は表示も無かったため '.email' 自体を禁じていた)
+        expect(RegExp(r'\.email\s*(==|!=)|==\s*\w+\.email|\.email\.(trim|toLowerCase)|groupBy').hasMatch(source), isFalse, reason: f);
         expect(
           source.contains('processConfirmedWinnerMailJob'),
           isFalse,

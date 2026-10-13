@@ -29,9 +29,10 @@ DateTime? parseJstDateTime(String text) {
   return utc.subtract(const Duration(hours: 9));
 }
 
-/// 前日リマインド(admin専用): 設定・プレビュー・送信予定・対象人数・現在の状態。
-/// 対象人数・対象外人数・状態はすべてサーバー(callable)の値。対象はイベント全体の全active participant(取込回は問わない)。
-/// 自動送信は、有効にした場合だけ、送信予定日時に達したときサーバーが行う(ブラウザは不要)。設定の保存だけではメールは送られない。
+/// 前日リマインド(イベント管理者以上): 文面・送信前の宛先一覧・プレビュー・手動送信・現在の状態。
+/// 対象人数・対象外人数・宛先・状態はすべてサーバー(callable)の値。対象は当選メールが送信済みの有効な参加者(取込回は問わない)。
+/// 手動送信専用: 自動送信の有効化・送信予定日時の入力は無い(サーバーも自動送信の有効化を拒否し、自動ではジョブを作らない)。
+/// 文面の保存だけではメールは送られない。送信は宛先一覧を確認してから「今すぐリマインド送信を開始…」で行う。
 ///
 /// ■ Phase 11D: [initialEventId](イベント管理画面から内部的に渡される)を正本として使う。利用者が
 ///   イベントIDを見る・入力する・書き換える欄は無い。[initialEventId]が無い状態(直接この画面に来た場合)は、
@@ -59,14 +60,12 @@ class ReminderPage extends StatefulWidget {
 }
 
 class _ReminderPageState extends State<ReminderPage> {
-  final sendAtField = TextEditingController();
   final subject = TextEditingController();
   final intro = TextEditingController();
   final closing = TextEditingController();
   final notes = TextEditingController();
   final participantId = TextEditingController();
   ReminderSettings? settings;
-  bool enabledInput = false;
   bool loading = false;
   bool busy = false;
   String? error;
@@ -74,8 +73,6 @@ class _ReminderPageState extends State<ReminderPage> {
   WinnerMailPreview? previewResult;
   String? previewError;
   Timer? pollTimer;
-
-  DateTime get _now => widget.now?.call() ?? DateTime.now();
 
   String get _eventId => (widget.initialEventId ?? '').trim();
   bool get _hasEventId => _eventId.isNotEmpty;
@@ -90,7 +87,6 @@ class _ReminderPageState extends State<ReminderPage> {
   void dispose() {
     pollTimer?.cancel();
     for (final c in [
-      sendAtField,
       subject,
       intro,
       closing,
@@ -102,8 +98,6 @@ class _ReminderPageState extends State<ReminderPage> {
     super.dispose();
   }
 
-  String _formatSendAt(DateTime? at) => at == null ? '' : jstDateTime(at);
-
   Future<void> _load({bool silent = false, bool keepError = false}) async {
     if (!_hasEventId) return; // 呼び出し元(initState・再読み込みボタン)がガードしている
     if (!silent) setState(() => loading = true);
@@ -114,8 +108,6 @@ class _ReminderPageState extends State<ReminderPage> {
         settings = result;
         if (!silent) {
           // フォームは、サーバーの現在値で埋める(silent=pollingでは、入力中の内容を上書きしない)
-          enabledInput = result.enabled;
-          sendAtField.text = _formatSendAt(result.sendAt);
           subject.text = result.subject;
           intro.text = result.introBody;
           closing.text = result.closingBody;
@@ -158,27 +150,18 @@ class _ReminderPageState extends State<ReminderPage> {
   }
 
   String? _validate() {
-    final s = settings!;
-    if (_templateDirty) {
-      if (subject.text.trim().isEmpty) return '件名を入力してください。';
-      if (subject.text.contains('\n')) return '件名は1行で入力してください。';
-      if (subject.text.trim().length > _maxSubject) {
-        return '件名は$_maxSubject文字以内で入力してください。';
-      }
-      if (intro.text.trim().isEmpty) return '冒頭本文を入力してください。';
-      if (closing.text.trim().isEmpty) return '締め本文を入力してください。';
-      for (final c in [intro, closing, notes]) {
-        if (c.text.trim().length > _maxBody) {
-          return '本文は$_maxBody文字以内で入力してください。';
-        }
-      }
+    if (!_templateDirty) return '文面に変更がありません。';
+    if (subject.text.trim().isEmpty) return '件名を入力してください。';
+    if (subject.text.contains('\n')) return '件名は1行で入力してください。';
+    if (subject.text.trim().length > _maxSubject) {
+      return '件名は$_maxSubject文字以内で入力してください。';
     }
-    final at = parseJstDateTime(sendAtField.text);
-    if (sendAtField.text.trim().isNotEmpty && at == null) {
-      return '送信予定日時は「2026/11/29 10:00」の形式(日本時間)で入力してください。';
-    }
-    if (enabledInput && at == null && s.sendAt == null) {
-      return '自動送信を有効にするには、送信予定日時を入力してください。';
+    if (intro.text.trim().isEmpty) return '冒頭本文を入力してください。';
+    if (closing.text.trim().isEmpty) return '締め本文を入力してください。';
+    for (final c in [intro, closing, notes]) {
+      if (c.text.trim().length > _maxBody) {
+        return '本文は$_maxBody文字以内で入力してください。';
+      }
     }
     return null;
   }
@@ -191,24 +174,15 @@ class _ReminderPageState extends State<ReminderPage> {
       return;
     }
     final s = settings!;
-    final at = parseJstDateTime(sendAtField.text);
-    final effectiveAt = at ?? s.sendAt;
-    final past =
-        enabledInput &&
-        effectiveAt != null &&
-        !effectiveAt.isAfter(_now.toUtc());
     final lines = [
       'イベント：${s.eventName}',
-      '自動送信：${enabledInput ? '有効' : '無効'}',
-      '送信予定：${effectiveAt == null ? '未設定' : jstDateTime(effectiveAt)}',
-      if (_templateDirty) 'テンプレート：文面を更新します(v${(s.templateVersion ?? 0) + 1})',
+      'テンプレート：文面を更新します(v${(s.templateVersion ?? 0) + 1})',
       if (s.job != null) 'すでに作成済みのリマインドは、この変更では止まりません・作り直されません。',
-      if (past) '送信予定日時が過去です。有効にすると、直ちに全員へ送信されます。',
-      'この保存では、メールは送信されません(自動送信は送信予定日時にサーバーが行います)。',
+      'この保存では、メールは送信されません(送信は宛先一覧を確認してから手動で行います)。',
     ];
     final ok = await confirmSendAction(
       context,
-      title: past ? '過去の日時です。設定を保存しますか?' : '前日リマインドの設定を保存します',
+      title: '前日リマインドの文面を保存します',
       lines: lines,
       confirmLabel: '保存',
     );
@@ -219,10 +193,9 @@ class _ReminderPageState extends State<ReminderPage> {
       message = null;
     });
     try {
+      // 文面だけを保存する(自動送信の有効・無効、送信予定日時は送らない=手動送信専用)
       await widget.service.updateSettings(
         eventId: s.eventId,
-        enabled: enabledInput != s.enabled ? enabledInput : null,
-        sendAt: at != null && at != s.sendAt ? at : null,
         template: _templateDirty
             ? (
                 subject: subject.text,
@@ -231,9 +204,8 @@ class _ReminderPageState extends State<ReminderPage> {
                 notesBody: notes.text,
               )
             : null,
-        acknowledgePast: past,
       );
-      if (mounted) setState(() => message = '設定を保存しました(メールは送信していません)。');
+      if (mounted) setState(() => message = '文面を保存しました(メールは送信していません)。');
     } on WinnerSendException catch (e) {
       if (mounted) setState(() => error = e.message);
     } finally {
@@ -279,15 +251,17 @@ class _ReminderPageState extends State<ReminderPage> {
     if (busy) return;
     final s = settings!;
     final version = s.templateVersion;
-    if (version == null) return;
+    if (version == null || s.blocked || s.targetsFingerprint == null) return;
     final ok = await confirmSendAction(
       context,
       title: '前日リマインドを今すぐ開始します',
       lines: [
         'イベント：${s.eventName}',
-        '送信対象：${s.targetCount}件(イベント全体の有効な参加者)',
+        '送信対象：${s.targetCount}件(当選メール送信済みの参加者。通常当選${s.normalCount}件・繰り上げ当選${s.waitlistCount}件)',
+        '送信対象外：${s.recipients.where((r) => !r.target).length}件(当選メール未送信・送信失敗など。送信されません)',
+        '宛先は、この画面の宛先一覧のとおりです(確認後に変わっていれば、サーバーが開始を止めます)。',
         'テンプレート：v$version',
-        '自動送信と同じジョブへ引き渡します(別便は作られません)。',
+        '送信はサーバーが行います(このイベントのリマインドは1つだけで、二重には作られません)。',
         'この操作でメールが送信されます(送信はサーバーが行い、この画面を閉じても続きます)。',
       ],
       confirmLabel: '送信を開始',
@@ -302,6 +276,7 @@ class _ReminderPageState extends State<ReminderPage> {
         s.eventId,
         expectedTemplateVersion: version,
         expectedTargetCount: s.targetCount,
+        expectedTargetsFingerprint: s.targetsFingerprint,
       );
       if (mounted) {
         setState(
@@ -380,6 +355,8 @@ class _ReminderPageState extends State<ReminderPage> {
           const SizedBox(height: 12),
           _settingsForm(settings!),
           const SizedBox(height: 12),
+          _recipientsCard(settings!),
+          const SizedBox(height: 12),
           _previewCard(settings!),
           const SizedBox(height: 12),
           _jobCard(settings!),
@@ -398,33 +375,20 @@ class _ReminderPageState extends State<ReminderPage> {
             s.eventName,
             style: const TextStyle(fontWeight: FontWeight.bold),
           ),
-          KeyValueRow(
-            '送信予定',
-            s.sendAt == null ? '未設定' : jstDateTime(s.sendAt!),
-          ),
-          KeyValueRow('自動送信', s.enabled ? '有効' : '無効'),
           KeyValueRow('対象', '${s.targetCount}件'),
           KeyValueRow('対象外', '${s.excludedCount}件'),
           KeyValueRow(
             'テンプレート',
             s.templateVersion == null ? '未設定' : 'v${s.templateVersion}',
           ),
-          if (!s.enabled)
-            const Padding(
-              padding: EdgeInsets.only(top: 6),
-              child: Text(
-                '自動送信は無効です。送信予定日時になっても、自動ではメールは送信されません。',
-                key: ValueKey('note-disabled'),
-                style: TextStyle(color: Color(0xffb54708)),
-              ),
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text(
+              '前日リマインドは手動送信です。送信前の宛先一覧を確認してから「今すぐリマインド送信を開始…」で送信します(自動送信はありません)。',
+              key: ValueKey('note-manual-only'),
+              style: TextStyle(color: Color(0xff5c6670)),
             ),
-          if (s.enabled && s.job == null)
-            const Padding(
-              padding: EdgeInsets.only(top: 6),
-              child: Text(
-                '送信予定日時になると、サーバーが対象を確定して自動で送信します(この画面を開いている必要はありません)。',
-              ),
-            ),
+          ),
           if (s.eventEnded)
             const Padding(
               padding: EdgeInsets.only(top: 6),
@@ -453,24 +417,8 @@ class _ReminderPageState extends State<ReminderPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text('設定', style: TextStyle(fontWeight: FontWeight.bold)),
+          const Text('文面', style: TextStyle(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          SwitchListTile(
-            key: const ValueKey('switch-enabled'),
-            contentPadding: EdgeInsets.zero,
-            title: const Text('自動送信を有効にする'),
-            subtitle: const Text('有効にしたイベントだけ、送信予定日時にサーバーが自動送信します(既定は無効)。'),
-            value: enabledInput,
-            onChanged: (value) => setState(() => enabledInput = value),
-          ),
-          TextField(
-            controller: sendAtField,
-            decoration: const InputDecoration(
-              labelText: '送信予定日時(日本時間)',
-              helperText: '例: 2026/11/29 10:00',
-            ),
-          ),
-          const SizedBox(height: 12),
           const Text(
             'リマインドの文面(当選メールとは別に管理されます)。参加者名・QR・program・会場などは自動で挿入されます。',
             style: TextStyle(color: Color(0xff5c6670)),
@@ -515,7 +463,7 @@ class _ReminderPageState extends State<ReminderPage> {
             alignment: Alignment.centerLeft,
             child: FilledButton(
               onPressed: busy ? null : _save,
-              child: const Text('設定を保存'),
+              child: const Text('文面を保存'),
             ),
           ),
         ],
@@ -592,6 +540,97 @@ class _ReminderPageState extends State<ReminderPage> {
     );
   }
 
+  /// 送信前の宛先一覧(送信対象・対象外)。参加者を選ぶ・除外する操作は無い(対象はサーバーが判定する)。
+  Widget _recipientsCard(ReminderSettings s) {
+    final targets = s.recipients.where((r) => r.target).toList();
+    final excluded = s.recipients.where((r) => !r.target).toList();
+    Widget row(ReminderRecipient r) => Container(
+      key: ValueKey('reminder-recipient-${r.participantId}'),
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0xffe5e7eb)))),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('${r.name}　${r.email}', style: const TextStyle(fontWeight: FontWeight.w600)),
+          Text(
+            '${r.notificationTypeLabel}　当選メール：${r.winnerStatusLabel}',
+            style: TextStyle(
+              color: r.winnerStatus == 'unknown' ? const Color(0xffb42318) : const Color(0xff5c6670),
+              fontSize: 13,
+            ),
+          ),
+          for (final p in r.programs)
+            Text(
+              '${p.name}${p.timeText == null ? '' : '　${p.timeText}'}${p.plannedCount == null ? '' : '　${p.plannedCount}名'}',
+              style: const TextStyle(fontSize: 13),
+            ),
+          if (r.duplicateLabel.isNotEmpty)
+            Text(
+              '${r.duplicateLabel}(同じアドレス${r.duplicateGroupSize}件)',
+              style: TextStyle(
+                fontSize: 13,
+                color: r.duplicate == 'suspected-duplicate' || r.duplicate == 'undetermined'
+                    ? const Color(0xffb54708)
+                    : const Color(0xff5c6670),
+              ),
+            ),
+        ],
+      ),
+    );
+    return Card(
+      key: const ValueKey('reminder-recipients'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('送信前の宛先一覧', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            Text(
+              '送信予定：${targets.length}件(通常当選${s.normalCount}件・繰り上げ当選${s.waitlistCount}件)　送信対象外：${excluded.length}件',
+              key: const ValueKey('reminder-recipients-summary'),
+            ),
+            const Text(
+              '送信対象は、当選メールが送信済みの参加者です。同じメールアドレスでも参加者ごとに1通ずつ送ります(統合しません)。',
+              style: TextStyle(color: Color(0xff5c6670), fontSize: 12),
+            ),
+            if (s.unknownWinnerMail > 0)
+              Container(
+                key: const ValueKey('reminder-unknown-warning'),
+                margin: const EdgeInsets.only(top: 8),
+                padding: const EdgeInsets.all(10),
+                color: const Color(0xffffe8e8),
+                child: Text(
+                  '当選メールの送信結果が不明な参加者が${s.unknownWinnerMail}件います。届いたか確認できないため、この状態では前日リマインドを作成しません'
+                  '(手動・自動とも)。当選メールの送信状況を確認してください。',
+                ),
+              ),
+            if (s.suspectedDuplicates > 0)
+              Container(
+                key: const ValueKey('reminder-duplicate-warning'),
+                margin: const EdgeInsets.only(top: 8),
+                padding: const EdgeInsets.all(10),
+                color: const Color(0xffffe8e8),
+                child: Text(
+                  '重複登録の疑い(同じメールアドレス・氏名・プログラム・時間帯)が${s.suspectedDuplicates}件あります。'
+                  '誤送信を防ぐため、この状態では前日リマインドを作成しません(参加者の統合・削除はしません)。',
+                ),
+              ),
+            const SizedBox(height: 10),
+            Text('送信予定(${targets.length}件)', style: const TextStyle(fontWeight: FontWeight.w600)),
+            if (targets.isEmpty) const Text('送信予定の参加者はいません。', style: TextStyle(color: Color(0xff5c6670))),
+            for (final r in targets) row(r),
+            if (excluded.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Text('送信対象外(${excluded.length}件。送信されません)', style: const TextStyle(fontWeight: FontWeight.w600)),
+              for (final r in excluded) row(r),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _jobCard(ReminderSettings s) {
     final job = s.job;
     return Card(
@@ -612,12 +651,23 @@ class _ReminderPageState extends State<ReminderPage> {
                       busy ||
                           !_previewed ||
                           s.targetCount == 0 ||
-                          s.templateVersion == null
+                          s.templateVersion == null ||
+                          s.blocked ||
+                          s.targetsFingerprint == null
                       ? null
                       : _startNow,
                   child: const Text('今すぐリマインド送信を開始…'),
                 ),
               ),
+              if (s.blocked)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                    '当選メールの結果不明・重複登録の疑いがあるため、開始できません。宛先一覧を確認してください。',
+                    key: ValueKey('reminder-start-blocked'),
+                    style: TextStyle(color: Color(0xffb42318)),
+                  ),
+                ),
               if (!_previewed)
                 const Padding(
                   padding: EdgeInsets.only(top: 6),

@@ -90,20 +90,43 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     await db.collection("events").doc("event1").set(event);
   }
   const importApi = () => withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
-  async function importBatch(clientRequestId, tableOrN = 3) {
-    const table = typeof tableOrN === "number" ? makeTable(tableOrN) : tableOrN;
-    // テスト用の取込(複数の取込回で同じ架空メールを使う)。既存参加者・CSV内のメール重複は、管理者が許可した取込として扱う。
-    return importApi().commit({identity: {uid: "u-admin"}, data: {...buildImportRequest({table, clientRequestId}), acknowledgeExistingEmailDuplicates: true, acknowledgeCsvEmailDuplicates: true}});
+  // テスト用の取込。件数だけを指定した場合は、取込回ごとに別の架空の参加者(氏名・メール・参照コード)を作る
+  // (同じ行を別の取込回へ入れ直すと、前日リマインドでは「重複登録の疑い」として送信を止めるため)。
+  // 前日リマインドの対象は当選メールが送信済みの参加者だけなので、既定で当選メールを送信済み(mailDeliveries/{id}_winner=sent)にする。
+  // 実際に当選メールを送るテストは {winnerSent: false} で取り込む。
+  async function importBatch(clientRequestId, tableOrN = 3, {winnerSent = true} = {}) {
+    const table = typeof tableOrN === "number" ? makeTable(tableOrN, (i) => ({
+      "氏名": `架空 ${clientRequestId} ${i}`, "メールアドレス": `${clientRequestId.toLowerCase()}-${i}@example.invalid`, "rd": `${clientRequestId}-${i}`,
+    })) : tableOrN;
+    // 既存参加者・CSV内のメール重複は、管理者が許可した取込として扱う。
+    const result = await importApi().commit({identity: {uid: "u-admin"}, data: {...buildImportRequest({table, clientRequestId}), acknowledgeExistingEmailDuplicates: true, acknowledgeCsvEmailDuplicates: true}});
+    if (winnerSent) await markWinnerSent(clientRequestId);
+    return result;
   }
+  // 当選メールの配送記録(送信済み)。個人情報は持たない(当選メールの配送記録と同じ形)。
+  async function markWinnerSent(batchId, status = "sent") {
+    const people = (await db.collection("participants").where("importBatchId", "==", batchId).get()).docs;
+    assert.ok(people.length > 0, `取込回 ${batchId} の参加者が見つかりません`);
+    for (const p of people) {
+      await db.collection("mailDeliveries").doc(`${p.id}_winner`).set({eventId: "event1", participantId: p.id, type: "winner", jobId: `winner-${batchId}`, status});
+    }
+  }
+  const reminderDeliveries = async () => (await docs("mailDeliveries")).filter((d) => d.id.endsWith("_reminder"));
+  // 管理画面で確認した宛先の照合値(手動開始で送る)
+  const confirmedFingerprint = async () => (await api.settings(asAdmin({eventId: "event1"}))).targets.fingerprint;
   const JOB = "reminder-event1";
   const job = () => get(`sendJobs/${JOB}`);
   const jobItems = () => docs(`sendJobs/${JOB}/items`);
+  // 自動の入口(既存のsweepの冒頭から呼ばれる)。前日リマインドは手動送信専用なので、何もしないことを確かめるために使う。
   const reconcile = () => reminder.reconcileDue({limit: 5});
+  // 管理者の手動開始(管理画面で確認した宛先の照合値を添える)= ジョブの作成と引き渡し。既存ジョブがあれば再開。
+  const startManually = async () => api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint()}));
   const sweep = () => send.runSweep();
-  // 送信時刻に達し、定期実行が「ジョブ作成 → 引き渡し → 配送」を行う(ブラウザは一切関与しない)
+  // 管理者が手動で開始し(ジョブ作成 → 引き渡し)、サーバーの継続処理(sweep)が配送する(ブラウザは配送に関与しない)
   async function due(times = 1) {
     nowMs = T0;
-    for (let i = 0; i < times; i += 1) { await reconcile(); await sweep(); }
+    await startManually();
+    for (let i = 0; i < times; i += 1) await sweep();
   }
   const view = async () => (await api.job(asAdmin({eventId: "event1"}))).job;
 
@@ -131,83 +154,39 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
   });
 
   // ---------------------------------------------------------------------------------------------
-  describe("自動でジョブを作る条件(Scheduler)", () => {
-    test("confirmedイベントだけが対象。legacy・flow未設定・未知のflowでは、有効でもジョブを作らない", async () => {
-      await importBatch("batchA", 3);
-      for (const flow of ["legacy", "confirmd", undefined]) {
-        await seedEvent({flow});
-        nowMs = T0;
-        await reconcile();
-        assert.equal((await docs("sendJobs")).length, 0, String(flow));
-      }
-      await seedEvent();
-      await reconcile();
-      assert.equal((await docs("sendJobs")).length, 1);
-    });
-
-    test("reminderEnabled=false(既定)ならジョブを作らない。送信予定日時を過ぎていても", async () => {
-      await importBatch("batchA", 3);
-      for (const enabled of [false, undefined]) {
-        await seedEvent({reminderEnabled: enabled});
-        nowMs = T0 + 3600 * 1000;
-        await reconcile();
+  describe("自動送信の停止(手動送信専用)", () => {
+    test("reminderEnabled=true・送信予定日時の経過が保存されていても、自動の入口はジョブを作らず、引き渡さない(何回・並行でも)", async () => {
+      await importBatch("batchA", 5);
+      for (const at of [T0 - 1000, T0, T0 + 3600 * 1000]) {
+        nowMs = at;
+        const result = await reconcile();
+        assert.deepEqual(result.created, []);
         await sweep();
       }
-      assert.equal((await docs("sendJobs")).length, 0);
-      assert.equal(sends.length, 0);
-    });
-
-    test("送信予定日時の1秒前はジョブなし、ちょうどの時刻で作成、以後の再実行では新規作成なし(絶対時刻で比較)", async () => {
-      await importBatch("batchA", 5);
-      nowMs = T0 - 1000;
-      await reconcile();
-      assert.equal((await docs("sendJobs")).length, 0, "1秒前");
-      nowMs = T0;
-      const first = await reconcile();
-      assert.deepEqual(first.created, [JOB], "ちょうど");
-      const created = await job();
-      nowMs = T0 + 1000;
-      await reconcile();
-      nowMs = T0 + 3600 * 1000;
-      await reconcile();
-      assert.equal((await docs("sendJobs")).length, 1, "後の再実行では新規作成なし");
-      assert.equal((await job()).createdAt.toMillis(), created.createdAt.toMillis());
-    });
-
-    test("送信予定日時が未設定・イベント終了後・対象が0件・文面未設定なら、ジョブを作らない(勝手に補完しない)", async () => {
-      await importBatch("batchA", 3);
-      await seedEvent({reminderSendAt: undefined});
-      nowMs = T0;
-      await reconcile();
-      await seedEvent();
-      nowMs = Date.parse(EVENT_END) + 1000;
-      await reconcile();
-      await seedEvent({reminderMailTemplate: undefined});
-      nowMs = T0;
-      await reconcile();
-      assert.equal((await docs("sendJobs")).length, 0);
-      await env.clear();
-      await db.collection("accessRoles").doc("u-admin").set({role: "admin", active: true});
-      await seedEvent();
-      nowMs = T0;
-      await reconcile();
-      assert.equal((await docs("sendJobs")).length, 0, "対象0件");
-    });
-
-    test("Schedulerを2回・10回・100回相当(並行を含む)実行しても、ジョブは1つ・itemはtargetCount・sentの再送なし", async () => {
-      await importBatch("batchA", 12);
       nowMs = T0;
       await Promise.all(Array.from({length: 5}, () => reconcile()));
+      for (let i = 0; i < 100; i += 1) await reconcile();
+      await sweep();
+      assert.equal((await docs("sendJobs")).length, 0, "自動ではジョブを作らない");
+      assert.equal(sends.length, 0, "自動では送らない");
+      assert.equal((await get("events/event1")).reminderEnabled, true, "保存済みの値は削除しない");
+      assert.equal((await get("events/event1")).reminderJobReady, undefined, "自動の標識も書かない");
+    });
+
+    test("手動開始を2回・10回・100回相当(並行を含む)実行しても、ジョブは1つ・itemはtargetCount・sentの再送なし", async () => {
+      await importBatch("batchA", 12);
+      nowMs = T0;
+      await Promise.all(Array.from({length: 5}, () => startManually().catch(() => null)));
       for (const times of [2, 10, 100]) {
-        for (let i = 0; i < times; i += 1) await reconcile();
+        for (let i = 0; i < times; i += 1) await startManually();
         assert.equal((await docs("sendJobs")).length, 1, `${times}回`);
         assert.equal((await jobItems()).length, 12);
-        assert.equal((await docs("mailDeliveries")).length, 12);
+        assert.equal((await reminderDeliveries()).length, 12);
       }
       await sweep();
       const sentOnce = sends.length;
       assert.equal(sentOnce, 12);
-      for (let i = 0; i < 10; i += 1) { await reconcile(); await sweep(); }
+      for (let i = 0; i < 10; i += 1) { await startManually(); await reconcile(); await sweep(); }
       assert.equal(sends.length, sentOnce, "sentの再送なし");
       assert.equal((await job()).targetCount, 12);
     });
@@ -229,11 +208,11 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       const settings = await api.settings(asAdmin({eventId: "event1"}));
       assert.deepEqual([settings.targets.targetCount, settings.targets.excludedCount, settings.targets.totalParticipants], [150, 0, 150]);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       const created = await job();
       assert.equal(created.targetCount, 150);
       assert.equal((await jobItems()).length, 150);
-      assert.equal((await docs("mailDeliveries")).length, 150);
+      assert.equal((await reminderDeliveries()).length, 150);
     });
 
     test("A: 同一メールのactive participant 100件 → targetCount 100・100の配送状態・欠落0", async () => {
@@ -303,14 +282,14 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("targetCountはジョブ作成時に固定される。作成後にparticipantを追加・変更しても既存ジョブは変わらず、管理画面で差分が分かる", async () => {
       await importBatch("batchA", 10);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       await importBatch("batchB", 5); // 後から追加された第2回
       await db.doc("participants/batchA-000002").update({status: "cancelled"});
       await reconcile();
-      await reconcile();
+      await startManually(); // 既存ジョブの再開: 宛先は追加しない
       assert.equal((await job()).targetCount, 10, "既存jobのtargetCountは変わらない");
       assert.equal((await jobItems()).length, 10);
-      assert.equal((await docs("mailDeliveries")).length, 10);
+      assert.equal((await reminderDeliveries()).length, 10);
       const settings = await api.settings(asAdmin({eventId: "event1"}));
       assert.deepEqual(settings.changedSinceJob, {currentTargetCount: 14, jobTargetCount: 10, changed: true});
       await sweep();
@@ -345,7 +324,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("ジョブ作成時にreminderMailTemplateのversionと文面を固定する。作成後にテンプレートを変更しても、既存jobのメールは変わらない", async () => {
       await importBatch("batchA", 6);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       const created = await job();
       assert.equal(created.templateVersion, 2);
       assert.equal(created.snapshot.template.subject, REMINDER_TEMPLATE.subject);
@@ -355,17 +334,17 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       assert.equal((await job()).templateVersion, 2);
       assert.equal(remindersSent().length, 6);
       assert.ok(remindersSent().every((m) => m.subject === REMINDER_TEMPLATE.subject && m.text.includes("いよいよ明日です。") && !m.text.includes("変更後の冒頭")));
-      assert.ok((await docs("mailDeliveries")).every((d) => d.data().templateVersion === 2));
+      assert.ok((await reminderDeliveries()).every((d) => d.data().templateVersion === 2));
     });
 
     test("自動・手動のどちらの入口でも、同じversion固定を通る。確認したversion・対象人数と違えば手動開始は作成しない", async () => {
       await importBatch("batchA", 5);
-      const error = await api.start(asAdmin({eventId: "event1", expectedTemplateVersion: 1, expectedTargetCount: 5})).catch((e) => e);
+      const error = await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint(), expectedTemplateVersion: 1, expectedTargetCount: 5})).catch((e) => e);
       assert.equal(error.details.code, "template-version-changed");
-      const error2 = await api.start(asAdmin({eventId: "event1", expectedTemplateVersion: 2, expectedTargetCount: 9})).catch((e) => e);
+      const error2 = await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint(), expectedTemplateVersion: 2, expectedTargetCount: 9})).catch((e) => e);
       assert.equal(error2.details.code, "target-count-changed");
       assert.equal((await docs("sendJobs")).length, 0, "確認と違う内容ではジョブを作らない");
-      const started = await api.start(asAdmin({eventId: "event1", expectedTemplateVersion: 2, expectedTargetCount: 5}));
+      const started = await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint(), expectedTemplateVersion: 2, expectedTargetCount: 5}));
       assert.deepEqual([started.jobId, started.templateVersion, started.targetCount, started.dispatchActive], [JOB, 2, 5, true]);
     });
   });
@@ -394,7 +373,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     });
 
     test("実際に送信された当選メールとリマインドで、同じparticipantのQR画像・Web参加証URL・受付内容が同一(1つのQR・1つの参加証)", async () => {
-      await importBatch("batchA", 5);
+      await importBatch("batchA", 5, {winnerSent: false}); // 当選メールを実際に送る
       await api.winnerCreate(asAdmin({eventId: "event1", batchId: "batchA", expectedTemplateVersion: 3}));
       await api.winnerStart(asAdmin({jobId: "winner-batchA"}));
       await sweep(); // 当選メール(サーバー側継続配送)
@@ -447,7 +426,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
   // ---------------------------------------------------------------------------------------------
   describe("当選メールとの分離", () => {
     test("winnerとreminderのmailDeliveriesは別(IDも別)。winner送信済みでもreminderの対象になり、reminderの結果はwinnerの状態を変えない", async () => {
-      await importBatch("batchA", 8);
+      await importBatch("batchA", 8, {winnerSent: false}); // 当選メールを実際に送る
       await api.winnerCreate(asAdmin({eventId: "event1", batchId: "batchA", expectedTemplateVersion: 3}));
       await api.winnerStart(asAdmin({jobId: "winner-batchA"}));
       await sweep();
@@ -471,7 +450,8 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("リマインドのジョブ・配送記録は type=reminder / jobId=reminder-{eventId}。旧mailJobsは使わない", async () => {
       await importBatch("batchA", 3);
       await due();
-      assert.ok((await docs("mailDeliveries")).every((d) => d.data().type === "reminder" && d.data().jobId === JOB && d.id === `${d.data().participantId}_reminder`));
+      assert.ok((await reminderDeliveries()).length > 0);
+      assert.ok((await reminderDeliveries()).every((d) => d.data().type === "reminder" && d.data().jobId === JOB && d.id === `${d.data().participantId}_reminder`));
       assert.ok(sends.every((m) => m.metadata.type === "reminder" && m.metadata.jobId === JOB));
       assert.equal((await docs("mailJobs")).length, 0);
     });
@@ -491,16 +471,15 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       assert.ok(Object.values(perParticipant(remindersSent())).every((n) => n === 1));
     });
 
-    test("引き渡しは reminderSendAt の到達時に行われ、それまでは配送されない。作成直後にdispatchActiveが記録される", async () => {
+    test("引き渡しは管理者の手動開始で行われ、それまでは(送信予定日時を過ぎても)配送されない。作成直後にdispatchActiveが記録される", async () => {
       await importBatch("batchA", 6);
-      nowMs = T0 - 60000;
+      nowMs = T0 + 60000;
       await reconcile();
       await sweep();
       assert.equal(sends.length, 0);
-      nowMs = T0;
-      await reconcile();
+      await startManually();
       const created = await job();
-      assert.deepEqual([created.status, created.dispatchActive, created.dispatchRequestedBy], ["ready", true, "system:reminder-scheduler"]);
+      assert.deepEqual([created.status, created.dispatchActive, created.dispatchRequestedBy], ["ready", true, "u-admin"]);
       assert.equal(sends.length, 0, "作成の時点ではまだ送らない(配送はsweepが行う)");
       await sweep();
       assert.equal(sends.length, 6);
@@ -509,7 +488,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("workerを二重起動しても、対象数を超える配送は起きず、同じparticipantへ2回送られない", async () => {
       await importBatch("batchA", 60);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       const results = await Promise.all(Array.from({length: 6}, () => send.worker.runJob({db, jobId: JOB, getTransport: () => transport})));
       assert.equal(remindersSent().length, 60);
       assert.ok(Object.values(perParticipant(remindersSent())).every((n) => n === 1));
@@ -520,7 +499,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       makeApis({chunkSize: 10});
       await importBatch("batchA", 100);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       let calls = 0;
       behavior = (m) => { calls += 1; return calls > 40 ? new Promise(() => {}) : {outcome: "sent", messageId: `mid-${m.metadata.participantId}`}; };
       send.worker.runJob({db, jobId: JOB, getTransport: () => transport});
@@ -552,13 +531,13 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       assert.deepEqual([state.status, state.targetCount, state.counts], ["completed", 100, {pending: 0, sending: 0, sent: 90, failed: 5, unknown: 5}]);
       assert.equal(state.counts.sent + state.counts.failed + state.counts.unknown, state.targetCount);
       const dispatched = sends.length;
-      for (let i = 0; i < 3; i += 1) { await reconcile(); await sweep(); }
-      assert.equal(sends.length, dispatched, "failed・unknownは自動再送されない");
+      for (let i = 0; i < 3; i += 1) { await reconcile(); await startManually(); await sweep(); }
+      assert.equal(sends.length, dispatched, "failed・unknownは自動再送されない(手動開始の再実行でも送り直さない)");
       failing.clear();
       const retried = await api.retry(asAdmin({eventId: "event1"}));
       assert.equal(retried.retried, 5, "failedだけ");
       assert.equal(sends.length, dispatched, "retryはpendingへ戻すだけ");
-      await api.start(asAdmin({eventId: "event1"})); // 管理者の明示操作でサーバーへ引き渡す
+      await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint()})); // 管理者の明示操作でサーバーへ引き渡す
       await sweep();
       assert.equal(sends.length - dispatched, 5, "failedの5件だけが再送された");
       assert.ok(sends.slice(dispatched).every((m) => ["batchA-000003", "batchA-000010", "batchA-000020", "batchA-000030", "batchA-000040"].includes(m.metadata.participantId)));
@@ -570,7 +549,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("sending leaseは維持される: lease有効中は別workerが奪わず、dispatch済みでlease切れならunknown(既存方式をreminderのjobでも使用)", async () => {
       await importBatch("batchA", 12);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       await send.engine.claimItem({db, jobId: JOB, participantId: "batchA-000002"}); // dispatch前
       const b = await send.engine.claimItem({db, jobId: JOB, participantId: "batchA-000003"});
       await send.engine.startDispatch({db, jobId: JOB, participantId: "batchA-000003", claimId: b.claimId}); // dispatch済み
@@ -590,7 +569,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("保存則: completedは pending=0・sending=0・sent+failed+unknown==targetCount のときだけ。件数が壊れたらcompletedにしない(haltする)", async () => {
       await importBatch("batchA", 10);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       await db.doc(`sendJobs/${JOB}/items/batchA-000002`).delete();
       await sweep();
       const stored = await job();
@@ -633,15 +612,15 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
   describe("手動開始(自動と同じジョブへ到達する)", () => {
     test("手動開始 → 自動(時刻到達)の順でも、ジョブは1つ・配送記録はparticipantあたり1件。手動開始は別便ではない", async () => {
       await importBatch("batchA", 20);
-      const manual = await api.start(asAdmin({eventId: "event1"}));
+      const manual = await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint()}));
       assert.deepEqual([manual.jobId, manual.dispatchActive, manual.alreadyExisted], [JOB, true, false]);
       nowMs = T0;
       await reconcile(); // 自動: 既存のジョブがあるので何もしない
       await sweep();
       assert.equal((await docs("sendJobs")).length, 1);
-      assert.equal((await docs("mailDeliveries")).length, 20);
+      assert.equal((await reminderDeliveries()).length, 20);
       assert.equal(remindersSent().length, 20);
-      const again = await api.start(asAdmin({eventId: "event1"}));
+      const again = await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint()}));
       assert.equal(again.alreadyExisted, true);
       await sweep();
       assert.equal(remindersSent().length, 20, "手動開始を繰り返しても別便は送られない");
@@ -650,13 +629,13 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("自動と手動が同時に実行されても、ジョブ1つ・targetCount1つ・配送記録1件ずつ", async () => {
       await importBatch("batchA", 30);
       nowMs = T0;
-      const results = await Promise.all([reconcile(), api.start(asAdmin({eventId: "event1"})).catch((e) => e), reconcile(), api.start(asAdmin({eventId: "event1"})).catch((e) => e)]);
+      const results = await Promise.all([reconcile(), api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint()})).catch((e) => e), reconcile(), api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint()})).catch((e) => e)]);
       assert.equal(results.length, 4);
       await reconcile();
       assert.equal((await docs("sendJobs")).length, 1);
       assert.equal((await job()).targetCount, 30);
       assert.equal((await jobItems()).length, 30);
-      assert.equal((await docs("mailDeliveries")).length, 30);
+      assert.equal((await reminderDeliveries()).length, 30);
       await sweep();
       assert.equal(remindersSent().length, 30);
       assert.ok(Object.values(perParticipant(remindersSent())).every((n) => n === 1));
@@ -668,7 +647,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       await due();
       const before = JSON.stringify((await jobItems()).map((d) => [d.id, d.data().status]));
       const dispatched = sends.length;
-      const result = await api.start(asAdmin({eventId: "event1"}));
+      const result = await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint()}));
       assert.equal(result.alreadyExisted, true);
       assert.equal(result.dispatchActive, undefined, "完了済みのジョブを再度有効化しない");
       await sweep();
@@ -678,7 +657,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
 
     test("手動開始(dispatch=false)はジョブの準備だけ。配送はしない", async () => {
       await importBatch("batchA", 4);
-      const prepared = await api.start(asAdmin({eventId: "event1", dispatch: false}));
+      const prepared = await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint(), dispatch: false}));
       assert.equal(prepared.status, "ready");
       assert.equal((await job()).dispatchActive, undefined);
       await sweep();
@@ -688,44 +667,31 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
 
   // ---------------------------------------------------------------------------------------------
   describe("設定(reminderEnabled / reminderSendAt / テンプレート)", () => {
-    test("既定はreminderEnabled=false。設定の保存だけでは、ジョブも配送も作られない(定期実行が判断する)", async () => {
+    test("自動送信の有効化は拒否する(どの組み合わせでも何も書かない)。無効化・送信予定日時・文面の保存はできるが、保存だけでは何も送られない", async () => {
       await importBatch("batchA", 5);
       await seedEvent({reminderEnabled: undefined, reminderSendAt: undefined});
       const settings = await api.settings(asAdmin({eventId: "event1"}));
       assert.equal(settings.enabled, false);
-      assert.equal(settings.sendAt, null);
-      const saved = await api.update(asAdmin({eventId: "event1", reminderEnabled: true, reminderSendAt: new Date(T0 + 3600000).toISOString()}));
-      assert.equal(saved.enabled, true);
-      assert.equal((await docs("sendJobs")).length, 0, "保存だけではジョブを作らない");
-      assert.equal(sends.length, 0);
+      const before = JSON.stringify(await get("events/event1"));
+      const code = async (data) => (await api.update(asAdmin({eventId: "event1", ...data})).catch((e) => e)).details?.code;
+      for (const data of [
+        {reminderEnabled: true},
+        {reminderEnabled: true, reminderSendAt: new Date(T0 + 3600000).toISOString()},
+        {reminderEnabled: true, reminderSendAt: new Date(T0).toISOString(), acknowledgePast: true},
+        {reminderEnabled: true, template: REMINDER_TEMPLATE},
+      ]) {
+        assert.equal(await code(data), "auto-send-disabled", JSON.stringify(data));
+      }
+      assert.equal(JSON.stringify(await get("events/event1")), before, "拒否では何も書かれない");
+      await api.update(asAdmin({eventId: "event1", reminderEnabled: false}));
+      await api.update(asAdmin({eventId: "event1", reminderSendAt: new Date(T0).toISOString()}));
+      await api.update(asAdmin({eventId: "event1", template: {...REMINDER_TEMPLATE, subject: "保存できる件名"}}));
+      assert.equal((await get("events/event1")).reminderMailTemplate.subject, "保存できる件名");
       nowMs = T0 + 7200000;
       await reconcile();
-      assert.equal((await docs("sendJobs")).length, 1, "時刻到達後の定期実行で作られる");
-    });
-
-    test("有効化には、送信予定日時・完全なテンプレート・イベント情報が必要(サーバー側で検証)", async () => {
-      await seedEvent({reminderEnabled: false, reminderSendAt: undefined, reminderMailTemplate: undefined});
-      const fail = async (data, code) => assert.equal((await api.update(asAdmin({eventId: "event1", ...data})).catch((e) => e)).details.code, code);
-      await fail({reminderEnabled: true}, "send-at-required");
-      await api.update(asAdmin({eventId: "event1", reminderSendAt: new Date(T0).toISOString()}));
-      await fail({reminderEnabled: true}, "mail-not-ready");
-      await api.update(asAdmin({eventId: "event1", template: REMINDER_TEMPLATE}));
-      assert.equal((await get("events/event1")).reminderMailTemplate.version, 1);
-      await api.update(asAdmin({eventId: "event1", reminderEnabled: true, reminderSendAt: new Date(T0 + 3600000).toISOString()}));
-      assert.equal((await get("events/event1")).reminderEnabled, true);
-    });
-
-    test("過去の日時で有効化するには明示的な確認(acknowledgePast)が必要。イベント終了後は有効化できない", async () => {
-      await seedEvent({reminderEnabled: false});
-      nowMs = T0 + 3600000;
-      const past = new Date(T0).toISOString();
-      assert.equal((await api.update(asAdmin({eventId: "event1", reminderEnabled: true, reminderSendAt: past})).catch((e) => e)).details.code, "send-at-in-past");
-      assert.equal((await get("events/event1")).reminderEnabled, false, "拒否では何も書かれない");
-      await api.update(asAdmin({eventId: "event1", reminderEnabled: true, reminderSendAt: past, acknowledgePast: true}));
-      assert.equal((await get("events/event1")).reminderEnabled, true);
-      await seedEvent({reminderEnabled: false});
-      nowMs = Date.parse(EVENT_END) + 1000;
-      assert.equal((await api.update(asAdmin({eventId: "event1", reminderEnabled: true, acknowledgePast: true})).catch((e) => e)).details.code, "event-ended");
+      await sweep();
+      assert.equal((await docs("sendJobs")).length, 0, "保存だけではジョブを作らない(自動送信なし)");
+      assert.equal(sends.length, 0);
     });
 
     test("不正な入力(想定外のキー・不正な日時・型・空の更新・テンプレートの不備)は拒否される", async () => {
@@ -742,7 +708,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
     test("ジョブ作成後の設定変更(無効化・日時・テンプレート)は、作成済みジョブを止めも作り直しもしない。配送は状態のとおり継続する", async () => {
       await importBatch("batchA", 15);
       nowMs = T0;
-      await reconcile();
+      await startManually();
       const created = await job();
       await api.update(asAdmin({eventId: "event1", reminderEnabled: false}));
       await api.update(asAdmin({eventId: "event1", reminderSendAt: new Date(T0 + 86400000).toISOString()}));
@@ -761,10 +727,10 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
   describe("認可・個人情報・legacy", () => {
     test("設定・保存・プレビュー・手動開始・状態・失敗分再送のすべてで、未認証はunauthenticated・staffはpermission-denied・adminは成功", async () => {
       await importBatch("batchA", 4);
-      await api.start(asAdmin({eventId: "event1", dispatch: false}));
+      await api.start(asAdmin({eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint(), dispatch: false}));
       const calls = {
         settings: {eventId: "event1"}, update: {eventId: "event1", reminderEnabled: false}, preview: {eventId: "event1", participantId: "batchA-000002"},
-        start: {eventId: "event1", dispatch: false}, job: {eventId: "event1"}, retry: {eventId: "event1"},
+        start: {eventId: "event1", expectedTargetsFingerprint: await confirmedFingerprint(), dispatch: false}, job: {eventId: "event1"}, retry: {eventId: "event1"},
       };
       for (const [name, data] of Object.entries(calls)) {
         await rejectsWith(api[name]({data}), "unauthenticated");

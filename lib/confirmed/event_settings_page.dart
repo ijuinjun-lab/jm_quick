@@ -382,7 +382,7 @@ class _EventSettingsPageState extends State<EventSettingsPage> {
                     OutlinedButton(
                       key: const Key('event-settings-reload'),
                       onPressed: loading || saving ? null : _load,
-                      child: const Text('最新の内容を読み込む'),
+                      child: const Text('データベースに保存されたデータを読み込む'),
                     ),
                   ],
                 ),

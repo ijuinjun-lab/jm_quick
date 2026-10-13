@@ -7,6 +7,81 @@ import 'winner_mail_service.dart';
 import 'winner_send_service.dart';
 
 /// 前日リマインドの設定・対象・ジョブの状態(すべてサーバーの値。個人情報は含まない)。
+/// 前日リマインドの宛先(送信前の確認用。サーバーの getConfirmedReminderSettings が返す。対象外も含む)。
+class ReminderRecipient {
+  const ReminderRecipient({
+    required this.participantId,
+    required this.name,
+    required this.email,
+    required this.notificationType,
+    required this.programs,
+    required this.winnerStatus,
+    required this.target,
+    this.excludedReason,
+    this.duplicate = 'none',
+    this.duplicateGroupSize = 1,
+  });
+
+  factory ReminderRecipient.fromJson(Map<String, dynamic> json) => ReminderRecipient(
+    participantId: json['participantId'] as String? ?? '',
+    name: json['name'] as String? ?? '',
+    email: json['email'] as String? ?? '',
+    notificationType: json['notificationType'] as String? ?? 'normal',
+    programs: [
+      for (final p in (json['programs'] is List ? json['programs'] as List : const []))
+        if (p is Map)
+          (
+            name: p['name'] as String? ?? '',
+            timeText: p['timeText'] as String?,
+            plannedCount: (p['plannedCount'] as num?)?.toInt(),
+          ),
+    ],
+    winnerStatus: json['winnerStatus'] as String? ?? 'none',
+    target: json['target'] == true,
+    excludedReason: json['excludedReason'] as String?,
+    duplicate: json['duplicate'] as String? ?? 'none',
+    duplicateGroupSize: (json['duplicateGroupSize'] as num?)?.toInt() ?? 1,
+  );
+
+  final String participantId;
+  final String name;
+  final String email;
+
+  /// normal / waitlistPromotion
+  final String notificationType;
+  final List<({String name, String? timeText, int? plannedCount})> programs;
+
+  /// 当選メールの配送状態: sent / unknown / pending / sending / failed / none(配送記録なし)
+  final String winnerStatus;
+
+  /// 送信対象(当選メールが送信済み)
+  final bool target;
+  final String? excludedReason;
+
+  /// メールアドレスの重複: none / shared-address / different-programs / undetermined / suspected-duplicate
+  final String duplicate;
+  final int duplicateGroupSize;
+
+  String get notificationTypeLabel => notificationType == 'waitlistPromotion' ? '繰り上げ当選' : '通常当選';
+
+  String get winnerStatusLabel => switch (winnerStatus) {
+    'sent' => '送信済み',
+    'unknown' => '結果不明(要確認)',
+    'pending' => '未送信',
+    'sending' => '送信中',
+    'failed' => '送信失敗',
+    _ => '未送信(記録なし)',
+  };
+
+  String get duplicateLabel => switch (duplicate) {
+    'shared-address' => '同じアドレス(別の氏名・共有)',
+    'different-programs' => '同じアドレス・同じ氏名(別のプログラム)',
+    'undetermined' => '同じアドレス(判定できません・要確認)',
+    'suspected-duplicate' => '重複登録の疑い',
+    _ => '',
+  };
+}
+
 class ReminderSettings {
   const ReminderSettings({
     required this.eventId,
@@ -27,6 +102,12 @@ class ReminderSettings {
     this.job,
     this.changedSinceJob = false,
     this.currentTargetCount,
+    this.recipients = const [],
+    this.targetsFingerprint,
+    this.normalCount = 0,
+    this.waitlistCount = 0,
+    this.unknownWinnerMail = 0,
+    this.suspectedDuplicates = 0,
   });
 
   factory ReminderSettings.fromJson(Map<String, dynamic> json) {
@@ -61,6 +142,15 @@ class ReminderSettings {
           ? SendJob.fromView(Map<String, dynamic>.from(json['job'] as Map))
           : null,
       changedSinceJob: changed?['changed'] == true,
+      recipients: [
+        for (final r in (json['recipients'] is List ? json['recipients'] as List : const []))
+          if (r is Map) ReminderRecipient.fromJson(Map<String, dynamic>.from(r)),
+      ],
+      targetsFingerprint: targets['fingerprint'] as String?,
+      normalCount: ((targets['countsByNotificationType'] as Map?)?['normal'] as num?)?.toInt() ?? 0,
+      waitlistCount: ((targets['countsByNotificationType'] as Map?)?['waitlistPromotion'] as num?)?.toInt() ?? 0,
+      unknownWinnerMail: ((targets['blocked'] as Map?)?['unknownWinnerMail'] as num?)?.toInt() ?? 0,
+      suspectedDuplicates: ((targets['blocked'] as Map?)?['suspectedDuplicates'] as num?)?.toInt() ?? 0,
       currentTargetCount: (changed?['currentTargetCount'] as num?)?.toInt(),
     );
   }
@@ -93,6 +183,22 @@ class ReminderSettings {
   /// ジョブ作成後に参加者が追加・変更されている(既存ジョブへは自動で追加しない)。
   final bool changedSinceJob;
   final int? currentTargetCount;
+
+  /// 送信前の宛先一覧(対象・対象外)。
+  final List<ReminderRecipient> recipients;
+
+  /// 宛先一覧の照合値(手動開始で送る。確認後に宛先・送信内容が変わっていれば、サーバーが作成を拒否する)。
+  final String? targetsFingerprint;
+
+  /// 送信対象のうち通常当選・繰り上げ当選の件数。
+  final int normalCount;
+  final int waitlistCount;
+
+  /// 当選メールの結果不明・重複登録の疑い(1件でもあれば、サーバーはリマインドを作らない)。
+  final int unknownWinnerMail;
+  final int suspectedDuplicates;
+
+  bool get blocked => unknownWinnerMail > 0 || suspectedDuplicates > 0;
 }
 
 /// 前日リマインド(admin専用)。状態・対象・設定はすべてサーバーから取得し、Firestoreを直接読まない。
@@ -116,10 +222,12 @@ abstract class ReminderService {
 
   /// 手動開始(自動開始と同じジョブへ到達。既存があればその状態を返す=別便ではない)。
   /// expected*: 画面で確認した値(ジョブを新規作成する場合だけサーバーが照合する)。
+  /// [expectedTargetsFingerprint]: 確認した宛先一覧の照合値(ジョブを新しく作るときはサーバーが必須とする)。
   Future<SendJob> startDelivery(
     String eventId, {
     int? expectedTemplateVersion,
     int? expectedTargetCount,
+    String? expectedTargetsFingerprint,
     bool dispatch = true,
   });
 
@@ -241,12 +349,14 @@ class CallableReminderService implements ReminderService {
     String eventId, {
     int? expectedTemplateVersion,
     int? expectedTargetCount,
+    String? expectedTargetsFingerprint,
     bool dispatch = true,
   }) async => SendJob.fromFlat(
     await _call('startConfirmedReminderDelivery', {
       'eventId': eventId,
       'expectedTemplateVersion': ?expectedTemplateVersion,
       'expectedTargetCount': ?expectedTargetCount,
+      'expectedTargetsFingerprint': ?expectedTargetsFingerprint,
       if (!dispatch) 'dispatch': false,
     }),
   );
@@ -314,6 +424,11 @@ class CallableReminderService implements ReminderService {
     'participant-not-target': 'この参加者は前日リマインドの対象ではありません。',
     'no-targets': '送信対象の参加者がいません。',
     'mail-not-ready': '前日リマインドの文面またはイベント情報が不足しています。',
+    'targets-changed':
+        '確認した後に、送信対象または送信内容(宛先・参加内容・当選メールの状態)が変わりました。画面を更新して、宛先一覧をもう一度確認してください。',
+    'reminder-targets-unresolved':
+        '当選メールの結果が不明な参加者、または重複登録の疑いがある参加者がいるため、前日リマインドを作成できません。宛先一覧で確認してください。',
+    'targets-fingerprint-required': '宛先一覧を確認してから開始してください。画面を更新して、もう一度確認してください。',
   };
 
   /// サーバーのエラー応答を、表示用の例外にする(共通のものは当選メールの送信管理と同じ)。
