@@ -147,7 +147,7 @@ void main() {
     });
 
     testWidgets(
-      'そのイベントに属する機能(イベント設定・CSV取込・当選メール設定・当選メール送信・リマインド・受付)が表示される。「受付訂正」「参加者管理」は出さない',
+      'そのイベントに属する機能(イベント設定・CSV取込・当選メール設定・当選メール送信・リマインド・受付)が表示され、すべて押せる。「受付訂正」「参加者管理」は出さない',
       (tester) async {
         await tester.pumpWidget(_eventConsole());
         await tester.pumpAndSettle();
@@ -161,15 +161,17 @@ void main() {
         // 「参加者管理(準備中)」も、遷移先・実装済みの機能が無いためメニューから削除した。
         expect(find.text('参加者管理'), findsNothing);
         expect(eventConsoleFeatureLabels, isNot(contains('参加者管理')));
-        for (final label in ['イベント設定']) {
+        // すべての機能が実装済み(「準備中」は残っていない)。「イベント設定」も押せる機能になった。
+        for (final label in eventConsoleFeatureLabels) {
           final tile = tester.widget<ListTile>(
             find.ancestor(
               of: find.text(label),
               matching: find.byType(ListTile),
             ),
           );
-          expect(tile.onTap, isNull, reason: label);
+          expect(tile.onTap, isNotNull, reason: label);
         }
+        expect(find.text('準備中'), findsNothing);
         // 管理トップの機能(イベント一覧・イベント作成)はここには出ない。
         expect(find.text('イベント一覧'), findsNothing);
         expect(find.text('イベント作成'), findsNothing);

@@ -21,6 +21,7 @@ const {createAssignmentApi} = require("./confirmed/assignment_api");
 const {createInvitationApi} = require("./confirmed/invitation_api");
 const {createReceptionKeyApi} = require("./confirmed/reception_key_api");
 const {createAttendanceReportApi} = require("./confirmed/attendance_report_api");
+const {createEventSettingsApi} = require("./confirmed/event_settings_api");
 const {generateQrPng} = require("./qr_png");
 const {createMailApiTransport} = require("./mail_transport");
 
@@ -921,6 +922,12 @@ const eventCreateApi = createEventCreateApi({getDb: getFirestore, serverTimestam
 exports.createConfirmedEvent = confirmedCallable("systemAdmin", eventCreateApi.createEvent, {timeoutSeconds: 30});
 // 新方式イベントの基本情報とprogramの読み取り(Phase 1B: 対象イベントのevent_manager以上。CSV取込画面の「どのイベントへ取り込むか」の表示用。Phase 11B)
 exports.getConfirmedEventSummary = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, eventCreateApi.getSummary, {timeoutSeconds: 30});
+// イベント設定(基本情報の確認・修正)。対象イベントのevent_manager以上(システム管理者・そのイベントのイベント管理者)。
+// 編集できるのはイベント名・開始/終了日時・会場名・住所・アクセスだけ。読み込んだ時点の値と照合して同時更新の上書きを防ぎ、変更履歴を追記する。
+// 受付スタッフ・受付キー(アカウント不要)・参加者からは呼べない。メールの再送・変更通知はしない。
+const eventSettingsApi = createEventSettingsApi({getDb: getFirestore, serverTimestamp});
+exports.getConfirmedEventSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, eventSettingsApi.getSettings, {timeoutSeconds: 30});
+exports.updateConfirmedEventSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, eventSettingsApi.updateSettings, {timeoutSeconds: 30});
 // イベント終了後の最終実績(参加者全員の申込内容・HEBEL属性・programごとの予定と受付結果)の読み取り。対象イベントのevent_manager以上。
 // 読み取りのみ(書込み・ファイル保存・公開URLなし)。Excelはブラウザ上で作る。受付スタッフ・受付キー(アカウント不要)からは呼べない。
 const attendanceReportApi = createAttendanceReportApi({getDb: getFirestore});

@@ -225,6 +225,9 @@ const AUTHORIZATION_MAP_PHASE_1B = {
   commitConfirmedImport: E_MANAGER,
   createConfirmedEvent: "confirmedCallable:systemAdmin",
   getConfirmedEventSummary: E_MANAGER,
+  // イベント設定(基本情報の確認・修正。対象イベントのevent_manager以上。受付キー・公開callableには無い)
+  getConfirmedEventSettings: E_MANAGER,
+  updateConfirmedEventSettings: E_MANAGER,
   // 最終実績Excel出力の読み取り(対象イベントのevent_manager以上。読み取りのみ)
   getConfirmedAttendanceReport: E_MANAGER,
   getConfirmedWinnerMailSettings: E_MANAGER,
@@ -289,7 +292,8 @@ const authorizationOf = (rhs) => {
 test("Phase 1B: 全exportの入口・認可レベル・対象イベントのresolverが正式マップと一致する(callableの追加・削除も無い)", () => {
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
-  assert.equal(exportsInIndex.length, 60);
+  // 60本 + イベント設定(getConfirmedEventSettings / updateConfirmedEventSettings。event_manager以上)の2本
+  assert.equal(exportsInIndex.length, 62);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {

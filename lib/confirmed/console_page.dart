@@ -9,6 +9,8 @@ import 'attendance_report_page.dart';
 import 'attendance_report_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
+import 'event_settings_page.dart';
+import 'event_settings_service.dart';
 import 'import_models.dart';
 import 'import_service.dart';
 import 'reception_staff_key_service.dart';
@@ -66,8 +68,10 @@ class ConfirmedConsolePage extends StatelessWidget {
     AssignmentService? assignmentService,
     ReceptionStaffKeyIssuer? receptionStaffKeyIssuer,
     AttendanceReportService? attendanceReportService,
+    EventSettingsService? eventSettingsService,
     this.initialEventId,
   }) : authClient = authClient ?? FirebaseAuthClient(),
+       _eventSettingsService = eventSettingsService,
        _receptionStaffKeyIssuer = receptionStaffKeyIssuer,
        _attendanceReportService = attendanceReportService,
        _accessService = accessService,
@@ -96,6 +100,9 @@ class ConfirmedConsolePage extends StatelessWidget {
 
   // 最終実績Excel出力(getConfirmedAttendanceReport。読み取りのみ)。
   final AttendanceReportService? _attendanceReportService;
+
+  // イベント設定(getConfirmedEventSettings / updateConfirmedEventSettings。イベント管理者以上)。
+  final EventSettingsService? _eventSettingsService;
 
   /// URLの`?eventId=…`(イベント一覧からの選択・イベント作成直後に渡される)。利用者が入力する欄は無い。
   final String? initialEventId;
@@ -131,6 +138,9 @@ class ConfirmedConsolePage extends StatelessWidget {
     attendanceReportService:
         _attendanceReportService ??
         CallableAttendanceReportService(authClient: authClient),
+    eventSettingsService:
+        _eventSettingsService ??
+        CallableEventSettingsService(authClient: authClient),
   );
 
   @override
@@ -370,6 +380,7 @@ class _EventConsole extends StatefulWidget {
     required this.assignmentService,
     required this.receptionStaffKeyIssuer,
     required this.attendanceReportService,
+    required this.eventSettingsService,
     required this.viewerLabel,
   });
   final String eventId;
@@ -381,6 +392,7 @@ class _EventConsole extends StatefulWidget {
   final AssignmentService assignmentService;
   final ReceptionStaffKeyIssuer receptionStaffKeyIssuer;
   final AttendanceReportService attendanceReportService;
+  final EventSettingsService eventSettingsService;
 
   /// ログイン中のroleの名前(システム管理者・イベント管理者)。
   final String viewerLabel;
@@ -438,6 +450,20 @@ class _EventConsoleState extends State<_EventConsole> {
               features: eventConsoleFeatureLabels,
               signOut: widget.signOut,
               actions: {
+                // イベントの基本情報の確認・修正(システム管理者・このイベントのイベント管理者)。戻ったら、この画面の
+                // イベント情報(名前・日時・会場。受付状況一覧・最終実績Excelの欠席判定にも渡す)を読み直す。
+                'イベント設定': () => Navigator.of(context)
+                    .push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => EventSettingsPage(
+                          eventId: id,
+                          service: widget.eventSettingsService,
+                        ),
+                      ),
+                    )
+                    .then((_) {
+                      if (mounted) _load();
+                    }),
                 // Phase 3: このイベントの受付スタッフの追加・解除(システム管理者・このイベントのイベント管理者)。
                 'スタッフ管理': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -519,6 +545,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 ),
               },
               descriptions: const {
+                'イベント設定': 'イベント名・日時・会場などの基本情報を確認・修正します',
                 '参加者ファイル取込': 'Excel／CSVの参加者ファイルを検証して取り込みます(メールは送信されません)',
                 '当選メール送信': '取込回ごとの送信・進行状況・失敗分の再送',
                 '当選メール設定': '件名・本文の設定とプレビュー',

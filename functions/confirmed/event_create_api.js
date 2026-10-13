@@ -182,4 +182,5 @@ function createEventCreateApi({getDb, serverTimestamp, logger, now = () => Date.
   return {createEvent, getSummary};
 }
 
-module.exports = {createEventCreateApi, parseCreateRequest, deriveEventId, LIMITS, REQUEST_ID_PATTERN};
+// イベント設定(event_settings_api.js)も、作成と同じ入力検証を使う。
+module.exports = {createEventCreateApi, parseCreateRequest, deriveEventId, LIMITS, REQUEST_ID_PATTERN, keysOf, text, date};
