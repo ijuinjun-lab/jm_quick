@@ -352,4 +352,90 @@ void main() {
       }
     });
   });
+
+  group('イベント概要の開催日時・会場(項目名の下に値。長い会場名でも重ならない)', () {
+    // 架空のイベント(保存値に「／」区切りの2会場)
+    final longVenue = ImportEventSummary(
+      eventId: 'evfixture0123456789',
+      eventName: '架空 保護犬猫譲渡会・トークセッション',
+      startAt: DateTime.utc(2026, 11, 29, 1, 30),
+      endAt: DateTime.utc(2026, 11, 29, 7, 10),
+      venue: '譲渡会：架空新聞社 架空ホール（本館2階）／トーク：架空朝日ホール・小ホール（新館2階）',
+      programs: const [(programId: 'program-1', name: '譲渡会（ねこ）', order: 0)],
+    );
+
+    for (final width in [390.0, 1200.0]) {
+      testWidgets('${width.toInt()}px幅: overflowなし・項目名の真下に値・会場は「／」で改行', (
+        tester,
+      ) async {
+        await tester.binding.setSurfaceSize(Size(width, 1400));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(_eventConsole(event: longVenue));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(find.text('2026年11月29日（日）10:30～16:10'), findsOneWidget);
+        expect(
+          find.text('譲渡会：架空新聞社 架空ホール（本館2階）\nトーク：架空朝日ホール・小ホール（新館2階）'),
+          findsOneWidget,
+        );
+        for (final (key, label) in [
+          ('event-header-datetime', '開催日時：'),
+          ('event-header-venue', '会場：'),
+        ]) {
+          final row = find.byKey(Key(key));
+          final labelRect = tester.getRect(
+            find.descendant(of: row, matching: find.text(label)),
+          );
+          final valueRect = tester.getRect(
+            find.descendant(
+              of: row,
+              matching: find.byWidgetPredicate(
+                (w) => w is Text && w.data != label,
+              ),
+            ),
+          );
+          // 値は項目名より下にあり、横方向にも画面内に収まる(重ならない)
+          expect(
+            valueRect.top,
+            greaterThanOrEqualTo(labelRect.bottom),
+            reason: key,
+          );
+          expect(valueRect.right, lessThanOrEqualTo(width), reason: key);
+        }
+      });
+    }
+
+    testWidgets('「／」の無い既存の会場名はそのまま1行で表示する', (tester) async {
+      await tester.pumpWidget(_eventConsole());
+      await tester.pumpAndSettle();
+      expect(find.text('架空市民ホール'), findsOneWidget);
+      expect(find.text('未設定'), findsOneWidget); // 開始日時なし
+    });
+
+    test('開催日時の表示(日本時間)', () {
+      final start = DateTime.utc(2026, 11, 29, 1, 30);
+      expect(eventDateTimeText(null, null), '未設定');
+      expect(eventDateTimeText(start, null), '2026年11月29日（日）10:30');
+      expect(eventDateTimeText(start, start), '2026年11月29日（日）10:30');
+      expect(
+        eventDateTimeText(start, DateTime.utc(2026, 11, 29, 7, 10)),
+        '2026年11月29日（日）10:30～16:10',
+      );
+      expect(
+        eventDateTimeText(start, DateTime.utc(2026, 11, 30, 1, 0)),
+        '2026年11月29日（日）10:30～2026年11月30日（月）10:00',
+      );
+      // UTCでは前日(11/28 15:30Z)でも、日本時間の日付で表示する
+      expect(
+        eventDateTimeText(DateTime.utc(2026, 11, 28, 15, 30), null),
+        '2026年11月29日（日）00:30',
+      );
+    });
+
+    test('会場の表示行', () {
+      expect(venueDisplayLines('架空市民ホール'), ['架空市民ホール']);
+      expect(venueDisplayLines('A／ B ／／'), ['A', 'B']);
+      expect(venueDisplayLines('A/B'), ['A/B']); // 半角スラッシュは区切りにしない
+    });
+  });
 }
