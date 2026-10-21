@@ -2028,4 +2028,78 @@ void main() {
       expect(serverSource, contains('MAX_HEADERS = 60'));
     });
   });
+  group('取込先イベントの開催日時・会場(項目名の下に値。長い会場名でも重ならない)', () {
+    ImportEventSummary eventWith({String venue = '', DateTime? startAt, DateTime? endAt}) =>
+        ImportEventSummary(
+          eventId: 'evfixture0123456789',
+          eventName: '架空 保護犬猫譲渡会・トークセッション',
+          startAt: startAt,
+          endAt: endAt,
+          venue: venue,
+          programs: _event.programs,
+        );
+
+    /// 項目名の真下に値があり、値が画面幅に収まる(重ならない・はみ出さない)。
+    void expectStacked(WidgetTester tester, String key, String label, double width) {
+      final row = find.byKey(Key(key));
+      final labelRect = tester.getRect(find.descendant(of: row, matching: find.text(label)));
+      final valueRect = tester.getRect(find.descendant(
+        of: row,
+        matching: find.byWidgetPredicate((w) => w is Text && w.data != label),
+      ));
+      expect(valueRect.top, greaterThanOrEqualTo(labelRect.bottom), reason: key);
+      expect(valueRect.right, lessThanOrEqualTo(width), reason: key);
+    }
+
+    for (final width in [390.0, 1200.0]) {
+      testWidgets('${width.toInt()}px幅: 長い会場名(「／」区切り)は改行して項目名の下に表示する', (tester) async {
+        final service = FakeImportService(
+          event: eventWith(
+            venue: '譲渡会：架空新聞社 架空ホール（本館2階）／トーク：架空朝日ホール・小ホール（新館2階）',
+            startAt: DateTime.utc(2026, 11, 29, 1, 30),
+            endAt: DateTime.utc(2026, 11, 29, 7, 10),
+          ),
+        );
+        await _open(tester, service, width: width, pickAfterChoosingType: false);
+        expect(tester.takeException(), isNull);
+        expect(find.text('2026年11月29日（日）10:30～16:10'), findsOneWidget);
+        expect(
+          find.text('譲渡会：架空新聞社 架空ホール（本館2階）\nトーク：架空朝日ホール・小ホール（新館2階）'),
+          findsOneWidget,
+        );
+        expectStacked(tester, 'import-event-datetime', '開催日時：', width);
+        expectStacked(tester, 'import-event-venue', '会場：', width);
+      });
+
+      testWidgets('${width.toInt()}px幅: 短い会場名・日付をまたぐ開催日時', (tester) async {
+        final service = FakeImportService(
+          event: eventWith(
+            venue: '架空ホール',
+            startAt: DateTime.utc(2026, 11, 29, 9, 0),
+            endAt: DateTime.utc(2026, 11, 29, 17, 0),
+          ),
+        );
+        await _open(tester, service, width: width, pickAfterChoosingType: false);
+        expect(tester.takeException(), isNull);
+        expect(find.text('2026年11月29日（日）18:00～2026年11月30日（月）02:00'), findsOneWidget);
+        expect(find.text('架空ホール'), findsOneWidget);
+        expectStacked(tester, 'import-event-datetime', '開催日時：', width);
+        expectStacked(tester, 'import-event-venue', '会場：', width);
+      });
+
+      testWidgets('${width.toInt()}px幅: 会場・開催日時が未設定なら「未設定」', (tester) async {
+        final service = FakeImportService(event: eventWith());
+        await _open(tester, service, width: width, pickAfterChoosingType: false);
+        expect(tester.takeException(), isNull);
+        expect(
+          find.descendant(of: find.byKey(const Key('import-event-datetime')), matching: find.text('未設定')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: find.byKey(const Key('import-event-venue')), matching: find.text('未設定')),
+          findsOneWidget,
+        );
+      });
+    }
+  });
 }

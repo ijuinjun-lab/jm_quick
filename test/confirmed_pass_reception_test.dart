@@ -201,9 +201,9 @@ void main() {
         findsOneWidget,
         reason: 'メールQR・受付URLと同じ文字列(クライアントで組み立てない)',
       );
-      expect(find.text('会場'), findsOneWidget);
+      expect(find.text('会場：'), findsOneWidget);
       expect(find.text('架空会場ホール'), findsOneWidget);
-      expect(find.text('アクセス'), findsNothing, reason: '未設定の項目は欄ごと出さない');
+      expect(find.text('アクセス：'), findsNothing, reason: '未設定の項目は欄ごと出さない');
       expect(find.textContaining('null'), findsNothing);
       expect(find.textContaining('未設定'), findsNothing);
     });
@@ -1186,5 +1186,37 @@ void main() {
       expect(main.contains('legacyBuilder: (_) => ParticipantPage('), isTrue);
       expect(main.contains('legacyBuilder: (_) => ReceptionPage('), isTrue);
     });
+  });
+  group('Web参加証の会場・住所(項目名の下に値。長い会場名でも重ならない)', () {
+    for (final width in [390.0, 1200.0]) {
+      testWidgets('${width.toInt()}px幅: 長い会場名は「／」で改行し、overflowしない', (tester) async {
+        await tester.binding.setSurfaceSize(Size(width, 2000));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final base = threeProgramPass();
+        final pass = ConfirmedPass(
+          eventName: base.eventName,
+          dateTimeText: base.dateTimeText,
+          venue: '譲渡会：架空新聞社 架空ホール（本館2階）／トーク：架空朝日ホール・小ホール（新館2階）',
+          address: '架空県架空市架空区架空町一丁目2番3号 架空ビルディング本館・新館',
+          access: null,
+          participantName: base.participantName,
+          programs: base.programs,
+          qrPayload: base.qrPayload,
+          webPassUrl: base.webPassUrl,
+        );
+        await tester.pumpWidget(MaterialApp(home: ConfirmedPassPage(pass: pass)));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        final row = find.byKey(const Key('pass-venue'));
+        final labelRect = tester.getRect(find.descendant(of: row, matching: find.text('会場：')));
+        final value = find.descendant(
+          of: row,
+          matching: find.text('譲渡会：架空新聞社 架空ホール（本館2階）\nトーク：架空朝日ホール・小ホール（新館2階）'),
+        );
+        expect(value, findsOneWidget);
+        expect(tester.getRect(value).top, greaterThanOrEqualTo(labelRect.bottom));
+        expect(tester.getRect(value).right, lessThanOrEqualTo(width));
+      });
+    }
   });
 }

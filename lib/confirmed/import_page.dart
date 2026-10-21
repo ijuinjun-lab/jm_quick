@@ -9,6 +9,7 @@ import 'access_service.dart';
 import 'assignment_pages.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
+import 'event_display.dart';
 import 'import_file.dart';
 import 'import_models.dart';
 import 'import_profile.dart';
@@ -2068,9 +2069,17 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
             if (eventError != null)
               _notice(eventError!, key: const Key('event-error')),
             if (event != null) ...[
-              InfoRow('イベント名', event!.eventName),
-              InfoRow('開催日時', formatDateTimeMinute(event!.startAt)),
-              InfoRow('会場', event!.venue.isEmpty ? '未設定' : event!.venue),
+              StackedInfoRow(label: 'イベント名', value: event!.eventName),
+              StackedInfoRow(
+                key: const Key('import-event-datetime'),
+                label: '開催日時',
+                value: eventDateTimeText(event!.startAt, event!.endAt),
+              ),
+              StackedInfoRow(
+                key: const Key('import-event-venue'),
+                label: '会場',
+                value: venueDisplayText(event!.venue),
+              ),
               const Text(
                 'program(表示順)',
                 style: TextStyle(fontWeight: FontWeight.bold),

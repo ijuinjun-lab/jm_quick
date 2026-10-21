@@ -9,6 +9,7 @@ import 'attendance_report_page.dart';
 import 'attendance_report_service.dart';
 import 'auth_client.dart';
 import 'auth_gate.dart';
+import 'event_display.dart';
 import 'event_settings_page.dart';
 import 'event_settings_service.dart';
 import 'import_models.dart';
@@ -614,66 +615,19 @@ class _EventHeaderCard extends StatelessWidget {
               style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            _StackedInfo(
+            StackedInfoRow(
               key: const Key('event-header-datetime'),
               label: '開催日時',
               value: eventDateTimeText(event!.startAt, event!.endAt),
             ),
-            _StackedInfo(
+            StackedInfoRow(
               key: const Key('event-header-venue'),
               label: '会場',
-              value: event!.venue.trim().isEmpty
-                  ? '未設定'
-                  : venueDisplayLines(event!.venue).join('\n'),
+              value: venueDisplayText(event!.venue),
             ),
           ],
         ],
       ),
-    ),
-  );
-}
-
-const List<String> _weekdays = ['月', '火', '水', '木', '金', '土', '日'];
-
-/// イベント概要の開催日時(日本時間)。「2026年11月29日（日）10:30～16:10」。
-/// 終了が無い・開始以前なら開始だけ。終了が別の日なら終了にも日付を付ける。
-String eventDateTimeText(DateTime? startAt, DateTime? endAt) {
-  if (startAt == null) return '未設定';
-  String day(DateTime at) {
-    final t = at.toUtc().add(const Duration(hours: 9));
-    return '${t.year}年${t.month}月${t.day}日（${_weekdays[t.weekday - 1]}）';
-  }
-
-  final start = '${day(startAt)}${jstTimeText(startAt)}';
-  if (endAt == null || !endAt.isAfter(startAt)) return start;
-  final end = day(endAt) == day(startAt)
-      ? jstTimeText(endAt)
-      : '${day(endAt)}${jstTimeText(endAt)}';
-  return '$start～$end';
-}
-
-/// 会場の表示行。保存値の「／」区切りを表示時だけ改行する(保存値は変えない)。
-List<String> venueDisplayLines(String venue) => [
-  for (final part in venue.split('／'))
-    if (part.trim().isNotEmpty) part.trim(),
-];
-
-/// 項目名の行の下に値を置く(会場名が長くても項目名と重ならない。値は折り返す)。
-class _StackedInfo extends StatelessWidget {
-  const _StackedInfo({super.key, required this.label, required this.value});
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('$label：', style: const TextStyle(color: _mutedText)),
-        const SizedBox(height: 2),
-        Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
-      ],
     ),
   );
 }

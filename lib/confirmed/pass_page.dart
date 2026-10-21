@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../widgets/common.dart';
+import 'event_display.dart';
 import 'pass_service.dart';
 import 'robots_meta.dart';
 
@@ -166,9 +167,14 @@ class ConfirmedPassPage extends StatelessWidget {
               ),
               if (venue != null || address != null || access != null) ...[
                 const Divider(height: 32),
-                if (venue != null) InfoRow('会場', venue),
-                if (address != null) InfoRow('住所', address),
-                if (access != null) InfoRow('アクセス', access),
+                if (venue != null)
+                  StackedInfoRow(
+                    key: const Key('pass-venue'),
+                    label: '会場',
+                    value: venueDisplayText(venue),
+                  ),
+                if (address != null) StackedInfoRow(label: '住所', value: address),
+                if (access != null) StackedInfoRow(label: 'アクセス', value: access),
               ],
             ],
           ),

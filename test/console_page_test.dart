@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/confirmed/access_role.dart';
 import 'package:jm_quick/confirmed/console_page.dart';
+import 'package:jm_quick/confirmed/event_display.dart';
 import 'package:jm_quick/confirmed/import_page.dart';
 import 'package:jm_quick/confirmed/import_models.dart';
 import 'package:jm_quick/confirmed/import_service.dart' show ImportException;
