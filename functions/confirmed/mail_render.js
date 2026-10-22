@@ -25,6 +25,14 @@ const linesHtml = (text) => escapeHtml(text).replace(/\r\n?|\n/g, "<br>");
 const singleLine = (text) => String(text).replace(/[\r\n]+/g, " ").trim();
 
 const RULE = "────────────────────";
+// 保存済みプレーンテキストの独立した区切り行だけをHTMLの点線にする。
+const DOTTED_RULE = "--------------------";
+const DOTTED_RULE_HTML = '<hr style="border:0;border-top:1px dotted #9ca3af;width:100%;margin:20px 0;">';
+function winnerIntroHtml(text) {
+  if (!/^--------------------$/m.test(String(text))) return paragraphsHtml(text, P);
+  return String(text).replace(/\r\n?/g, "\n").split(/^--------------------$/m)
+    .map((part) => paragraphsHtml(part.trim(), P)).join(`\n${DOTTED_RULE_HTML}\n`);
+}
 
 // テキスト版。QR画像は表示できないため、Web参加証URLを必ず載せる。
 function buildText(vm, template, {showEventName = false} = {}) {
@@ -48,6 +56,7 @@ function buildText(vm, template, {showEventName = false} = {}) {
     if (program.timeText) lines.push(`${program.role === "talk" ? "開催時間" : "参加時間"}：${program.timeText}`);
     lines.push(`参加人数：${program.plannedCount}名`);
   }
+  if (!showEventName && vm.sourceRegisteredAtText) lines.push("", `お申し込み日時：${vm.sourceRegisteredAtText}`);
   if (!vm.participationLayout) lines.push(...eventLines);
   if (!vm.participationLayout) lines.push("", RULE, "", template.closingBody);
   if (vm.notes) lines.push("", "【注意事項】", vm.notes);
@@ -64,7 +73,7 @@ function buildHtml(vm, template, subject, {showEventName = false} = {}) {
   const parts = [];
   if (showEventName) parts.push(`<p style="${P}font-size:18px;font-weight:bold;color:#17324d;">${escapeHtml(vm.eventName)}</p>`);
   parts.push(`<p style="${P}font-size:16px;font-weight:bold;">${escapeHtml(vm.recipientName)} 様</p>`);
-  parts.push(paragraphsHtml(template.introBody, P));
+  parts.push(showEventName ? paragraphsHtml(template.introBody, P) : winnerIntroHtml(template.introBody));
   parts.push(`<h2 style="${H2}">受付用QRコード</h2>`);
   parts.push(`<p style="${P}">当日は、下記のQRコードを受付でご提示ください。</p>`);
   parts.push(`<p style="${P}text-align:center;"><img src="cid:${QR_CONTENT_ID}" alt="受付用QRコード" width="240" height="240" style="width:240px;height:240px;border:0;"></p>`);
@@ -85,6 +94,7 @@ function buildHtml(vm, template, subject, {showEventName = false} = {}) {
     parts.push(`<h3 style="${H3}">■ ${escapeHtml(program.name)}</h3>`);
     parts.push(`<p style="${P}">${rows.join("<br>")}</p>`);
   }
+  if (!showEventName && vm.sourceRegisteredAtText) parts.push(`<p style="margin:24px 0 14px 0;">お申し込み日時：${escapeHtml(vm.sourceRegisteredAtText)}</p>`);
   if (!vm.participationLayout) parts.push(eventHtml);
   if (!vm.participationLayout) parts.push(`<div style="margin-top:20px;">${paragraphsHtml(template.closingBody, P)}</div>`);
   if (vm.notes) {
@@ -127,6 +137,7 @@ async function renderMail({snapshot, participant, attendances, appBaseUrl, gener
       contentId: QR_CONTENT_ID, disposition: "inline",
     }],
     viewModel: vm,
+    ...(!showEventName && !vm.sourceRegisteredAtText ? {warnings: ["source-registered-at-missing-or-invalid"]} : {}),
   };
 }
 
@@ -136,4 +147,4 @@ const renderWinnerMail = (args) => renderMail(args);
 // 冒頭のイベント名だけが異なる。QR・publicIdは当選メールと同一(再発行しない)。
 const renderReminderMail = (args) => renderMail({...args, showEventName: true});
 
-module.exports = {QR_CONTENT_ID, QR_FILENAME, escapeHtml, renderWinnerMail, renderReminderMail};
+module.exports = {QR_CONTENT_ID, QR_FILENAME, DOTTED_RULE, escapeHtml, renderWinnerMail, renderReminderMail};

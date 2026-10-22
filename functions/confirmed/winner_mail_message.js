@@ -51,7 +51,7 @@ async function composeMailWith(render, {db, snapshot, participantId, participant
   }
   return render({
     snapshot,
-    participant: {participantId, name: participant.name, publicId: participant.publicId},
+    participant: {participantId, name: participant.name, publicId: participant.publicId, sourceRegisteredAt: participant.sourceRegisteredAt},
     attendances,
     appBaseUrl,
     generateQrPng,

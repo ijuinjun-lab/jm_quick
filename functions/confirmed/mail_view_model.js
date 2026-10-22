@@ -34,6 +34,16 @@ const formatDate = (date) => { const p = jstParts(date); return `${p.y}年${p.m}
 const formatTime = (date) => { const p = jstParts(date); return `${pad2(p.hh)}:${pad2(p.mm)}`; };
 const sameDay = (a, b) => formatDate(a) === formatDate(b);
 
+// 元の申込日時だけを表示する。取込・送信日時へのフォールバックはしない。
+function formatSourceRegisteredAt(value) {
+  if (typeof value === "string" && !/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  if (!(value instanceof Date) && typeof value !== "string" && typeof value?.toDate !== "function") return null;
+  const date = toDate(value);
+  if (!date) return null;
+  const p = jstParts(date);
+  return `${p.y}年${pad2(p.m)}月${pad2(p.d)}日 ${pad2(p.hh)}:${pad2(p.mm)}`;
+}
+
 // 開催日時: 「2026年11月30日(月) 10:00〜16:00」。終了が無い/開始以前なら開始だけ。
 function formatEventDateTime(start, end) {
   if (!end || end.getTime() <= start.getTime()) return `${formatDate(start)} ${formatTime(start)}`;
@@ -202,10 +212,12 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
   if (problems.length > 0) return {ok: false, problems: [...new Set(problems)]};
 
   const start = toDate(event.startAt);
+  const sourceRegisteredAtText = formatSourceRegisteredAt(participant.sourceRegisteredAt);
   return {
     ok: true,
     viewModel: {
       recipientName: name,
+      ...(sourceRegisteredAtText ? {sourceRegisteredAtText} : {}),
       eventName: event.eventName,
       dateTimeText: formatEventDateTime(start, toDate(event.endAt)),
       venue: event.venue,
@@ -225,5 +237,5 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
   };
 }
 
-module.exports = {toDate, formatEventDateTime, programTimeText, normalizePrograms, displayPrograms, mailPrograms, talkTimeTextOf, mailTimeText, buildProgramItems, buildMailSnapshot,
+module.exports = {toDate, formatSourceRegisteredAt, formatEventDateTime, programTimeText, normalizePrograms, displayPrograms, mailPrograms, talkTimeTextOf, mailTimeText, buildProgramItems, buildMailSnapshot,
   missingOptionalFields, buildMailViewModel};
