@@ -123,6 +123,7 @@ class WinnerMailPreview {
     required this.problems,
     this.subject = '',
     this.text = '',
+    this.html = '',
     this.webPassUrl = '',
     this.templateVersion = 0,
     this.qrPayload = '',
@@ -138,6 +139,7 @@ class WinnerMailPreview {
             : const [],
         subject: json['subject'] as String? ?? '',
         text: json['text'] as String? ?? '',
+        html: json['html'] as String? ?? '',
         webPassUrl: json['webPassUrl'] as String? ?? '',
         templateVersion: (json['templateVersion'] as num?)?.toInt() ?? 0,
         qrPayload: json['qrPayload'] as String? ?? '',
@@ -149,6 +151,7 @@ class WinnerMailPreview {
   final List<String> problems;
   final String subject;
   final String text;
+  final String html;
   final String webPassUrl;
   final int templateVersion;
 

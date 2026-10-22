@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jm_quick/confirmed/import_models.dart';
 import 'package:jm_quick/confirmed/winner_mail_page.dart';
+import 'package:jm_quick/confirmed/mail_html_preview.dart';
 import 'package:jm_quick/confirmed/winner_mail_service.dart';
 import 'winner_mail_test.dart' show FakeWinnerMailService;
 
@@ -32,6 +33,7 @@ void main() {
     final settings = WinnerMailSettings.fromJson({
       'eventId': 'event1', 'event': {'eventName': '架空イベント'},
       'template': {'subject': '保存済件名', 'introBody': '冒頭', 'closingBody': '締め', 'adoptionNotesBody': '譲渡会注意'},
+      'waitlistTemplate': {'subject': '繰り上げ', 'introBody': '本文', 'version': 2},
       'ready': true, 'previewParticipantId': 'cat1', 'participationTypes': types,
       'mailSettings': {'talkTimeText': '16:00〜17:00', 'senderName': '架空送信者'},
       'previewParticipants': [
@@ -41,7 +43,7 @@ void main() {
       ],
     });
     final service = FakeWinnerMailService(settings: settings,
-      previewResult: const WinnerMailPreview(ready: true, problems: [], subject: '完成件名', text: '犬のみの完成本文'));
+      previewResult: const WinnerMailPreview(ready: true, problems: [], subject: '完成件名', text: '犬のみの完成本文', html: '<html><head></head><body style="margin:0">犬のみの完成本文<img src="cid:jm-quick-reception-qr"></body></html>', qrPngBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH2kAAAAASUVORK5CYII='));
     await tester.pumpWidget(MaterialApp(home: WinnerMailPage(service: service, initialEventId: 'event1')));
     await tester.pumpAndSettle();
     final filter = find.byKey(const Key('mail-type-filter'));
@@ -50,7 +52,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('① 犬のみ').last);
     await tester.pumpAndSettle();
-    final people = find.byKey(const ValueKey('mail-participant-dog'));
+    final people = find.byKey(const ValueKey('mail-participant-dog-'));
     await tester.ensureVisible(people);
     await tester.tap(people);
     await tester.pumpAndSettle();
@@ -61,13 +63,23 @@ void main() {
     await tester.tap(button);
     await tester.pumpAndSettle();
     expect(service.calls.last, 'preview:event1:dog2');
+    expect(tester.widget<MailHtmlPreview>(find.byKey(const Key('preview-html'))).html, service.previewResult!.html);
+    expect(find.text('犬のみの完成本文'), findsNothing, reason: 'Text is collapsed by default');
+    await tester.ensureVisible(find.byKey(const Key('preview-text-toggle')));
+    await tester.tap(find.text('本文(テキスト版)'));
+    await tester.pumpAndSettle();
     expect(find.text('犬のみの完成本文'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('preview-waitlist')));
+    await tester.tap(find.byKey(const Key('preview-waitlist')));
+    await tester.pumpAndSettle();
+    expect(service.calls.last, 'previewWaitlist:event1:dog2', reason: 'Waitlist uses the selected person, not default cat1');
+    expect(tester.widget<MailHtmlPreview>(find.byKey(const Key('waitlist-preview-html'))).html, service.previewResult!.html);
     await tester.ensureVisible(filter);
     await tester.tap(filter);
     await tester.pumpAndSettle();
     await tester.tap(find.text('④ トークショーのみ').last);
     await tester.pumpAndSettle();
-    expect(find.text('このタイプの取込済み参加者はいません。'), findsOneWidget);
+    expect(find.text('このタイプの取込済み参加者はいません。'), findsNWidgets(2));
     expect(find.text('プレビューを表示'), findsNothing);
     expect(find.text('犬のみの完成本文'), findsNothing);
   });

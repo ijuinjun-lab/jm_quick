@@ -541,6 +541,7 @@ class _EventConsoleState extends State<_EventConsole> {
                     builder: (_) => WinnerMailPage(
                       initialEventId: id,
                       service: widget.winnerMailService,
+                      loadPreviewBatches: widget.winnerSendService.listBatches,
                     ),
                   ),
                 ),

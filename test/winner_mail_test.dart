@@ -7,10 +7,13 @@ import 'package:http/testing.dart';
 import 'package:jm_quick/confirmed/access_role.dart';
 import 'package:jm_quick/confirmed/console_page.dart';
 import 'package:jm_quick/confirmed/winner_mail_page.dart';
+import 'package:jm_quick/confirmed/mail_html_preview.dart';
 import 'package:jm_quick/confirmed/winner_mail_service.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'import_page_test.dart' show FakeImportService;
+import 'winner_send_test.dart' show FakeSendService;
+import 'package:jm_quick/confirmed/winner_send_service.dart';
 
 class FakeWinnerMailService implements WinnerMailService {
   FakeWinnerMailService({
@@ -28,6 +31,7 @@ class FakeWinnerMailService implements WinnerMailService {
   WinnerMailException? updateError;
   Map<String, String>? savedParticipationMapping;
   final List<String> calls = [];
+  final List<String?> previewBatchIds = [];
   final List<Map<String, String>> updates = [];
 
   @override
@@ -71,6 +75,7 @@ class FakeWinnerMailService implements WinnerMailService {
     String? batchId,
   }) async {
     calls.add('preview:$eventId:$participantId');
+    previewBatchIds.add(batchId);
     if (previewError != null) throw previewError!;
     return previewResult!;
   }
@@ -100,6 +105,7 @@ class FakeWinnerMailService implements WinnerMailService {
 }
 
 WinnerMailSettings _settings({
+  Map<String, dynamic>? waitlistTemplate,
   bool ready = true,
   List<String> problems = const [],
   // サーバー(getConfirmedWinnerMailSettings)が選んだ、プレビュー対象のparticipantId。
@@ -109,6 +115,7 @@ WinnerMailSettings _settings({
 }) => WinnerMailSettings(
   eventId: 'event-a',
   eventName: 'テスト譲渡会',
+  waitlistTemplate: waitlistTemplate,
   subject: '【当選】ご案内',
   introBody: '冒頭です',
   closingBody: '締めです',
@@ -128,6 +135,10 @@ Widget _page(FakeWinnerMailService service) => MaterialApp(
 
 // 実際にデコードできる最小のPNG(1x1・透明)。サーバーのcomposeWinnerMailForが返すQR画像と同じ形式
 // (PNG・base64)であることだけを確認するための架空データ(実物のQRペイロードではない)。
+const _fakeHtml = '<!DOCTYPE html><html><head></head><body style="margin:0">'
+    '<p>架空 花子 様</p><img src="cid:jm-quick-reception-qr" width="240" height="240">'
+    '<a href="https://example.invalid/p/x">こちら</a></body></html>';
+
 const _fakePngBase64 =
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
@@ -244,6 +255,7 @@ void main() {
             webPassUrl: 'https://example.invalid/p/batch-000001-0001',
             qrPayload:
                 'https://example.invalid/reception?eventId=event-a&participantId=batch-000001-0001',
+            html: _fakeHtml,
             qrPngBase64: _fakePngBase64,
           ),
         );
@@ -256,20 +268,18 @@ void main() {
         );
         await tester.tap(find.text('プレビューを表示'));
         await tester.pumpAndSettle();
-        expect(find.textContaining('架空 花子 様'), findsOneWidget);
-        // HTMLメールプレビュー(QR画像を含む)が、テキスト版に加えて表示される。
-        expect(find.textContaining('HTMLメールプレビュー'), findsOneWidget);
-        expect(find.textContaining('受付QR画像を含む完成形'), findsOneWidget);
-        // サーバーが返したQR画像(qrPngBase64)がデコードされ、Image.memoryとして表示される。
-        // (ここでQRを作り直していない。サーバーの返却バイト列とウィジェットのバイト列が一致する)
-        final image = tester.widget<Image>(find.byType(Image));
-        final provider = image.image as MemoryImage;
-        expect(provider.bytes, base64Decode(_fakePngBase64));
-        // Web参加証URLも、サーバーが返した値がそのまま表示される。
-        expect(
-          find.text('https://example.invalid/p/batch-000001-0001'),
-          findsOneWidget,
-        );
+        expect(find.byKey(const Key('preview-text')), findsNothing,
+            reason: 'HTML is the default; text is collapsed');
+        final html = tester.widget<MailHtmlPreview>(find.byKey(const Key('preview-html')));
+        expect(html.html, _fakeHtml);
+        expect(html.qrPngBase64, _fakePngBase64);
+        expect(find.byType(Image), findsNothing, reason: 'QR is inside the email, not a separate Flutter image');
+        await tester.ensureVisible(find.byKey(const Key('preview-text-toggle')));
+        await tester.tap(find.text('本文(テキスト版)'));
+        await tester.pumpAndSettle();
+        expect(tester.widget<SelectableText>(find.byKey(const Key('preview-text'))).data,
+            service.previewResult!.text);
+        expect(find.text('https://example.invalid/p/batch-000001-0001'), findsOneWidget);
         // サーバー(settings.previewParticipantId)が選んだIDがそのまま使われる。
         expect(service.calls.last, 'preview:event-a:batch-000001-0001');
         // メール送信・更新・送信ジョブ関連の呼び出しは一切無い(プレビューは副作用を持たない)。
@@ -290,12 +300,14 @@ void main() {
             text: '架空 花子 様',
             templateVersion: 2,
             webPassUrl: 'https://example.invalid/p/x',
+            html: _fakeHtml,
             qrPngBase64: _fakePngBase64,
           ),
         );
         await tester.pumpWidget(_page(service));
         await _load(tester);
         for (var i = 0; i < 3; i++) {
+          await tester.ensureVisible(find.text('プレビューを表示'));
           await tester.tap(find.text('プレビューを表示'));
           await tester.pumpAndSettle();
         }
@@ -329,6 +341,7 @@ void main() {
             text: '架空 花子 様',
             templateVersion: 2,
             webPassUrl: 'https://example.invalid/p/x',
+            html: _fakeHtml,
             qrPngBase64: '', // 想定外の空応答
           ),
         );
@@ -415,7 +428,8 @@ void main() {
           text: '架空 花子 様',
           templateVersion: 2,
           webPassUrl: 'https://example.invalid/p/batch-000001-0001',
-          qrPngBase64: _fakePngBase64,
+          html: _fakeHtml,
+            qrPngBase64: _fakePngBase64,
         ),
       );
       await tester.pumpWidget(_page(service));
@@ -424,8 +438,35 @@ void main() {
       await tester.tap(find.text('プレビューを表示'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
-      expect(find.byType(Image), findsOneWidget);
+      expect(tester.widget<MailHtmlPreview>(find.byKey(const Key('preview-html'))).html, _fakeHtml);
     });
+  });
+
+  testWidgets('資格追加の取込回を選ぶとbatchIdを既存プレビューAPIへ渡す（送信操作なし）', (tester) async {
+    final service = FakeWinnerMailService(settings: _settings(
+      waitlistTemplate: const {'subject': '繰り上げ', 'introBody': '本文', 'closingBody': '末尾', 'version': 2}),
+      previewResult: const WinnerMailPreview(ready: true, problems: [], html: _fakeHtml, qrPngBase64: _fakePngBase64));
+    final sends = FakeSendService(batches: const [SendBatch(
+      batchId: 'addition1', sequence: 2, label: '犬の追加当選', status: 'committed',
+      notificationType: 'waitlistPromotion', canCreateJob: false, blockedReasons: [],
+    )]);
+    await tester.pumpWidget(MaterialApp(home: WinnerMailPage(
+      initialEventId: 'event-a', service: service, loadPreviewBatches: sends.listBatches)));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('waitlist-preview-batch')));
+    await tester.tap(find.byKey(const Key('waitlist-preview-batch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('犬の追加当選').last);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('preview-waitlist')));
+    await tester.tap(find.byKey(const Key('preview-waitlist')));
+    await tester.pumpAndSettle();
+    expect(service.previewBatchIds, ['addition1']);
+    expect(service.calls.last, 'preview:event-a:batch-000001-0001');
+    expect(sends.listCalls, 1);
+    expect(sends.createCalls, 0);
+    expect(sends.startCalls, 0);
+    expect(tester.widget<MailHtmlPreview>(find.byKey(const Key('waitlist-preview-html'))).html, _fakeHtml);
   });
 
   group('コンソールでの表示(admin専用)', () {
@@ -436,6 +477,7 @@ void main() {
         authClient: FakeAuthClient(signedIn: true),
         accessService: FakeAccessService([AccessCheck.granted(role)]),
         winnerMailService: FakeWinnerMailService(settings: _settings()),
+        winnerSendService: FakeSendService(),
         eventSummaryService: FakeImportService(),
         initialEventId: 'evfixture0123456789',
       ),
@@ -706,7 +748,8 @@ void main() {
       text: '架空 花子 様\n\n${type == 'waitlistPromotion' ? 'キャンセル待ちで承っておりましたお席のご用意ができましたので、ご連絡申し上げます。' : '通常の冒頭'}',
       templateVersion: 1,
       webPassUrl: 'https://example.invalid/p/batch-000001-0001?publicId=pub_fixture',
-      qrPngBase64: _fakePngBase64,
+      html: _fakeHtml,
+            qrPngBase64: _fakePngBase64,
       notificationType: type,
     );
     Future<void> openSmall(WidgetTester tester, FakeWinnerMailService service) async {
@@ -739,9 +782,10 @@ void main() {
       expect(find.byKey(const Key('preview-notification-type')), findsOneWidget);
       expect(find.descendant(of: find.byKey(const Key('preview-notification-type')), matching: find.text('通常当選')), findsOneWidget);
       expect(find.text('【ご参加予約確定のお知らせ】 架空'), findsOneWidget);
-      expect(find.byKey(const Key('preview-text')), findsOneWidget);
-      expect(find.descendant(of: find.byKey(const Key('preview-qr')), matching: find.byType(Image)), findsOneWidget);
-      expect(find.byKey(const Key('preview-web-pass-url')), findsOneWidget);
+      expect(find.byKey(const Key('preview-text')), findsNothing);
+      final html = tester.widget<MailHtmlPreview>(find.byKey(const Key('preview-html')));
+      expect(html.html, _fakeHtml);
+      expect(html.qrPngBase64, _fakePngBase64);
       expect(visible(tester, find.byKey(const Key('preview-notice'))), isTrue, reason: '結果欄へ自動でスクロールしている');
       expect(find.byKey(const Key('waitlist-preview-notice')), findsNothing, reason: '繰り上げの欄には出さない');
     });
@@ -758,11 +802,10 @@ void main() {
       expect(find.descendant(of: find.byKey(const Key('waitlist-preview-notification-type')), matching: find.text('キャンセル待ち繰り上げ当選')),
           findsOneWidget);
       expect(find.text('【お席のご用意ができました：ご参加予約確定のお知らせ】 架空'), findsWidgets);
-      expect(tester.widget<SelectableText>(find.byKey(const Key('waitlist-preview-text'))).data,
-          contains('キャンセル待ちで承っておりましたお席のご用意ができましたので、ご連絡申し上げます。'));
-      expect(find.descendant(of: find.byKey(const Key('waitlist-preview-qr')), matching: find.byType(Image)), findsOneWidget);
-      expect(tester.widget<SelectableText>(find.byKey(const Key('waitlist-preview-web-pass-url'))).data,
-          'https://example.invalid/p/batch-000001-0001?publicId=pub_fixture');
+      expect(find.byKey(const Key('waitlist-preview-text')), findsNothing);
+      final html = tester.widget<MailHtmlPreview>(find.byKey(const Key('waitlist-preview-html')));
+      expect(html.html, _fakeHtml);
+      expect(html.qrPngBase64, _fakePngBase64);
       expect(visible(tester, find.byKey(const Key('waitlist-preview-notice'))), isTrue, reason: '最後の欄でも結果へ自動でスクロールする');
       expect(find.byKey(const Key('preview-notice')), findsNothing, reason: '通常当選の欄には出さない');
     });
