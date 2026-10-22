@@ -214,6 +214,10 @@ const E_MANAGER = "confirmedEventCallable:eventManager:dataEventId";
 const E_MANAGER_JOB = "confirmedEventCallable:eventManager:sendJobEventId";
 const E_STAFF = "confirmedEventCallable:eventStaff:dataEventId";
 const AUTHORIZATION_MAP_PHASE_1B = {
+  getConfirmedTestMailSettings: E_MANAGER,
+  previewConfirmedTestMail: E_MANAGER,
+  sendConfirmedTestMail: E_MANAGER,
+  updateConfirmedTestMailPolicy: "confirmedCallable:systemAdmin",
   sendParticipantMail: "confirmedCallable:admin",
   registerWalkIn: "publicCapabilityCallable",
   sendScheduledConfirmationMail: "onSchedule",
@@ -300,7 +304,7 @@ test("Phase 1B: 全exportの入口・認可レベル・対象イベントのreso
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
   // 60本 + イベント設定(getConfirmedEventSettings / updateConfirmedEventSettings。event_manager以上)の2本
-  assert.equal(exportsInIndex.length, 66);
+  assert.equal(exportsInIndex.length, 70);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {
@@ -312,7 +316,7 @@ test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていな�
     if (name === "getConfirmedParticipantPass") continue;
     // 受付キーの3本は、イベント単位の認可の代わりに「data.eventIdの受付キー」をguardが検証する(上の受付スタッフ用QRのテスト)
     if (Object.hasOwn(RECEPTION_KEY_EXPORTS, name)) { assert.match(rhs, /^confirmedReceptionKeyCallable\(/); continue; }
-    if (name === "createConfirmedEvent") { assert.match(rhs, /^confirmedCallable\("systemAdmin", /); continue; }
+    if (name === "createConfirmedEvent" || name === "updateConfirmedTestMailPolicy") { assert.match(rhs, /^confirmedCallable\("systemAdmin", /); continue; }
     assert.match(rhs, EVENT_CALLABLE, `${name}はイベント単位の認可`);
   }
 });

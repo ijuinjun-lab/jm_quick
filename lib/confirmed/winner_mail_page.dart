@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../widgets/common.dart';
+import 'test_mail_page.dart';
 import 'winner_mail_service.dart';
 import 'mail_html_preview.dart';
 import 'winner_send_service.dart' show SendBatch, SendBatchList;
@@ -419,6 +420,7 @@ class _WinnerMailPageState extends State<WinnerMailPage> {
         : Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        TestMailButton(eventId: widget.initialEventId),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(18),

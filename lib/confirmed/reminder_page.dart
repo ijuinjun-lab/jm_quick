@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../widgets/common.dart';
 import 'reminder_service.dart';
 import 'winner_mail_page.dart' show problemLabel;
+import 'test_mail_page.dart';
 import 'winner_mail_service.dart';
 import 'winner_send_job_page.dart';
 import 'winner_send_service.dart';
@@ -394,6 +395,7 @@ class _ReminderPageState extends State<ReminderPage>
           : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                TestMailButton(eventId: widget.initialEventId),
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.all(18),

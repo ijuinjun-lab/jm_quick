@@ -939,6 +939,15 @@ exports.getConfirmedAttendanceReport = confirmedEventCallable("eventManager", EV
 const winnerMailApi = createWinnerMailApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
 });
+const {createTestMailApi} = require("./confirmed/test_mail_api");
+const testMailApi = createTestMailApi({
+  getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
+  getTransport: () => createMailApiTransport({endpoint: mailApiUrl.value(), apiKey: mailApiKey.value()}),
+});
+exports.getConfirmedTestMailSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, testMailApi.settings, {enforceAppCheck: true, timeoutSeconds: 60});
+exports.updateConfirmedTestMailPolicy = confirmedCallable("systemAdmin", testMailApi.setPolicy, {enforceAppCheck: true});
+exports.previewConfirmedTestMail = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, testMailApi.preview, {enforceAppCheck: true, timeoutSeconds: 60});
+exports.sendConfirmedTestMail = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, testMailApi.send, {enforceAppCheck: true, secrets: [mailApiKey], timeoutSeconds: 120});
 const winnerSendApi = createWinnerSendApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
   getTransport: () => createMailApiTransport({endpoint: mailApiUrl.value(), apiKey: mailApiKey.value()}),

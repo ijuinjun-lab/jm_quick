@@ -57,7 +57,7 @@ test("取込ロジック(import_*)はまだcallableへ接続していない(inde
   const index = fs.readFileSync(path.join(FUNCTIONS_DIR, "index.js"), "utf8");
   const required = [...index.matchAll(/require\("\.\/confirmed\/([^"]+)"\)/g)].map((m) => m[1]);
   assert.deepEqual(required, ["access_role", "import_api", "event_create_api", "winner_mail_api", "winner_send_api", "pass_api", "reminder_api", "assignment_api", "invitation_api", "reception_key_api",
-    "attendance_report_api", "event_settings_api", "import_recovery", "reminder_recovery"]);
+    "attendance_report_api", "event_settings_api", "import_recovery", "test_mail_api", "reminder_recovery"]);
   assert.doesNotMatch(index, /import_(mapping|rows|batch_plan)/);
 });
 
