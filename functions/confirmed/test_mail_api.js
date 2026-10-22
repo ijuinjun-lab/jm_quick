@@ -111,7 +111,8 @@ function createTestMailApi(deps) {
     }
     if (!r.ok && !r.ready) fail('mail-not-ready', (r.problems || []).join(', '));
     const result = marked(r);
-    const message = {to: address(data.to), senderName: result.senderName, subject: result.subject, text: result.text, html: result.html, attachments: result.attachments};
+    const message = {to: address(data.to), senderName: result.senderName, subject: result.subject, text: result.text, html: result.html,
+      ...(result.attachments?.length ? {attachments: result.attachments} : {})};
     return {result, message, fingerprint: hash([data.eventId, data.kind, message])};
   }
   async function preview({data}) {

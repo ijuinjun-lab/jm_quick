@@ -66,7 +66,7 @@ function buildMailApiMessage({rendered, to, snapshot, participantId, jobId, type
     subject: rendered.subject,
     text: rendered.text,
     html: rendered.html,
-    attachments: rendered.attachments,
+    ...(rendered.attachments?.length ? {attachments: rendered.attachments} : {}),
     metadata: {app: "jm-quick", type, participantId, jobId},
   };
 }
