@@ -299,6 +299,7 @@ class FakeMailService implements WinnerMailService {
   Future<WinnerMailPreview> preview({
     required String eventId,
     required String participantId,
+    String? batchId,
   }) async {
     previewCalls.add(participantId);
     return preview_;

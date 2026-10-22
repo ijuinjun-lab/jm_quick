@@ -55,7 +55,7 @@ const AUTO_EXCLUSION_REASON = "原本でキャンセル（自動除外）";
 
 const COMMON_KEYS = ["eventId", "clientRequestId", "sourceFileName", "fileHash", "label", "mapping", "headers", "rows",
   "totalRecords", "blankRecordNumbers", "corrections", "excludedRows", "notificationType", "sourceSheetName",
-  "sourceSheetCandidates"];
+  "sourceSheetCandidates", "identityDecisions"];
 const COMMIT_KEYS = [...COMMON_KEYS, "approvedReviewRows", "acknowledgeExistingEmailDuplicates",
   "acknowledgeCsvEmailDuplicates", "acknowledgeIgnoredCounts", "approvalKeys", "expectedImportSequence", "validationFingerprint"];
 const ACK_KEYS = ["acknowledgeExistingEmailDuplicates", "acknowledgeCsvEmailDuplicates", "acknowledgeIgnoredCounts"];
@@ -193,6 +193,7 @@ function parseImportRequest(data, {commit}) {
     notificationType,
     sourceSheetName: waitlistPromotion && typeof data.sourceSheetName === "string" ? data.sourceSheetName : null,
     sourceSheetCandidates: waitlistPromotion && Array.isArray(sheetCandidates) ? [...sheetCandidates] : null,
+    identityDecisions: [],
     corrections: [],
     approvedReviewRows: [],
     excludedRows: [],
@@ -216,6 +217,18 @@ function parseImportRequest(data, {commit}) {
       }
     }
   }
+  request.identityDecisions = parseDecisions(data.identityDecisions, "identityDecisions", (item, path) => {
+    if (!isPlainObject(item) || !rows.some((r) => r.sourceRowNumber === item.sourceRowNumber) ||
+        !["existing", "new"].includes(item.kind) || typeof item.reason !== "string" || !item.reason.trim() || item.reason.length > 200 ||
+        typeof item.decisionKey !== "string" || !FINGERPRINT_PATTERN.test(item.decisionKey) ||
+        (item.kind === "existing" && (typeof item.participantId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(item.participantId))) ||
+        Object.keys(item).some((k) => !["sourceRowNumber", "kind", "reason", "decisionKey", "participantId", "mode"].includes(k))) {
+      throw invalid("invalid-identity-decision", path);
+    }
+    if (item.mode !== undefined && item.mode !== "bulk") throw invalid("invalid-identity-decision", path);
+    return {sourceRowNumber: item.sourceRowNumber, kind: item.kind, reason: item.reason.trim(), ...(item.mode ? {mode: item.mode} : {}),
+      decisionKey: item.decisionKey, ...(item.kind === "existing" ? {participantId: item.participantId} : {})};
+  });
   const autoExcluded = new Set(request.autoExcludedRows.map((e) => e.sourceRowNumber));
   // 対処(修正・除外)は、元のCSVの実在する行(空レコード・ヘッダーは対象外)だけ。
   const rowByNumber = new Map(request.rows.map((row) => [row.sourceRowNumber, row]));
@@ -354,6 +367,7 @@ function requestHash(request) {
     mapping: request.normalizedMapping, headers: request.headers, rows: request.rows,
     totalRecords: request.totalRecords, blankRecordNumbers: request.blankRecordNumbers,
     approvedReviewRows: request.approvedReviewRows, excludedRows: request.excludedRows,
+    ...(request.identityDecisions?.length ? {identityDecisions: request.identityDecisions} : {}),
     // 修正がある場合だけ含める(修正の無い取込・既存の取込回のハッシュは従来と同じ)。
     ...(request.corrections && request.corrections.length > 0 ? {corrections: request.corrections} : {}),
     // 繰り上げ当選だけ含める(通常当選=既存の取込回のハッシュは従来と同じ)。

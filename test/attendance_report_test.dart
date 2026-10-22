@@ -303,7 +303,8 @@ void main() {
           exportedAt: DateTime.utc(2026, 11, 30),
         );
         final rows = _readReport(file.bytes).rows.skip(1).toList();
-        expect(file.participantCount, 14);
+        expect(file.participantCount, buildReceptionStatus(_report()).totals.applications);
+        expect(file.participantCount, 13, reason: 'programなし1件は正式な申込件数から除外。監査明細14行は保持');
         expect(rows.length, 14);
         String col(List<String> r, int i) => i < r.length ? r[i] : '';
         final hebel = <String, int>{};
@@ -523,6 +524,7 @@ void main() {
             ReceptionAttendanceState.attended => '受付済',
             ReceptionAttendanceState.pending => '未受付',
             ReceptionAttendanceState.absent => '欠席',
+            ReceptionAttendanceState.cancelled => '資格取消',
           };
           expect(excel['架空 ${r.participantId}/${r.programId}'], label, reason: '$at ${r.participantId}/${r.programId}');
         }
@@ -552,7 +554,9 @@ void main() {
       expect(info[1], ['イベント名', '架空イベント']);
       expect(info[2], ['イベントID', 'evReport0123456789']);
       expect(info[3], ['データ取得日時（日本時間）', '2026-11-30 18:00:00']);
-      expect(info[4], ['参加者数', '6']);
+      expect(info[4], ['参加者数', '4']);
+      expect(info.firstWhere((r) => r.first == '出力明細行数（監査行を含む）'), ['出力明細行数（監査行を含む）', '6']);
+      expect(info.firstWhere((r) => r.first == '集計対象外の明細行数'), ['集計対象外の明細行数', '2']);
       expect(info[5].first, '「受付」列の欠席');
       expect(_part(judged.bytes, 'xl/worksheets/sheet2.xml'), contains('s="2"'), reason: 'データ取得日時は日時のセル');
     });
@@ -643,7 +647,7 @@ void main() {
       expect(saved.single.$1, 'JM_Quick_架空イベント_最終実績_20261130.xlsx');
       expect(saved.single.$2, xlsxMimeType);
       expect(find.byKey(const Key('final-report-done')), findsOneWidget);
-      expect(find.textContaining('参加者14名'), findsOneWidget);
+      expect(find.textContaining('有効な申込13件'), findsOneWidget);
       expect(
         find.textContaining('架空 参加者'),
         findsNothing,

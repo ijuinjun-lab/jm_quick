@@ -4,7 +4,7 @@ import '../services/participant_csv_export_service.dart'
     show safeExportFileName;
 import 'attendance_report_service.dart';
 import 'reception_status_summary.dart'
-    show attendanceStateOf, isReceptionTarget, programEndAt, ReceptionAttendanceState;
+    show attendanceStateOf, isReceptionTarget, programEndAt, ReceptionAttendanceState, buildReceptionStatus;
 import 'xlsx_writer.dart';
 
 /// 最終実績(サーバーの[AttendanceReport])→ Excel(.xlsx)。1行 = 1 participant(同じメールアドレスでも統合しない)。
@@ -113,6 +113,7 @@ String receptionCellOf(
   AttendanceJudgement judgement,
 ) {
   if (entry.checkedIn) return '受付済';
+  if (entry.revoked) return '資格取消';
   if (!isReceptionTarget(p)) return '未受付';
   final state = attendanceStateOf(
     checkedIn: false,
@@ -138,8 +139,8 @@ List<Object?> _programCells(
   if (entry == null) return const ['なし', null, null, null, null, null];
   final at = entry.checkedIn ? entry.checkedInAt : null;
   return [
-    'あり',
-    entry.plannedCount,
+    !isReceptionTarget(p) ? '対象外' : entry.revoked ? '取消' : 'あり',
+    !isReceptionTarget(p) ? null : entry.revoked ? 0 : entry.plannedCount,
     entry.timeText,
     receptionCellOf(p, entry, judgement),
     entry.checkedIn ? entry.attendedCount : null,
@@ -160,7 +161,12 @@ AttendanceReportFile buildAttendanceReportXlsx(
     eventStartAt: eventStartAt,
     eventEndAt: eventEndAt,
   );
+  // 正式な集計は受付状況一覧・CSVと同じ対象・計算を使用する。
+  // 明細には監査行と過去の実来場記録を残し、対象外の予定人数は加算しない。
+  final status = buildReceptionStatus(report, judgedAt: exportedAt,
+    eventStartAt: eventStartAt, eventEndAt: eventEndAt);
   final names = _programNames(report.programs);
+  final withOrigins = report.participants.any((p) => p.programs.any((a) => a.notificationType != null));
   final columns = <XlsxColumn>[
     (header: '取込回', width: 8),
     (header: '氏名', width: 18),
@@ -181,6 +187,7 @@ AttendanceReportFile buildAttendanceReportXlsx(
         (header: '$name：$suffix', width: _widthFor('$name：$suffix', minimum)),
     ],
     (header: 'イベント来場状況', width: 16),
+    if (withOrigins) for (final name in names) (header: '$name：当選区分', width: 22),
   ];
   final rows = <List<Object?>>[
     for (final p in report.participants)
@@ -195,6 +202,9 @@ AttendanceReportFile buildAttendanceReportXlsx(
         for (final program in report.programs)
           ..._programCells(p, program, judgement),
         eventAttendanceOf(p),
+        if (withOrigins) for (final program in report.programs)
+          p.programs.any((a) => a.programId == program.programId)
+            ? (p.programs.firstWhere((a) => a.programId == program.programId).notificationType == 'waitlistPromotion' ? '繰り上げ当選' : '通常当選') : '',
       ],
   ];
   return AttendanceReportFile(
@@ -210,15 +220,27 @@ AttendanceReportFile buildAttendanceReportXlsx(
           ['イベント名', report.eventName],
           ['イベントID', report.eventId],
           ['データ取得日時（日本時間）', XlsxDateTime(exportedAt.toUtc().add(_jst))],
-          ['参加者数', report.participants.length],
+          ['参加者数', status.totals.applications],
           [
             '「受付」列の欠席',
             '受付が無いまま、プログラムの終了時刻(時間帯、無ければイベント終了日時)を、データ取得日時の時点で過ぎたもの。'
                 '終了時刻が確認できないプログラムと、受付の対象外の参加者は「未受付」。',
           ],
+          ['参加者数の定義', '有効・取込確定済み・参加資格ありの申込件数。複数プログラムでも1件。受付状況一覧と同じ対象。'],
+          ['出力明細行数（監査行を含む）', report.participants.length],
+          ['集計対象外の明細行数', report.participants.length - status.totals.applications],
+          ['予定人数（プログラム別延べ人数）', status.totals.plannedTotal],
+          ['受付済み申込件数', status.totals.checkedInApplications],
+          ['実来場人数（プログラム別延べ人数）', status.totals.attendedTotal],
+          for (final program in status.programs) ...[
+            ['${program.name}：申込件数', program.entries],
+            ['${program.name}：予定人数', program.plannedTotal],
+            ['${program.name}：実来場人数', program.attendedTotal],
+          ],
+          ['集計対象外の記録', '対象外の予定人数は空欄。過去の受付実績は明細に保持し、正式集計へ自動算入しない。'],
         ],
       ),
     ),
-    participantCount: report.participants.length,
+    participantCount: status.totals.applications,
   );
 }

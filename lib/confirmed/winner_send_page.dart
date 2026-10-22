@@ -112,6 +112,7 @@ class _WinnerSendPageState extends State<WinnerSendPage> {
       final result = await widget.mailService.preview(
         eventId: batchList!.eventId,
         participantId: id,
+        batchId: batch.batchId,
       );
       if (mounted) {
         setState(() {

@@ -208,9 +208,12 @@ function createReminderApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl
     }
     // 対象者は「この時点」の、当選メール送信済みの有効な参加者(イベント全体)。ここで確定し、targetCountとして固定する。
     const collected = await collectReminderRecipients(db, eventId, {event});
+    built.snapshot.reminderFingerprint = collected.fingerprint;
+    built.snapshot.recipientSafetyFingerprints = Object.fromEntries(collected.recipients.filter((r) => r.target).map((r) => [r.participantId, r.safetyFingerprint]));
+    built.snapshot.recipientFingerprints = Object.fromEntries(collected.recipients.filter((r) => r.target).map((r) => [r.participantId, r.fingerprint]));
     // 当選メールの結果不明・重複登録の疑いが残っていれば、手動・自動のどちらでも作らない(未解決のまま送らない)
     if (collected.blocked.unknownWinnerMail > 0 || collected.blocked.suspectedDuplicates > 0) {
-      throw new ApiError("failed-precondition", "当選メールの結果が不明な参加者、または重複登録の疑いがある参加者がいるため、前日リマインドを作成できません。宛先一覧で確認してください。",
+      throw new ApiError("failed-precondition", "追加当選通知が未送信・結果不明、または重複登録の疑いがある参加者がいるため、前日リマインドを作成できません。宛先一覧で確認してください。",
         {code: "reminder-targets-unresolved", ...collected.blocked});
     }
     if (collected.targets.length === 0) throw new ApiError("failed-precondition", "送信対象の参加者がいません。", {code: "no-targets"});

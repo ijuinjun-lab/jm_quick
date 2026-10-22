@@ -156,7 +156,7 @@ describe("最終実績(getConfirmedAttendanceReport)", {skip: skipReason()}, () 
     assert.equal(p1["program-3"].attendedCount, 1);
     assert.equal(p1["program-3"].timeText, null);
     const p2 = programsOf(1);
-    assert.deepEqual(p2["program-1"], {programId: "program-1", plannedCount: 2, timeText: "10:30-11:10", checkedIn: false,
+    assert.deepEqual(p2["program-1"], {notificationType: "normal", programId: "program-1", plannedCount: 2, timeText: "10:30-11:10", checkedIn: false,
       attendedCount: null, checkedInAt: null}, "受付取消は未受付");
     const p5 = programsOf(4);
     assert.deepEqual(Object.keys(p5).sort(), ["program-1", "program-2", "program-3"]);

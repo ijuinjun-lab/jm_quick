@@ -1,9 +1,9 @@
 // 新方式の当選者CSV取込: commitエンジン(Firestoreへ書く唯一の場所)。
 // dbは呼び出し側(index.js)から渡される。このファイルはFirebaseのパッケージを読み込まない。
 //
-// ■ 欠落防止(最優先): 1CSVデータレコード = 1取込レコード(importRecordId) = 原則1participant。
-//   - 人物の同一性(メール・氏名・参照コード・過去のbatch)は見ない。同じ人物の行もすべて別のparticipantになる。
-//   - 一意にするのは「batchId + 行番号」だけ。participantIdはimportRecordId(再試行しても同じID)。
+// ■ 全行に取込監査を残す。同一申込の確認済み計画は既存participantへの資格追加・変更なしとして扱う。
+//   - 氏名・メールだけでは統合しない。application_identityが管理者の確認済み対応関係を解決する。
+//   - 新規確認済みの場合だけ従来のparticipantId/publicIdを発行する。既存ID・QRは変更しない。
 //   - reviewは、管理者が明示的に承認した行だけ登録する。errorは承認されても登録しない。
 //   - 登録しない行(review未承認・error・operator除外)も、監査(rows)に必ず残る。
 //   - 最後に、created + reviewPending + error + excluded (+ blank) が元CSVの全レコード数と一致することを
@@ -27,9 +27,11 @@ const {requestHash, allExclusionsOf} = require("./import_request");
 const AUTO_EXCLUDED_BY = "system:auto-exclusion";
 const {isConfirmedFlow} = require("../flow");
 
-const BATCH_STATUS = Object.freeze({COMMITTING: "committing", COMMITTED: "committed", FAILED: "failed"});
+const {abandonedMaterial} = require("./abandoned_imports");
+const {remapRecord, digest, fail: identityFailure} = require("./application_identity");
+const BATCH_STATUS = Object.freeze({COMMITTING: "committing", COMMITTED: "committed", FAILED: "failed", ABANDONED: "abandoned"});
 const RESULT = Object.freeze({
-  CREATED: "created", REVIEW_PENDING: "review-pending", ERROR: "error", EXCLUDED: "excluded", BLANK: "blank",
+  CREATED: "created", ADDED: "added", UNCHANGED: "unchanged", REVIEW_PENDING: "review-pending", ERROR: "error", EXCLUDED: "excluded", BLANK: "blank",
 });
 const DEFAULT_CONCURRENCY = 8;
 
@@ -65,7 +67,7 @@ function resolveRecords(plan, request) {
       throw new ApiError("internal", "取込計画が不整合です。", {code: "created-without-participant"});
     }
     return {
-      record, result, classification: record.status,
+      record: remapRecord(record), result: result === RESULT.CREATED && record.identity ? record.identity.action : result, classification: record.status,
       approved: result === RESULT.CREATED && record.status === "review",
       exclusion: exclusion || null,
     };
@@ -84,9 +86,11 @@ function blankItems(plan, batchId, importRecordId) {
 }
 
 function countsOf(items) {
-  const counts = {total: items.length, created: 0, reviewPending: 0, error: 0, excluded: 0, blank: 0};
+  const counts = {total: items.length, added: 0, unchanged: 0, created: 0, reviewPending: 0, error: 0, excluded: 0, blank: 0};
   for (const {result} of items) {
     if (result === RESULT.CREATED) counts.created += 1;
+    else if (result === RESULT.ADDED) counts.added += 1;
+    else if (result === RESULT.UNCHANGED) counts.unchanged += 1;
     else if (result === RESULT.REVIEW_PENDING) counts.reviewPending += 1;
     else if (result === RESULT.ERROR) counts.error += 1;
     else if (result === RESULT.EXCLUDED) counts.excluded += 1;
@@ -135,11 +139,12 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     const {record, result, exclusion} = item;
     return {
       ...(rowAudit ? rowAudit(item) : {}),
+      ...(record.identity ? {identity: record.identity, identityConfirmedBy: uid} : {}),
       sourceRowNumber: record.sourceRowNumber,
       importRecordId: record.importRecordId,
       classification: item.classification,
       result,
-      participantId: result === RESULT.CREATED ? record.participantId : null,
+      participantId: [RESULT.CREATED, RESULT.ADDED, RESULT.UNCHANGED].includes(result) ? record.participantId : null,
       issueCodes: [...new Set(record.issues.map((issue) => issue.code))],
       programIds: record.attendances.map((a) => a.programId),
       approvedReview: item.approved,
@@ -178,7 +183,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     };
   }
 
-  function attendanceDoc(attendance, {eventId, batchId}) {
+  function attendanceDoc(attendance, {eventId, batchId, notificationType, identityVersion}) {
     return {
       eventId,
       participantId: attendance.participantId,
@@ -187,6 +192,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       slotLabel: attendance.slotLabel,
       startAt: attendance.startAt === null ? null : new Date(attendance.startAt),
       endAt: attendance.endAt === null ? null : new Date(attendance.endAt),
+      ...(identityVersion ? {entitlementStatus: "active", notificationType, identityVersion} : {}),
       checkedIn: false,
       checkedInAt: null,
       attendedCount: null,
@@ -199,7 +205,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
   function verifyExistingRow(existing, item) {
     const expected = {
       importRecordId: item.record.importRecordId, classification: item.classification, result: item.result,
-      participantId: item.result === RESULT.CREATED ? item.record.participantId : null,
+      participantId: [RESULT.CREATED, RESULT.ADDED, RESULT.UNCHANGED].includes(item.result) ? item.record.participantId : null,
       approvedReview: item.approved, excludedByOperator: Boolean(item.exclusion),
     };
     for (const [key, value] of Object.entries(expected)) {
@@ -215,22 +221,84 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     const batchRef = batchRefOf(db, ctx.batchId);
     const rowRef = batchRef.collection("rows").doc(String(item.record.sourceRowNumber));
     await runTransactionWithRetry(db, async (tx) => {
+      const state = await tx.get(batchRef);
+      if (!state.exists || state.data().status === BATCH_STATUS.ABANDONED) throw identityFailure("batch-abandoned");
       const created = item.result === RESULT.CREATED;
-      const participantRef = created ? db.collection("participants").doc(item.record.participantId) : null;
-      const attendanceRefs = created
-        ? item.record.attendances.map((a) => db.collection("programAttendances").doc(a.attendanceId)) : [];
-      const [rowSnap, ...others] = await tx.getAll(rowRef, ...(created ? [participantRef, ...attendanceRefs] : []));
-      if (rowSnap.exists) {
-        verifyExistingRow(rowSnap.data(), item);
-        return;
+      const affected = [RESULT.CREATED, RESULT.ADDED, RESULT.UNCHANGED].includes(item.result);
+      const participantRef = affected ? db.collection("participants").doc(item.record.participantId) : null;
+      const attendanceRefs = affected ? item.record.attendances.map((a) => db.collection("programAttendances").doc(a.attendanceId)) : [];
+      const linkRef = affected && item.record.identity ? db.collection("applicationLinks").doc(item.record.identity.key) : null;
+      const [rowSnap, ...others] = await tx.getAll(rowRef, ...(affected ? [participantRef, ...attendanceRefs] : []));
+      if (rowSnap.exists) { verifyExistingRow(rowSnap.data(), item); return; }
+      const link = linkRef ? await tx.get(linkRef) : null;
+      const grantRef = ctx.identityVersion && affected ? db.collection("qualificationGrants").doc(`${ctx.batchId}-${item.record.participantId}`) : null;
+      const priorGrant = grantRef ? await tx.get(grantRef) : null;
+      // Never repair a deleted participant by issuing a different publicId/QR.
+      if (priorGrant?.exists) throw identityFailure("grant-without-audit-row");
+      const relation = item.record.identity;
+      const replacements = relation?.replacedAttendances || [];
+      const replacingLink = Boolean(relation?.replacedLink);
+      if (replacements.length || replacingLink || relation?.abandonedCandidates?.length) {
+        const reader = {collection: (name) => {
+          const wrap = (q) => ({where: (...args) => wrap(q.where(...args)), get: () => tx.get(q)});
+          return wrap(db.collection(name));
+        }};
+        const [people, links, attendances, batches] = await Promise.all(['participants', 'applicationLinks', 'programAttendances', 'importBatches']
+          .map((c) => reader.collection(c).where('eventId', '==', ctx.eventId).get()));
+        const material = await abandonedMaterial(reader, ctx.eventId, {people, links, attendances, batches});
+        if (material.protectedPeople.has(item.record.participantId) ||
+          (relation.abandonedCandidates || []).some((id) => material.protectedPeople.has(id)) ||
+          (replacingLink && (!link?.exists || !material.ignoredLinks.has(link.id))) ||
+          replacements.some((id) => !material.ignoredAttendances.has(id))) throw identityFailure("abandoned-record-used");
+        const fingerprint = digest([replacingLink ? [[link.id, link.data()]] : [],
+          others.slice(1).filter((d) => replacements.includes(d.id)).map((d) => [d.id, d.data()]).sort()]);
+        if (fingerprint !== relation.replacementFingerprint) throw identityFailure("import-state-changed");
       }
-      if (others.some((snap) => snap.exists)) {
-        // 監査行が無いのに同じIDのデータがある=このbatchが書いたものではない。上書きせず失敗させる。
-        throw new ApiError("failed-precondition", "取込先のIDに既存のデータがあります。", {code: "record-id-conflict", sourceRowNumber: item.record.sourceRowNumber});
+      if (link?.exists && !replacingLink && link.data().participantId !== item.record.participantId) throw identityFailure("identity-link-conflict");
+      if (affected) {
+        if (created && others[0].exists) throw identityFailure("record-id-conflict");
+        if (!created) {
+          const person = others[0].exists ? others[0].data() : null;
+          if (!person || person.eventId !== ctx.eventId || person.status !== "active") throw identityFailure("participant-unavailable");
+          if (person.importBatchId) {
+            const initial = await tx.get(batchRefOf(db, person.importBatchId));
+            if (!initial.exists || initial.data().eventId !== ctx.eventId || initial.data().status !== "committed") throw identityFailure("participant-unavailable");
+          }
+        }
+        if (others.slice(1).some((snap) => snap.exists && !replacements.includes(snap.id))) throw identityFailure("qualification-conflict");
       }
-      if (created) {
-        tx.create(participantRef, participantDoc(item, ctx));
-        item.record.attendances.forEach((a, index) => tx.create(attendanceRefs[index], attendanceDoc(a, ctx)));
+      // Preserve the exact unused record under its creating batch before replacing
+      // the active slot. This never touches participant IDs, QR secrets or histories.
+      const archive = (kind, snap, origin) => tx.create(batchRefOf(db, origin).collection("retiredRecords").doc(`${kind}-${snap.id}`), {
+        kind, originalId: snap.id, record: snap.data(), replacedByBatchId: ctx.batchId,
+        replacedBy: ctx.uid, replacedAt: serverTimestamp(), reason: "unused-abandoned-import",
+      });
+      if (created) tx.create(participantRef, participantDoc(item, ctx));
+      if (affected) {
+        item.record.attendances.forEach((a, index) => {
+          const prior = others[index + 1];
+          if (replacements.includes(a.attendanceId)) {
+            archive("attendance", prior, prior.data().importBatchId);
+            tx.set(attendanceRefs[index], attendanceDoc(a, ctx));
+          } else tx.create(attendanceRefs[index], attendanceDoc(a, ctx));
+        });
+        if (linkRef && (!link.exists || replacingLink)) {
+          if (replacingLink) archive("link", link, relation.replacedLinkBatchId);
+          const nextLink = {eventId: ctx.eventId, participantId: item.record.participantId, importBatchId: ctx.batchId,
+            confirmedBy: ctx.uid, confirmedAt: serverTimestamp(), decision: item.record.identity.decision};
+          if (replacingLink) tx.set(linkRef, nextLink); else tx.create(linkRef, nextLink);
+        }
+        if (ctx.identityVersion && (created || item.record.attendances.length)) {
+          tx.create(db.collection("qualificationGrants").doc(`${ctx.batchId}-${item.record.participantId}`), {
+            eventId: ctx.eventId, batchId: ctx.batchId, participantId: item.record.participantId, initial: created,
+            ...(!created ? {additionalEventId: ctx.eventId} : {}),
+            deliveryId: `${item.record.participantId}_winner${created ? "" : `_${ctx.batchId}`}`,
+            notificationType: ctx.notificationType, programIds: item.record.attendances.map((a) => a.programId),
+            attendances: item.record.attendances.map((a) => ({eventId: ctx.eventId, participantId: a.participantId,
+              programId: a.programId, plannedCount: a.plannedCount, slotLabel: a.slotLabel || null, startAt: a.startAt || null, endAt: a.endAt || null})),
+            createdAt: serverTimestamp(), createdBy: ctx.uid,
+          });
+        }
       }
       tx.create(rowRef, rowDoc(item, ctx.uid, ctx.rowAudit));
     });
@@ -252,7 +320,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     }).sort((a, b2) => a.sourceRowNumber - b2.sourceRowNumber);
     return {
       batchId, eventId: b.eventId, sequence: b.sequence, label: b.label, status: b.status,
-      totalRows: b.totalRows, createdCount: b.createdCount, reviewPendingCount: b.reviewPendingCount,
+      totalRows: b.totalRows, addedCount: b.addedCount || 0, unchangedCount: b.unchangedCount || 0, createdCount: b.createdCount, reviewPendingCount: b.reviewPendingCount,
       errorCount: b.errorCount, excludedByOperatorCount: b.excludedByOperatorCount,
       blankRecordCount: b.blankRecordCount, totalRecords: b.totalRecords, rows,
     };
@@ -271,9 +339,9 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       db.collection("programAttendances").where("importBatchId", "==", ctx.batchId).count().get(),
     ]);
     const expectedAttendances = items
-      .filter((item) => item.result === RESULT.CREATED)
+      .filter((item) => [RESULT.CREATED, RESULT.ADDED].includes(item.result))
       .reduce((sum, item) => sum + item.record.attendances.length, 0);
-    const sum = actual.created + actual.reviewPending + actual.error + actual.excluded;
+    const sum = actual.created + actual.added + actual.unchanged + actual.reviewPending + actual.error + actual.excluded;
     const problems = [];
     if (rowsSnap.size !== expected.total || missing > 0) problems.push("audit-rows-mismatch");
     if (sum !== ctx.totalRows || sum + actual.blank !== ctx.totalRecords) problems.push("conservation-mismatch");
@@ -289,7 +357,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       const ref = batchRefOf(db, batchId);
       await db.runTransaction(async (tx) => {
         const snap = await tx.get(ref);
-        if (!snap.exists || snap.data().status === BATCH_STATUS.COMMITTED) return;
+        if (!snap.exists || [BATCH_STATUS.COMMITTED, BATCH_STATUS.ABANDONED].includes(snap.data().status)) return;
         tx.update(ref, {status: BATCH_STATUS.FAILED, failureReason: reason, updatedAt: serverTimestamp()});
       });
     } catch (secondary) {
@@ -311,12 +379,14 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
 
     // 1. batchの作成(または既存の再利用)。採番はeventのカウンタを同じトランザクションで進める。
     const started = await runTransactionWithRetry(db, async (tx) => {
-      const [batchSnap, eventSnap] = await tx.getAll(batchRef, eventRef);
+      const batchSnap = await tx.get(batchRef);
+      const eventSnap = await tx.get(eventRef);
       if (batchSnap.exists) {
         const existing = batchSnap.data();
         if (existing.eventId !== eventId || existing.requestHash !== hash) {
           throw new ApiError("already-exists", "同じclientRequestIdで、内容の異なる取込が既に存在します。", {code: "batch-content-mismatch"});
         }
+        if (existing.status === BATCH_STATUS.ABANDONED) throw identityFailure("batch-abandoned");
         if (existing.status === BATCH_STATUS.FAILED) {
           tx.update(batchRef, {status: BATCH_STATUS.COMMITTING, failureReason: null, updatedAt: serverTimestamp()});
         }
@@ -328,7 +398,8 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       }
       const sequence = (eventSnap.data().importSequence || 0) + 1;
       const extra = guardNewBatch ? await guardNewBatch(tx, {event: eventSnap.data(), sequence}) : {};
-      tx.update(eventRef, {importSequence: sequence});
+      if (eventSnap.data().activeImportBatch && eventSnap.data().activeImportBatch !== batchId) throw identityFailure("import-in-progress");
+      tx.update(eventRef, {importSequence: sequence, ...(extra.identityVersion ? {activeImportBatch: batchId} : {})});
       tx.create(batchRef, {
         ...extra,
         eventId, sequence, label: request.label || `第${sequence}回`, sourceFileName: request.sourceFileName,
@@ -347,7 +418,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       return {...(await loadResult(db, batchId)), idempotentReplay: true};
     }
 
-    const ctx = {batchId, eventId, uid: identity.uid, totalRows: plan.batch.totalRows, totalRecords: plan.batch.totalRecords, rowAudit};
+    const ctx = {identityVersion: plan.records.some((r) => r.identity) ? 1 : null, notificationType: request.notificationType, batchId, eventId, uid: identity.uid, totalRows: plan.batch.totalRows, totalRecords: plan.batch.totalRecords, rowAudit};
     try {
       // 2. 各行を冪等に書く(既に書けた行は何もしない)。
       await runPool(items, concurrency, (item) => writeRow(db, ctx, item));
@@ -360,9 +431,15 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       }
       // 4. committed。
       await runTransactionWithRetry(db, async (tx) => {
+        // All import transactions acquire the batch before the event/rows (including abandonment).
+        const currentBatch = await tx.get(batchRef);
+        const currentEvent = await tx.get(eventRef);
+        if (currentBatch.data().status === BATCH_STATUS.ABANDONED) throw identityFailure("batch-abandoned");
+        if (currentEvent.data().activeImportBatch === batchId) tx.update(eventRef, {activeImportBatch: null});
         tx.update(batchRef, {
           status: BATCH_STATUS.COMMITTED, failureReason: null,
-          createdCount: verification.actual.created, reviewPendingCount: verification.actual.reviewPending,
+          createdCount: verification.actual.created, addedCount: verification.actual.added, unchangedCount: verification.actual.unchanged,
+          notificationTargetCount: verification.actual.created + verification.actual.added, reviewPendingCount: verification.actual.reviewPending,
           errorCount: verification.actual.error, excludedByOperatorCount: verification.actual.excluded,
           completedAt: serverTimestamp(), updatedAt: serverTimestamp(),
         });

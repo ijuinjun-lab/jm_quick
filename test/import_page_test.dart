@@ -303,6 +303,102 @@ Future<void> _commitDialog(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets('放棄後の同じファイルはサーバー指定の後続IDでプレビュー・確定する', (tester) async {
+    final service = FakeImportService(
+      validateHandler: (_) async => ImportValidation.fromJson({
+        'batchId': 'successor1', 'reimportBatchId': 'successor1',
+        'totalRecords': 5, 'totalRows': 4, 'blankRecordCount': 1, 'okCount': 3,
+        'nextImportSequence': 2, 'validationFingerprint': 'f' * 64,
+        'rows': [for (var i = 0; i < 3; i++) {'sourceRowNumber': i + 2, 'classification': 'ready', 'result': 'ok', 'programIds': ['program-1']}],
+      }),
+      previewHandler: (_) async => _preview(review: 0),
+    );
+    await _open(tester, service);
+    await _preview_(tester);
+    expect(service.validations.single.batchId, isNot('successor1'));
+    expect(service.previews.single.batchId, 'successor1');
+    expect(service.previews.single.json['clientRequestId'], 'successor1');
+    await _commitDialog(tester);
+    await tester.tap(find.text('取込を確定')); await tester.pumpAndSettle();
+    expect(service.commits.single.request.batchId, 'successor1');
+    expect(service.commits.single.request.json['clientRequestId'], 'successor1');
+  });
+
+  testWidgets('利用実績がある放棄記録は確認待ち理由を表示し再登録を禁止する', (tester) async {
+    final service = FakeImportService(validateHandler: (_) async => ImportValidation.fromJson({
+      'batchId': 'successor1', 'reimportBatchId': 'successor1', 'totalRecords': 1, 'totalRows': 1, 'okCount': 1,
+      'identityRows': [{'sourceRowNumber': 2, 'action': 'review', 'reason': 'abandoned-record-used',
+        'bulkEligible': false, 'input': {}, 'programs': [], 'candidates': []}],
+      'rows': [{'sourceRowNumber': 2, 'classification': 'ready', 'result': 'ok', 'programIds': ['program-1']}],
+    }));
+    await _open(tester, service, pick: () => _csv('${_headers.join(',')}\n${_row(1)}\n'));
+    await _validate(tester);
+    expect(find.textContaining('放棄済み取込回に送信・受付等の利用実績'), findsOneWidget);
+    expect(tester.widget<TextButton>(find.widgetWithText(TextButton, '別の新規申込と確認')).onPressed, isNull);
+    expect(tester.widget<FilledButton>(find.byKey(const Key('run-preview'))).onPressed, isNull);
+    expect(service.commits, isEmpty);
+  });
+
+  testWidgets('120件は一括確認1回で判断を保存し、例外行は個別確認に残す', (tester) async {
+    final service = FakeImportService(validateHandler: (request) async {
+      final decisions = request.json['identityDecisions'] as List? ?? [];
+      return ImportValidation.fromJson({
+        'batchId': 'b1', 'totalRecords': 121, 'totalRows': 121, 'okCount': 121,
+        'expectedImportSequence': 1, 'validationFingerprint': 'f' * 64,
+        'identityRows': [for (var i = 0; i < 121; i++) {
+          'sourceRowNumber': i + 2, 'action': decisions.isNotEmpty && i < 120 ? 'created' : 'review',
+          'bulkEligible': i < 120, 'decisionKey': 'a' * 64, 'programs': [], 'candidates': [],
+        }],
+        'rows': [for (var i = 0; i < 121; i++) {'sourceRowNumber': i + 2, 'classification': 'ready', 'result': 'ok', 'findings': [], 'programIds': []}],
+      });
+    });
+    await _open(tester, service, pick: () => _csv('${_headers.join(',')}\n${List.generate(121, (i) => _row(i)).join('\n')}\n'));
+    await _validate(tester);
+    await tester.ensureVisible(find.byKey(const Key('confirm-new-applications')));
+    await tester.tap(find.byKey(const Key('confirm-new-applications'))); await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '主催者原本の新規申込一覧を確認');
+    await tester.tap(find.text('一括確認して再検証')); await tester.pumpAndSettle();
+    final decisions = service.validations.last.json['identityDecisions'] as List;
+    expect(decisions.length, 120);
+    expect(decisions.every((d) => d['kind'] == 'new' && d['mode'] == 'bulk'), isTrue);
+    expect(decisions.any((d) => d['sourceRowNumber'] == 122), isFalse);
+    expect(tester.widget<FilledButton>(find.byKey(const Key('run-preview'))).onPressed, isNull);
+    expect(service.commits, isEmpty);
+  });
+
+  testWidgets('申込の確認待ちは保留し、管理者の根拠・対応関係を再検証へ渡す', (tester) async {
+    final service = FakeImportService(validateHandler: (request) async {
+      final confirmed = (request.json['identityDecisions'] as List? ?? []).isNotEmpty;
+      return ImportValidation.fromJson({
+        'batchId': 'b1', 'totalRecords': 1, 'totalRows': 1, 'okCount': 1,
+        'expectedImportSequence': 1, 'validationFingerprint': 'f' * 64,
+        'identityRows': [{
+          'sourceRowNumber': 2, 'action': confirmed ? 'added' : 'review',
+          'reason': confirmed ? null : 'identity-unconfirmed', 'decisionKey': 'a' * 64,
+          'input': {'sourceReference': 'R1', 'sourceRegisteredAt': '2026-01-01'},
+          'programs': [{'programId': 'program-1', 'plannedCount': 2, 'slotLabel': '10:00-11:00'}],
+          'additions': ['program-1'],
+          'candidates': [{'participantId': 'old-000002', 'name': '架空申込', 'email': 'same@example.invalid', 'programs': []}],
+        }],
+        'rows': [{'sourceRowNumber': 2, 'classification': 'ready', 'result': 'ok', 'findings': [], 'programIds': ['program-1']}],
+      });
+    });
+    await _open(tester, service, pick: () => _csv('${_headers.join(',')}\n${_row(1)}\n'));
+    await _validate(tester);
+    expect(tester.widget<FilledButton>(find.byKey(const Key('run-preview'))).onPressed, isNull);
+    final existing = find.textContaining('既存申込へ追加:');
+    await tester.ensureVisible(existing); await tester.tap(existing); await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), '主催者原本で同じ申込と確認');
+    await tester.tap(find.text('確認して再検証')); await tester.pumpAndSettle();
+    final decisions = service.validations.last.json['identityDecisions'] as List;
+    expect(decisions.single, {'sourceRowNumber': 2, 'kind': 'existing', 'participantId': 'old-000002',
+      'reason': '主催者原本で同じ申込と確認', 'decisionKey': 'a' * 64});
+    expect(find.text('申込照合: 既存参加者への資格追加'), findsOneWidget);
+    expect(tester.widget<FilledButton>(find.byKey(const Key('run-preview'))).onPressed, isNotNull);
+    expect(find.byKey(const Key('ack-existing-duplicates')), findsNothing);
+    expect(service.commits, isEmpty);
+  });
+
   testWidgets('参加タイプ7集計と各行の結果を既存集計と併記する', (tester) async {
     const values = ['dog', 'cat', 'dog_cat', 'talk', 'dog_talk', 'cat_talk', 'dog_cat_talk'];
     const labels = ['① 犬のみ', '② 猫のみ', '③ 犬＋猫', '④ トークショーのみ', '⑤ 犬＋トークショー', '⑥ 猫＋トークショー', '⑦ 犬＋猫＋トークショー'];
@@ -655,7 +751,7 @@ void main() {
         expect(service.commits.single.approved, [20]);
         expect(find.byKey(const Key('result-committed')), findsOneWidget);
         expect(find.text('取込完了'), findsOneWidget);
-        expect(find.text('作成した参加者'), findsOneWidget);
+        expect(find.text('新規登録'), findsOneWidget);
         expect(find.text('4件'), findsWidgets);
         expect(find.textContaining('batch識別情報'), findsOneWidget);
         expect(find.textContaining('メールは送信されていません'), findsOneWidget);

@@ -187,6 +187,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   /// 修正 (行番号, 列) → 値 / 今回の取込から除外 行番号 → 理由。
   final Map<(int, String), String> corrections = {};
   final Map<int, String> exclusions = {};
+  final Map<int, Map<String, dynamic>> identityDecisions = {};
 
   /// 警告の許可: (行番号, 種類) → 許可したときの許可の鍵(検証が返した値)。種類は確認が必要な行(review)・
   /// 既存参加者とのメール重複(existingDuplicate)・CSV内のメール重複(csvDuplicate)。
@@ -235,6 +236,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   void _clearDecisions() {
     corrections.clear();
     exclusions.clear();
+    identityDecisions.clear();
     approvals.clear();
     editingRow = null;
   }
@@ -288,6 +290,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
   ImportDecisions get _decisions => ImportDecisions(
     corrections: Map.of(corrections),
     exclusions: Map.of(exclusions),
+    identities: Map.of(identityDecisions),
   );
 
   // 取込profile(=列の対応)が変わったら、mappingを作り直し、検証・プレビューは無効にする(再検証が必要)。
@@ -414,6 +417,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       autoExcludeCancelled: tableHasCancelledRows(widget.profile, parsed),
       notificationType: type,
     );
+    if (parsed.headers.contains('id')) mapping!.externalIdColumn = 'id';
   }
 
   /// 通常当選を選んだのに、繰り上げリストらしいファイル(シート名が時間枠で、全行にキャンセル待ち希望枠がある)なら警告する。
@@ -731,12 +735,13 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     final v = validation;
     if (v == null) return (errors: 0, review: 0, warnings: 0);
     // 参考情報(不参加の残存人数など)は数えない(許可は要らない)。
-    final warnings =
+    final warnings = v.identityRows.isNotEmpty ? 0 :
         v.existingDuplicateRowList.where((n) => !_isAllowed(n, _existingDuplicate)).length +
         v.csvDuplicateRowList.where((n) => !_isAllowed(n, _csvDuplicate)).length;
     return (
       errors: v.pendingErrorRows.isNotEmpty ? v.pendingErrorRows.length : v.errorCount,
-      review: v.pendingReviewRows.where((n) => !_isAllowed(n, _review)).length,
+      review: {...v.pendingReviewRows.where((n) => !_isAllowed(n, _review)),
+        ...v.identityRows.where((r) => r['action'] == 'review').map((r) => r['sourceRowNumber'])}.length,
       warnings: warnings,
     );
   }
@@ -746,7 +751,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     final v = validation;
     if (v == null || validating || validatedFingerprint == null) return false;
     final u = _unresolved;
-    if (u.errors > 0 || u.review > 0 || u.warnings > 0) return false;
+    if (v.identityRows.any((r) => r['action'] == 'review')) return false;
+    if (u.errors > 0 || u.review > 0 || (v.identityRows.isEmpty && u.warnings > 0)) return false;
     if (v.alreadyImported && !ackNewImport) return false;
     return true;
   }
@@ -765,7 +771,12 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     if (!_validationPassed) return;
     final ImportRequest request;
     try {
-      request = _buildRequest(newImportSequence: _newImportSequence);
+      final built = _buildRequest(newImportSequence: _newImportSequence);
+      final retryId = _newImportSequence == null ? validation?.reimportBatchId : null;
+      request = retryId == null ? built : ImportRequest(
+        json: {...built.json, 'clientRequestId': retryId}, fileName: built.fileName,
+        batchId: retryId, totalRecords: built.totalRecords,
+      );
     } on CsvParseException catch (e) {
       setState(() => previewError = e.message);
       return;
@@ -837,6 +848,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       // 今回の取込から除外した行は数えない。人数は修正後の最終的な値で数える。
       if (r.excluded || !include(r)) continue;
       if (!r.programIds.contains(g.programId)) continue;
+      final identityRow = preview?.identityRows.where((x) => x['sourceRowNumber'] == r.sourceRowNumber).firstOrNull;
+      if (identityRow != null && !(identityRow['additions'] as List? ?? []).contains(g.programId)) continue;
       participants += 1;
       headcount += waitlistCounts != null
           ? (waitlist!.programId == g.programId ? waitlistCounts[r.sourceRowNumber] ?? 0 : 0)
@@ -872,6 +885,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       !busy &&
       preview != null &&
       previewedRequest != null &&
+      !preview!.identityRows.any((r) => r['action'] == 'review' || r['action'] == 'error') &&
       result?.committed != true &&
       _importCount > 0;
 
@@ -897,6 +911,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
               if (sheet?.name != null) _confirmRow('シート', sheet!.name!),
               _confirmRow('総行数', '${p.totalRecords}行'),
               _confirmRow('取込予定', '$_importCount件'),
+              ..._identitySummary(p.identityRows),
               _confirmRow('修正した行', '${corrections.keys.map((k) => k.$1).toSet().length}件'),
               _confirmRow('今回の取込から除外した行', '${exclusions.length}件(取り込まれません)'),
               for (final (i, line) in _allowedWarningLines.indexed)
@@ -918,7 +933,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
                   g.name,
                   '${_committingTotals(g).headcount}人 / ${_committingTotals(g).participants} participant',
                 ),
-              if (validation?.hasEmailDuplicates == true) ...[
+              if (validation?.hasEmailDuplicates == true && validation!.identityRows.isEmpty) ...[
                 const SizedBox(height: 10),
                 const Text(
                   '同じメールアドレスの参加者が複数、有効な参加者になります(別参加者として扱われます)。',
@@ -1004,9 +1019,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     final v = validation;
     if (v == null) return const [];
     return [
-      if (v.existingDuplicateRowList.isNotEmpty && ackExistingDuplicates)
+      if (v.identityRows.isEmpty && v.existingDuplicateRowList.isNotEmpty && ackExistingDuplicates)
         '既存参加者とのメール重複${v.existingDuplicateRowList.length}件を許可して、別参加者として取り込みます',
-      if (v.csvDuplicateRowList.isNotEmpty && ackCsvDuplicates)
+      if (v.identityRows.isEmpty && v.csvDuplicateRowList.isNotEmpty && ackCsvDuplicates)
         'ファイル内のメール重複${v.csvDuplicateRowList.length}件を許可して、別参加者として取り込みます',
       if (approved.isNotEmpty) '確認が必要な行${approved.length}件を許可して取り込みます',
     ];
@@ -1305,6 +1320,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           '注意: 「$column」はキャンセル待ちの列の可能性があります。当選者の取込に使う列か確認してください。',
           color: const Color(0xfffff1cf),
         ),
+      ..._identitySummary(p.identityRows),
       InfoRow('総行数', '${p.totalRecords}行'),
       InfoRow('空の行', '${p.blankRecordCount}行'),
       InfoRow('取込対象', '${ready.length}件'),
@@ -1570,7 +1586,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     }
   });
 
-  static const _shownProblemRows = 300;
+  int _shownProblemRows = 300;
   static const _excludeReason = '検証画面で管理者が除外';
 
   /// 種類ごとの一括処理(許可・今回の取込から除外)。
@@ -1608,7 +1624,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     final m = mapping!;
     // 問題のある行・修正した行・除外した行を表示する(正常で対処の無い行は操作不要)。
     final shown = v.rows
-        .where((r) => r.result != ValidationResult.ok || r.excluded || r.corrected ||
+        .where((r) => v.identityRows.any((x) => x['sourceRowNumber'] == r.sourceRowNumber) ||
+            r.result != ValidationResult.ok || r.excluded || r.corrected ||
             corrections.keys.any((k) => k.$1 == r.sourceRowNumber))
         .toList()
       ..sort((a, b) => a.sourceRowNumber - b.sourceRowNumber);
@@ -1630,6 +1647,10 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (_possibleMixup case final reason?) _mixupWarning(reason, const Key('validation-mixup')),
       _notificationSummary(v),
       InfoRow('総行数', '${v.totalRows}件(ファイル ${v.totalRecords}行・空の行${v.blankRecordCount}行を除く)', key: const Key('validation-total')),
+      ..._identitySummary(v.identityRows),
+      if (v.identityRows.any((r) => r['action'] == 'review' && r['bulkEligible'] == true))
+        OutlinedButton(key: const Key('confirm-new-applications'), onPressed: busy ? null : _confirmNewApplications,
+          child: Text('候補・矛盾のない${v.identityRows.where((r) => r['action'] == 'review' && r['bulkEligible'] == true).length}件を一括で新規申込と確認')),
       InfoRow('正常', '${v.okCount}件', key: const Key('validation-ok')),
       InfoRow('警告', '${v.warningCount}件', key: const Key('validation-warning')),
       InfoRow('エラー', '${v.errorCount}件', key: const Key('validation-error-count')),
@@ -1685,7 +1706,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       if (v.alreadyImported) ...[
         _notice(
           'このファイル(同じ内容・同じ列の対応)は、既に第${v.existingSequence ?? '?'}回として取り込まれています。'
-          'もう一度取り込む場合は、新しい取込回(第${v.nextImportSequence}回)として、別の参加者が作られます。'
+          'もう一度取り込む場合は、新しい取込回(第${v.nextImportSequence}回)として申込を照合します。確認済みの同じ資格は追加しません。'
           '第${v.existingSequence ?? '?'}回の参加者・送信履歴は変更されません。',
           color: warnColor,
           key: const Key('already-imported'),
@@ -1734,7 +1755,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           excludeKey: 'exclude-all-review',
           excludeLabel: '確認が必要な行',
         ),
-      if (v.hasEmailDuplicates)
+      if (v.identityRows.isEmpty && v.hasEmailDuplicates)
         _notice(
           [
             if (v.existingDuplicateRowList.isNotEmpty)
@@ -1747,7 +1768,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           color: warnColor,
           key: const Key('duplicate-caution'),
         ),
-      if (v.existingDuplicateRowList.isNotEmpty)
+      if (v.identityRows.isEmpty && v.existingDuplicateRowList.isNotEmpty)
         _bulkPanel(
           key: const Key('existing-duplicates-panel'),
           text: '既存参加者とのメール重複: ${v.existingDuplicateRowList.length}件',
@@ -1765,7 +1786,7 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
           excludeKey: 'exclude-all-existing-duplicates',
           excludeLabel: '既存参加者とのメール重複',
         ),
-      if (v.csvDuplicateRowList.isNotEmpty)
+      if (v.identityRows.isEmpty && v.csvDuplicateRowList.isNotEmpty)
         _bulkPanel(
           key: const Key('csv-duplicates-panel'),
           text: 'ファイル内のメール重複: ${v.csvDuplicateRowList.length}件',
@@ -1800,7 +1821,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         ),
         for (final r in shown.take(_shownProblemRows)) _validationRow(v, m, r),
         if (shown.length > _shownProblemRows)
-          Text('ほか${shown.length - _shownProblemRows}件(ファイルを修正して再検証してください)'),
+          TextButton(onPressed: () => setState(() => _shownProblemRows += 300),
+            child: Text('残り${shown.length - _shownProblemRows}件から、次の300件を表示')),
       ],
     ]);
   }
@@ -1863,6 +1885,131 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
     );
   }
 
+  List<Widget> _identitySummary(List<Map<String, dynamic>> rows) => [
+    for (final entry in const {'created': '新規登録', 'added': '既存参加者への資格追加',
+      'unchanged': '変更なし', 'review': '確認待ち', 'error': 'エラー', 'excluded': '除外'}.entries)
+      if (rows.isNotEmpty) InfoRow(entry.value, '${rows.where((r) => r['action'] == entry.key).length}件'),
+  ];
+
+  Widget _identityRow(Map<String, dynamic> row) {
+    const labels = {'created': '新規登録', 'added': '既存参加者への資格追加', 'unchanged': '変更なし',
+      'review': '確認待ち', 'error': 'エラー', 'excluded': '除外'};
+    final input = row['input'] is Map ? row['input'] as Map : const {};
+    final candidates = row['candidates'] is List ? row['candidates'] as List : const [];
+    final programs = row['programs'] is List ? row['programs'] as List : const [];
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('申込照合: ${labels[row['action']] ?? row['action']}'),
+      Text('申込ID: ${input['sourceReference'] ?? 'なし'}　申込日時: ${input['sourceRegisteredAt'] ?? 'なし'}'),
+      for (final a in programs)
+        Text('${event?.programs.where((p) => p.programId == a['programId']).firstOrNull?.name ?? a['programId']}　${a['timeText'] ?? a['slotLabel'] ?? ''}　${a['plannedCount']}人'),
+      if (row['action'] == 'review') ...[
+        Text(row['reason'] == 'abandoned-record-used'
+          ? '放棄済み取込回に送信・受付等の利用実績があります。既存QRと履歴を保護するため再登録を停止しています。管理者が履歴を確認し、この行を今回の取込から除外してください。'
+          : row['reason'] == 'qualification-conflict'
+          ? '既存資格と時間・人数が異なるか、資格が取消済みです。自動変更しません。原本を確認するか、この行を除外してください。'
+          : '候補は一致の確定ではありません。申込を確認して判断してください。'),
+        for (final c in candidates) ...[
+          Text('候補の申込日時: ${c['sourceRegisteredAt'] ?? 'なし'}'),
+          for (final a in (c['programs'] as List? ?? []))
+            Text('現在の資格: ${event?.programs.where((p) => p.programId == a['programId']).firstOrNull?.name ?? a['programId']} / ${a['timeText'] ?? a['slotLabel'] ?? ''} / ${a['plannedCount']}人'),
+          TextButton(onPressed: busy || row['reason'] == 'abandoned-record-used' ? null : () => _confirmIdentity(row, c['participantId'] as String),
+            child: Text('既存申込へ追加: ${c['name']} / ${c['email']} / ID ${c['sourceReference'] ?? 'なし'}')),
+        ],
+        TextButton(onPressed: busy || row['reason'] == 'abandoned-record-used' ? null : () => _confirmIdentity(row, null), child: const Text('別の新規申込と確認')),
+        TextButton(onPressed: busy || row['reason'] == 'abandoned-record-used' ? null : () => _confirmIdentity(row, '', selectId: true), child: const Text('参加者IDを指定して照合')),
+      ],
+    ]);
+  }
+
+  Future<void> _showImportRecovery() async {
+    final service = widget.service;
+    if (service is! ImportRecoveryService || event == null) return;
+    try {
+      final batches = await (service as ImportRecoveryService).getRecovery(event!.eventId);
+      if (!mounted) return;
+      await showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+        title: const Text('未完了の取込回'),
+        content: SizedBox(width: 600, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('再開する場合は同じファイル・同じ設定を選び直して取り込んでください。保存済み行は再登録せず、未保存分だけ処理します。放棄すると保存済みデータは削除されず、未完了の記録として保持されます。参加証・送信対象には公開されません。'),
+          if (batches.isEmpty) const Text('未完了の取込回はありません。'),
+          for (final b in batches) ExpansionTile(title: Text('第${b['sequence']}回 ${b['sourceFileName']} (${b['status']})'),
+            subtitle: Text('保存済み ${b['persistedCount']}行 / 未保存 ${b['pendingCount']}行'), children: [
+              if (b['failureReason'] != null) Text('停止理由: ${b['failureReason']}'),
+              if (b['abandonedReason'] != null) Text('放棄理由: ${b['abandonedReason']}'),
+              for (final row in b['rows'] as List? ?? []) Text('${row['sourceRowNumber']}行目: ${row['result']}（保存済み）'),
+              for (final n in b['pendingRows'] as List? ?? []) Text('$n行目: 未保存'),
+              if (b['status'] != 'abandoned') TextButton(onPressed: () async {
+                Navigator.pop(dialogContext);
+                await _abandonImport(b);
+              }, child: const Text('再開できない取込回を放棄')),
+            ]),
+        ]))), actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('閉じる'))],
+      ));
+    } on ImportException catch (e) {
+      if (mounted) setState(() => commitError = e.message);
+    }
+  }
+
+  Future<void> _abandonImport(Map<String, dynamic> batch) async {
+    var reason = '';
+    final accepted = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+      title: const Text('取込回を放棄'), content: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Text('保存済みの参加者・資格・履歴は削除しません。この取込回からのメール送信と再開はできなくなります。'),
+        TextField(maxLength: 200, onChanged: (v) => reason = v, decoration: const InputDecoration(labelText: '放棄理由（必須）')),
+      ]), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('戻る')),
+        TextButton(onPressed: () { if (reason.trim().isNotEmpty) Navigator.pop(context, true); }, child: const Text('放棄を確定'))],
+    ));
+    if (accepted != true || !mounted) return;
+    try {
+      await (widget.service as ImportRecoveryService).abandonImport(event!.eventId, batch, reason.trim());
+      if (mounted) setState(() { validation = null; preview = null; commitError = '取込回を放棄しました。次のファイルを選択できます。'; });
+    } on ImportException catch (e) {
+      if (mounted) setState(() => commitError = e.message);
+    }
+  }
+
+  Future<void> _confirmNewApplications() async {
+    final rows = validation!.identityRows.where((r) => r['action'] == 'review' && r['bulkEligible'] == true).toList();
+    var reason = '';
+    final accepted = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+      title: Text('${rows.length}件の新規申込を一括確認'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Text('申込ID・氏名・メール・申込日時が揃い、既存候補とファイル内の重複がない行だけが対象です。原本で新規申込であることを確認してください。例外行は個別確認のまま残ります。'),
+        TextField(onChanged: (value) => reason = value, maxLength: 200, decoration: const InputDecoration(labelText: '確認根拠（必須）')),
+      ]), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('戻る')),
+        TextButton(onPressed: () { if (reason.trim().isNotEmpty) Navigator.pop(context, true); }, child: const Text('一括確認して再検証'))],
+    ));
+    if (accepted != true || !mounted) return;
+    await _changeDecisions(() {
+      for (final row in rows) {
+        identityDecisions[(row['sourceRowNumber'] as num).toInt()] = {
+          'kind': 'new', 'mode': 'bulk', 'reason': reason.trim(), 'decisionKey': row['decisionKey'],
+        };
+      }
+    });
+  }
+
+  Future<void> _confirmIdentity(Map<String, dynamic> row, String? participantId, {bool selectId = false}) async {
+    var reason = '';
+    var target = '';
+    final accepted = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+      title: Text(participantId == null ? '新規申込の確認' : '既存申込との同一性確認'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Text('氏名やメールだけでは確定せず、原本などの確認根拠を記録してください。'),
+        if (selectId) TextField(onChanged: (value) => target = value, decoration: const InputDecoration(labelText: '既存の参加者ID')),
+        TextField(onChanged: (value) => reason = value, decoration: const InputDecoration(labelText: '確認根拠（必須・200文字以内）'), maxLength: 200),
+      ]),
+      actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('戻る')),
+        TextButton(onPressed: () { if (reason.trim().isNotEmpty && (!selectId || target.trim().isNotEmpty)) Navigator.pop(context, true); }, child: const Text('確認して再検証'))],
+    ));
+    final why = reason.trim(), id = selectId ? target.trim() : participantId;
+    if (accepted != true || !mounted) return;
+    await _changeDecisions(() { identityDecisions[(row['sourceRowNumber'] as num).toInt()] = {
+      'kind': id == null ? 'new' : 'existing', if (id != null) 'participantId': id,
+      'reason': why, 'decisionKey': row['decisionKey'],
+    }; });
+  }
+
   Widget _validationRow(ImportValidation v, ImportMapping m, ValidationRow r) {
     final n = r.sourceRowNumber;
     final rowCorrections = corrections.entries.where((e) => e.key.$1 == n).toList();
@@ -1891,6 +2038,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (v.identityRows.any((x) => x['sourceRowNumber'] == n))
+            _identityRow(v.identityRows.firstWhere((x) => x['sourceRowNumber'] == n)),
           Text('$n行目　$status', style: const TextStyle(fontWeight: FontWeight.bold)),
           SelectableText('${_cellAt(n, m.nameColumn)}　${_cellAt(n, m.emailColumn)}'),
           if (v.participationTypes.isNotEmpty && !r.excluded) Text(_typeLabel(r.participationType)),
@@ -2011,7 +2160,9 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
         'batch識別情報: ${r.batchId}',
         style: const TextStyle(fontSize: 12, color: Color(0xff5c6670)),
       ),
-      InfoRow('作成した参加者', '${r.createdCount}件'),
+      InfoRow('新規登録', '${r.createdCount}件'),
+      InfoRow('既存申込への資格追加', '${r.addedCount}件'),
+      InfoRow('変更なし', '${r.unchangedCount}件'),
       InfoRow('確認待ち(取り込んでいない)', '${r.reviewPendingCount}件'),
       InfoRow('エラー(取り込んでいない)', '${r.errorCount}件'),
       InfoRow('空の行', '${r.blankRecordCount}行'),
@@ -2060,6 +2211,8 @@ class _ConfirmedImportPageState extends State<ConfirmedImportPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (event != null && widget.service is ImportRecoveryService)
+            OutlinedButton(key: const Key('import-recovery'), onPressed: busy ? null : _showImportRecovery, child: const Text('未完了の取込回を確認・復旧')),
           _section('取り込み先のイベント', [
             if (loadingEvent)
               const Padding(

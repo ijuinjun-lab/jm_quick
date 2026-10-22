@@ -40,7 +40,7 @@ const LEASE_EXPIRED_AFTER_DISPATCH = "lease-expired-after-dispatch";
 const jobIdForBatch = (batchId) => `winner-${batchId}`;
 const jobIdForReminder = (eventId) => `reminder-${eventId}`;
 const typeOfJobId = (jobId) => (typeof jobId === "string" && jobId.startsWith("reminder-") ? TYPES.REMINDER : TYPES.WINNER);
-const deliveryIdFor = (participantId, type = TYPE) => `${participantId}_${type}`;
+const deliveryIdFor = (participantId, type = TYPE, grantBatchId = null) => `${participantId}_${type}${grantBatchId ? `_${grantBatchId}` : ""}`;
 const toMillis = (value) => (value && typeof value.toMillis === "function" ? value.toMillis() : value instanceof Date ? value.getTime() : Number(value) || 0);
 
 async function runPool(items, limit, task) {
@@ -62,7 +62,17 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
   const kindFor = (type) => mailKinds[type] || {composeMail, buildMessage};
   const jobRef = (db, jobId) => db.collection("sendJobs").doc(jobId);
   const itemRef = (db, jobId, participantId) => jobRef(db, jobId).collection("items").doc(participantId);
-  const deliveryRef = (db, participantId, type = TYPE) => db.collection("mailDeliveries").doc(deliveryIdFor(participantId, type));
+  const deliveryRef = (db, participantId, type = TYPE, grantBatchId = null) => db.collection("mailDeliveries").doc(deliveryIdFor(participantId, type, grantBatchId));
+  const deliveryForGrant = async (db, participantId, type, grantBatchId) => {
+    if (!grantBatchId) return deliveryRef(db, participantId, type);
+    const grant = await db.collection("qualificationGrants").doc(`${grantBatchId}-${participantId}`).get();
+    if (!grant.exists || typeof grant.data().deliveryId !== "string") throw new ApiError("failed-precondition", "通知の正本がありません。", {code: "grant-missing"});
+    return db.collection("mailDeliveries").doc(grant.data().deliveryId);
+  };
+  const deliveryForJob = async (db, jobId, participantId) => {
+    const job = (await jobRef(db, jobId).get()).data();
+    return deliveryForGrant(db, participantId, typeOfJobId(jobId), job?.snapshot?.grantBatchId || null);
+  };
 
   async function countItems(db, jobId, status) {
     const result = await jobRef(db, jobId).collection("items").where("status", "==", status).count().get();
@@ -94,12 +104,21 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
     if (batch.status !== "committed") {
       throw new ApiError("failed-precondition", "取込が完了(committed)していない取込回には、送信ジョブを作成できません。", {code: "batch-not-committed", status: batch.status});
     }
-    const participants = (await db.collection("participants").where("importBatchId", "==", batchId).get()).docs;
+    let participants;
+    if (batch.identityVersion) {
+      const grants = (await db.collection("qualificationGrants").where("batchId", "==", batchId).get()).docs;
+      if (grants.some((g) => g.data().eventId !== eventId) || grants.length !== batch.notificationTargetCount) {
+        throw new ApiError("data-loss", "追加資格の通知件数が一致しません。", {code: "grants-mismatch"});
+      }
+      participants = grants.length ? await db.getAll(...grants.map((g) => db.collection("participants").doc(g.data().participantId))) : [];
+      if (participants.some((p) => !p.exists)) throw new ApiError("data-loss", "通知先がありません。", {code: "participants-mismatch", createdCount: batch.notificationTargetCount, found: participants.filter((p) => p.exists).length});
+      snapshot = {...snapshot, grantBatchId: batchId};
+    } else participants = (await db.collection("participants").where("importBatchId", "==", batchId).get()).docs;
     if (participants.some((doc) => doc.data().eventId !== eventId)) {
       throw new ApiError("failed-precondition", "取込回の参加者にこのイベントのものでないデータがあります。", {code: "participant-event-mismatch"});
     }
     // 保存則: batchのcreated数と、実在する参加者数が一致すること(欠落があれば作成しない)。
-    if (participants.length !== batch.createdCount) {
+    if (participants.length !== (batch.identityVersion ? batch.notificationTargetCount : batch.createdCount)) {
       throw new ApiError("data-loss", "取込回の参加者数が、取込結果の件数と一致しません。ジョブを作成しませんでした。",
         {code: "participants-mismatch", createdCount: batch.createdCount, found: participants.length});
     }
@@ -149,7 +168,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       // 各参加者の item と delivery を、1トランザクションで冪等に作る(再実行しても増えない・上書きしない)。
       await runPool(targets, concurrency, async (participantId) => {
         const iRef = itemRef(db, jobId, participantId);
-        const dRef = deliveryRef(db, participantId, type);
+        const dRef = await deliveryForGrant(db, participantId, type, snapshot.grantBatchId || null);
         await db.runTransaction(async (tx) => {
           const [itemSnap, deliverySnap] = await tx.getAll(iRef, dRef);
           if (itemSnap.exists) return;
@@ -191,7 +210,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
   // claim: pending、またはlease期限切れで「dispatch前」のsendingだけを取得できる。
   async function claimItem({db, jobId, participantId}) {
     const iRef = itemRef(db, jobId, participantId);
-    const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
+    const dRef = await deliveryForJob(db, jobId, participantId);
     return db.runTransaction(async (tx) => {
       const [deliverySnap, itemSnap] = await tx.getAll(dRef, iRef);
       if (!deliverySnap.exists || !itemSnap.exists) throw new ApiError("failed-precondition", "配送記録が見つかりません。", {code: "delivery-missing"});
@@ -221,7 +240,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
 
   // dispatch開始の記録。これ以降に落ちた場合は「送ったかもしれない」ものとして扱う。claimが失われていれば false(送信しない)。
   async function startDispatch({db, jobId, participantId, claimId}) {
-    const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
+    const dRef = await deliveryForJob(db, jobId, participantId);
     const iRef = itemRef(db, jobId, participantId);
     return db.runTransaction(async (tx) => {
       const [deliverySnap] = await tx.getAll(dRef);
@@ -237,7 +256,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
   // 結果の書込み。claimIdが一致する場合だけ(他のworkerの結果を上書きしない)。
   // 「lease期限切れでunknownにされた後に、同じworkerの結果が遅れて届いた」場合は、その結果で確定できる。
   async function finishItem({db, jobId, participantId, claimId, outcome, messageId, errorCode}) {
-    const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
+    const dRef = await deliveryForJob(db, jobId, participantId);
     const iRef = itemRef(db, jobId, participantId);
     return db.runTransaction(async (tx) => {
       const [deliverySnap] = await tx.getAll(dRef);
@@ -341,7 +360,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
     let retried = 0;
     await runPool(failed.docs.map((doc) => doc.id), concurrency, async (participantId) => {
       const applied = await db.runTransaction(async (tx) => {
-        const dRef = deliveryRef(db, participantId, typeOfJobId(jobId));
+        const dRef = await deliveryForJob(db, jobId, participantId);
         const [deliverySnap, itemSnap] = await tx.getAll(dRef, itemRef(db, jobId, participantId));
         if (deliverySnap.data().status !== DELIVERY.FAILED || itemSnap.data().status !== DELIVERY.FAILED) return false;
         const reset = {status: DELIVERY.PENDING, leaseUntil: null, dispatchStartedAt: null, updatedAt: serverTimestamp()};

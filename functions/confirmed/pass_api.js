@@ -22,7 +22,7 @@ const {isConfirmedFlow} = require("../flow");
 const {isValidParticipantId, isValidProgramId, programAttendanceId, MAX_PLANNED_COUNT} = require("../programs");
 const {loadAttendances} = require("./winner_mail_message");
 const {receptionQrPayload, webPassUrl} = require("./pass_urls");
-const {toDate, formatEventDateTime, normalizePrograms, buildProgramItems} = require("./mail_view_model");
+const {toDate, formatEventDateTime, displayPrograms, normalizePrograms, buildProgramItems} = require("./mail_view_model");
 const {hebelResidenceView} = require("./hebel_residence");
 
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -144,7 +144,7 @@ function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, l
 
   // 参加者のprogram一覧(表示順・時間・plannedCountはメールと同じ規則)。attendanceの件数と表示件数の一致も確認する。
   function buildProgramList({event, eventId, participantId, attendances}) {
-    const built = buildProgramItems({programs: normalizePrograms(event.programs), attendances, eventId, participantId});
+    const built = buildProgramItems({programs: displayPrograms(eventId, event), attendances, eventId, participantId});
     if (built.problems.length > 0 || built.items.length !== attendances.length) return {problem: "program-data-invalid"};
     return {items: built.items};
   }
@@ -264,6 +264,11 @@ function createPassApi({getDb, serverTimestamp, getAppBaseUrl, checkRateLimit, l
       const attendance = dataOf(await tx.get(attendanceRef));
       if (context.problem) return {denied: context.problem};
       if (!attendance) return {denied: "attendance-missing"};
+      if (attendance.entitlementStatus === "revoked") return {denied: "qualification-revoked"};
+      if (attendance.identityVersion && attendance.importBatchId) {
+        const grantBatch = dataOf(await tx.get(batchRefOf(db, attendance.importBatchId)));
+        if (!grantBatch || grantBatch.status !== "committed") return {denied: "batch-not-committed"};
+      }
       if (attendance.eventId !== input.eventId || attendance.participantId !== input.participantId || attendance.programId !== input.programId) {
         return {denied: "attendance-mismatch"};
       }

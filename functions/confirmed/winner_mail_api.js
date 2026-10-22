@@ -198,7 +198,7 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
   // テンプレートは、参加者の取込回の通知種別で決める(送信と同じ)。notificationTypeを指定した場合だけ、その種別のテンプレートで表示する
   // (送信には影響しない。繰り上げの取込回が無い段階でも、繰り上げ当選メールの文面を確認できるようにするため)。
   async function preview({data}) {
-    const request = parseKeys(data, ["eventId", "participantId", "notificationType"]);
+    const request = parseKeys(data, ["eventId", "participantId", "notificationType", "batchId"]);
     if (!isValidParticipantId(request.participantId)) throw invalid("invalid-participant-id");
     const requestedType = parseNotificationType(request.notificationType);
     const db = getDb();
@@ -211,7 +211,8 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     if (participant.status !== "active") throw new ApiError("failed-precondition", "参加者は有効ではありません。", {code: "participant-not-active"});
     // 送信対象は「committedなimportBatch由来のparticipant」だけ。committing/failedのbatchの参加者はプレビューも対象外。
     if (typeof participant.importBatchId !== "string") throw new ApiError("failed-precondition", "取込由来の参加者ではありません。", {code: "participant-not-from-import"});
-    const batchSnapshot = await db.collection("importBatches").doc(participant.importBatchId).get();
+    if (request.batchId !== undefined && (typeof request.batchId !== "string" || !/^[A-Za-z0-9]{1,40}$/.test(request.batchId))) throw invalid("invalid-batch-id");
+    const batchSnapshot = await db.collection("importBatches").doc(request.batchId || participant.importBatchId).get();
     if (!batchSnapshot.exists || batchSnapshot.data().eventId !== request.eventId || batchSnapshot.data().status !== "committed") {
       throw new ApiError("failed-precondition", "取込が完了(committed)していないため、この参加者のメールはプレビューできません。", {code: "batch-not-committed"});
     }
@@ -219,6 +220,7 @@ function createWinnerMailApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
     const built = buildMailSnapshot(request.eventId, event, {templateField: templateFieldFor(notificationType)});
     if (!built.ok) return {ready: false, problems: built.problems};
 
+    if (batchSnapshot.data().identityVersion) built.snapshot.grantBatchId = request.batchId || participant.importBatchId;
     const rendered = await composeWinnerMailFor({
       db, snapshot: built.snapshot, participantId: request.participantId, participant, appBaseUrl: getAppBaseUrl(), generateQrPng,
     });

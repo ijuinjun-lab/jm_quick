@@ -47,7 +47,24 @@ abstract class ImportService {
   });
 }
 
-class CallableImportService implements ImportService {
+abstract class ImportRecoveryService {
+  Future<List<Map<String, dynamic>>> getRecovery(String eventId);
+  Future<void> abandonImport(String eventId, Map<String, dynamic> batch, String reason);
+}
+
+class CallableImportService implements ImportService, ImportRecoveryService {
+  @override
+  Future<List<Map<String, dynamic>>> getRecovery(String eventId) async {
+    final result = await _call('getConfirmedImportRecovery', {'eventId': eventId});
+    return [for (final b in result['batches'] as List? ?? []) Map<String, dynamic>.from(b as Map)];
+  }
+
+  @override
+  Future<void> abandonImport(String eventId, Map<String, dynamic> batch, String reason) async {
+    await _call('abandonConfirmedImport', {'eventId': eventId, 'batchId': batch['batchId'],
+      'expectedFingerprint': batch['fingerprint'], 'reason': reason});
+  }
+
   CallableImportService({
     required this.authClient,
     http.Client? httpClient,
@@ -178,6 +195,17 @@ class CallableImportService implements ImportService {
         'このイベントの既存の参加者とメールアドレスが同じ参加者が含まれています。検証からやり直し、重複を確認してください。',
     'csv-email-duplicates-unacknowledged':
         'ファイル内に同じメールアドレスの行があります。検証からやり直し、重複を確認してください。',
+    'identity-unconfirmed': '申込の同一性が未確認です。照合欄で確認するか、対象行を除外してください。',
+    'qualification-conflict': '既存資格の時間・人数が異なります。自動上書きはできません。',
+    'identity-already-linked': '確認済みの既存申込です。新しいQRは発行できません。',
+    'identity-link-conflict': '保存済みの対応関係と選択した参加者が異なります。原本を確認してください。',
+    'participant-unavailable': '選択した参加者を利用できません。状態と取込回を確認してください。',
+    'import-in-progress': '未完了の取込があります。「未完了の取込回を確認・復旧」から状態を確認し、同じファイルで再開するか、再開できない取込回を放棄してください。',
+    'batch-abandoned': 'この取込回は放棄済みのため再開できません。保存済みの記録は保持されています。',
+    'batch-not-abandonable': 'この取込回は放棄できません。状態を更新して確認してください。',
+    'bulk-identity-ineligible': '一括確認の条件を満たさない行があります。再検証し、候補や矛盾のある行は個別に確認してください。',
+    'grant-without-audit-row': '取込済みデータの欠落を検出したため停止しました。管理者へご連絡ください。',
+    'identity-plan-too-large': '照合情報が上限を超えています。ファイルを分割して検証してください。',
     'import-state-changed': '取込状況が変更されました。再度検証してください。',
     'validation-required': '検証が済んでいないため取り込めません。検証からやり直してください。',
     'import-has-errors': '未解決のエラーの行があるため取り込めません。検証画面で修正するか、今回の取込から除外してください。',

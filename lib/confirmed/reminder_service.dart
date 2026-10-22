@@ -20,6 +20,7 @@ class ReminderRecipient {
     this.excludedReason,
     this.duplicate = 'none',
     this.duplicateGroupSize = 1,
+    this.additionUnresolved = false,
   });
 
   factory ReminderRecipient.fromJson(Map<String, dynamic> json) => ReminderRecipient(
@@ -41,6 +42,7 @@ class ReminderRecipient {
     excludedReason: json['excludedReason'] as String?,
     duplicate: json['duplicate'] as String? ?? 'none',
     duplicateGroupSize: (json['duplicateGroupSize'] as num?)?.toInt() ?? 1,
+    additionUnresolved: json['additionUnresolved'] == true,
   );
 
   final String participantId;
@@ -61,6 +63,7 @@ class ReminderRecipient {
   /// メールアドレスの重複: none / shared-address / different-programs / undetermined / suspected-duplicate
   final String duplicate;
   final int duplicateGroupSize;
+  final bool additionUnresolved;
 
   String get notificationTypeLabel => notificationType == 'waitlistPromotion' ? '繰り上げ当選' : '通常当選';
 
@@ -288,7 +291,24 @@ class ReminderJobAdapter implements WinnerSendService {
       service.retryFailed(_eventOf(jobId));
 }
 
-class CallableReminderService implements ReminderService {
+abstract class ReminderRecoveryService {
+  Future<List<Map<String, dynamic>>> recoveryPreview(String eventId);
+  Future<void> confirmRecovery(String eventId, Map<String, dynamic> recipient, String reason);
+}
+
+class CallableReminderService implements ReminderService, ReminderRecoveryService {
+  @override
+  Future<List<Map<String, dynamic>>> recoveryPreview(String eventId) async {
+    final result = await _call('getConfirmedReminderRecovery', {'eventId': eventId});
+    return [for (final r in result['recipients'] as List? ?? []) Map<String, dynamic>.from(r as Map)];
+  }
+
+  @override
+  Future<void> confirmRecovery(String eventId, Map<String, dynamic> recipient, String reason) async {
+    await _call('confirmConfirmedReminderRecovery', {'eventId': eventId, 'participantId': recipient['participantId'],
+      'expectedFingerprint': recipient['fingerprint'], 'reason': reason});
+  }
+
   CallableReminderService({
     required this.authClient,
     http.Client? httpClient,
@@ -417,6 +437,9 @@ class CallableReminderService implements ReminderService {
   }
 
   static const _messages = {
+    'recovery-delivery-active': '配送処理中は復旧できません。処理が止まってから状態を更新して確認してください。',
+    'recovery-not-failed': 'この宛先は確実な未送信失敗ではないため、復旧できません。送信済み・結果不明は再送しません。',
+    'recovery-state-changed': '再確認の後に宛先・参加資格・配送状態が変わりました。復旧画面を開き直して確認してください。',
     'send-at-in-past': '送信予定日時が過去です。有効にすると直ちに送信されます。',
     'send-at-required': '自動送信を有効にするには、送信予定日時を設定してください。',
     'event-ended': 'イベントが終了しているため、実行できません。',

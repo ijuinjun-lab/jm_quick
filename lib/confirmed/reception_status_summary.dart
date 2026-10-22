@@ -21,7 +21,8 @@ import 'attendance_report_service.dart';
 enum ReceptionAttendanceState {
   attended('受付済み'),
   pending('未受付'),
-  absent('欠席');
+  absent('欠席'),
+  cancelled('資格取消');
 
   const ReceptionAttendanceState(this.label);
   final String label;
@@ -113,6 +114,8 @@ class ReceptionStatusRow {
     this.state = ReceptionAttendanceState.pending,
     this.endAt,
     this.timeText,
+    this.notificationType,
+    this.revoked = false,
     this.plannedCount,
     this.attendedCount,
     this.checkedInAt,
@@ -132,6 +135,8 @@ class ReceptionStatusRow {
   /// 参加者のHEBEL属性(3分類。同じ参加者の行はすべて同じ)。
   final ReceptionHebelGroup hebel;
   final String? timeText;
+  final String? notificationType;
+  final bool revoked;
   final int? plannedCount;
 
   /// 受付済み(取消済みはfalse)。
@@ -368,10 +373,13 @@ ReceptionStatus buildReceptionStatus(
           programIndex: index ?? report.programs.length,
           order: rows.length,
           timeText: time == null || time.isEmpty ? null : time,
-          plannedCount: e.plannedCount,
+          plannedCount: e.revoked ? 0 : e.plannedCount,
+          notificationType: e.notificationType,
+          revoked: e.revoked,
           checkedIn: e.checkedIn,
           hebel: hebel,
-          state: attendanceStateOf(checkedIn: e.checkedIn, endAt: endAt, judgedAt: judgedAt),
+          state: e.revoked && !e.checkedIn ? ReceptionAttendanceState.cancelled :
+            attendanceStateOf(checkedIn: e.checkedIn, endAt: endAt, judgedAt: judgedAt),
           endAt: endAt,
           attendedCount: e.checkedIn ? e.attendedCount : null,
           checkedInAt: e.checkedIn ? e.checkedInAt : null,
@@ -379,7 +387,8 @@ ReceptionStatus buildReceptionStatus(
       );
     }
     // 参加者単位の欠席: 受付が無く、申し込んだ全programが欠席(終了済み)
-    if (rows.sublist(firstRow).every((r) => r.state == ReceptionAttendanceState.absent)) {
+    final currentRows = rows.sublist(firstRow).where((r) => !r.revoked || r.checkedIn).toList();
+    if (currentRows.isNotEmpty && currentRows.every((r) => r.state == ReceptionAttendanceState.absent)) {
       absentApplications += 1;
       hebelAbsent[hebel] = hebelAbsent[hebel]! + 1;
     }
@@ -396,7 +405,7 @@ ReceptionStatus buildReceptionStatus(
       (id, id, false),
   ];
   for (final (programId, name, inEvent) in known) {
-    final ofProgram = rows.where((r) => r.programId == programId).toList();
+    final ofProgram = rows.where((r) => r.programId == programId && (!r.revoked || r.checkedIn)).toList();
     final bySlot = <String, List<ReceptionStatusRow>>{};
     for (final r in ofProgram) {
       bySlot.putIfAbsent(r.timeText ?? noSlotLabel, () => []).add(r);

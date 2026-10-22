@@ -143,11 +143,15 @@ class AttendanceReportEntry {
     this.timeText,
     this.attendedCount,
     this.checkedInAt,
+    this.notificationType,
+    this.entitlementStatus = 'active',
   });
 
   factory AttendanceReportEntry.fromJson(Map<String, dynamic> json) =>
       AttendanceReportEntry(
         programId: json['programId'] as String,
+        notificationType: json['notificationType'] as String?,
+        entitlementStatus: json['entitlementStatus'] as String? ?? 'active',
         plannedCount: (json['plannedCount'] as num?)?.toInt(),
         timeText: json['timeText'] as String?,
         checkedIn: json['checkedIn'] == true,
@@ -158,6 +162,9 @@ class AttendanceReportEntry {
       );
 
   final String programId;
+  final String? notificationType;
+  final String entitlementStatus;
+  bool get revoked => entitlementStatus == 'revoked';
   final int? plannedCount;
   final String? timeText;
 

@@ -10,7 +10,7 @@ const {after, before, beforeEach, describe, test} = require("node:test");
 const {skipReason, startAdminEmulator} = require("../test_support/emulator_admin");
 const {loadIndex} = require("../test_support/load_index");
 const {buildImportRequest} = require("../test_support/import_request_builder");
-const {validatedCommitRun} = require("../test_support/validated_commit");
+const {validatedCommitRun, validatedData} = require("../test_support/validated_commit");
 const {assignmentDocId} = require("../event_access");
 const normalPreset = require("../confirmed/sippo_mail_preset");
 const waitlistPreset = require("../confirmed/sippo_waitlist_mail_preset");
@@ -191,16 +191,14 @@ describe("通常当選/キャンセル待ち繰り上げ当選(Emulator + 実際
     assert.equal((await db.collection("importBatches").get()).size, 0, "何も書かない");
     assert.equal((await db.collection("participants").get()).size, 0);
     // 1枚のファイルとして検証した内容は、そのまま確定できる(正常系)
-    const ok = await index.commitConfirmedImport.run(as("u-admin", base));
+    const ok = await commit(single);
     assert.equal(ok.batchId, "bsingle");
   });
 
   test("二重・並列のcommit: 同じ内容は1回だけ取り込まれる(参加者は増えない)", async () => {
     const data = req([rec(1, "提出なし", {wait: DOG_ALL, waitN: "2名"}), rec(2, "提出なし", {wait: DOG_ALL, waitN: "1名"})],
       {clientRequestId: "bconc", waitlist: true});
-    const v = await index.validateConfirmedImport.run(as("u-admin", data));
-    const full = {...data, expectedImportSequence: v.expectedImportSequence, validationFingerprint: v.validationFingerprint,
-      approvalKeys: v.rows.flatMap((r) => Object.values(r.approvalKeys || {}))};
+    const full = await validatedData((r) => index.validateConfirmedImport.run(r), as("u-admin", data));
     const results = await Promise.allSettled([1, 2, 3].map(() => index.commitConfirmedImport.run(as("u-admin", full))));
     assert.ok(results.some((r) => r.status === "fulfilled"));
     const again = await index.commitConfirmedImport.run(as("u-admin", full));

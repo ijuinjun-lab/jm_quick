@@ -465,8 +465,8 @@ describe("前日リマインドの送信対象の安全確認(Emulator)", {skip:
       // 参加者N・受付記録M・当選メールの配送記録N(+イベント・取込回・ジョブ・認可など数件)
       console.log(`reads (participants=${N}, attendances=${attendanceCount}): settings=${settingsReads} preview=${previewReads} create=${createReads} job=${jobReads}`);
       assert.ok(settingsReads <= 2 * N + attendanceCount + 10, `settings ${settingsReads}`);
-      // プレビューは参加者数に比例しない(対象判定3件・イベント・その人の受付記録・認可など一定の件数だけ)
-      assert.ok(previewReads <= 15, `preview ${previewReads}(イベント全体を読まない)`);
+      // プレビューはイベント全件を読まない。追加通知・確定済み取込回の照合分も含む上限。
+      assert.ok(previewReads <= 24, `preview ${previewReads}(イベント全体を読まない)`);
       assert.ok(previewReads * 5 < settingsReads, "プレビューは設定画面(イベント全体)よりずっと少ない");
       assert.ok(createReads <= 2 * N + attendanceCount + 15, `create ${createReads}`);
     } finally {

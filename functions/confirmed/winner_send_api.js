@@ -179,7 +179,7 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
         // 通知種別(項目の無い既存の取込回は通常当選)と、送信に使うメール(件名・version)。テンプレートは選ばせない。
         notificationType: mail.notificationType, notificationTypeLabel: mail.label,
         mail: {subject: mail.subject, templateVersion: mail.templateVersion, ready: mail.ready, problems: mail.problems},
-        status: batch.status, importedCount: committed ? batch.createdCount : null, createdAt: iso(batch.createdAt),
+        status: batch.status, importedCount: committed ? (batch.identityVersion ? batch.notificationTargetCount : batch.createdCount) : null, createdAt: iso(batch.createdAt),
         targetCount: null, excludedInactiveCount: null, consistent: null, previewParticipantId: null, job: null, canCreateJob: false, blockedReasons: [],
       };
       if (committed) {
@@ -194,6 +194,16 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
         // 送信前プレビュー用の参加者(このbatchの有効な参加者の先頭1人。IDのみ。氏名・メールは返さない)
         const first = await db.collection("participants").where("importBatchId", "==", batch.batchId).where("status", "==", "active").orderBy("__name__").limit(1).get();
         row.previewParticipantId = first.docs.length > 0 ? first.docs[0].id : null;
+        if (batch.identityVersion) {
+          const grants = (await db.collection("qualificationGrants").where("batchId", "==", batch.batchId).get()).docs;
+          const targets = grants.length ? await db.getAll(...grants.map((g) => db.collection("participants").doc(g.data().participantId))) : [];
+          const activeTargets = targets.filter((p) => p.exists && p.data().eventId === request.eventId && p.data().status === "active");
+          row.targetCount = activeTargets.length;
+          row.excludedInactiveCount = targets.length - activeTargets.length;
+          row.consistent = grants.length === batch.notificationTargetCount && grants.every((g) => g.data().eventId === request.eventId) &&
+            targets.every((p) => p.exists && p.data().eventId === request.eventId);
+          row.previewParticipantId = activeTargets[0]?.id || null;
+        }
       } else {
         row.blockedReasons.push("batch-not-committed");
       }

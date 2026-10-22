@@ -6,7 +6,7 @@
 //   - eventの内容は必ずサーバーで再読込する(存在・flow=confirmed・program定義)。クライアントが送ったeventの内容は使わない。
 //   - commitでは、preview結果も、クライアントが送る participant データも信用しない。mapping・headers・rowsから、
 //     サーバーがPhase 3の変換・検証をもう一度実行する(クライアントから受け取るのは元のCSVの値と、管理者の判断だけ)。
-// ■ validate・previewはFirestoreへ一切書き込まない(読み取りのみ)。レスポンスに氏名・メール・かな・自由記述を含めない。
+// ■ validate・previewは読み取り専用。担当管理者の照合欄だけに氏名・メール・申込情報を返し、QR秘密値は返さない。
 // ■ validate(取込前の検証)はpreview・commitと同じ計画(buildPlan)を使う。行の判定を別に作らない(import_validation.js)。
 // ■ 新しい取込回を作るcommitは、UIを信用せずサーバーだけで次を保証する(何か1つでも満たさなければ何も書かない):
 //   - 未解決のエラーの行が0件(error行を取込対象から外せるのは、管理者が明示的に「今回の取込から除外」した場合だけ)
@@ -15,13 +15,15 @@
 //   - 検証が返した expectedImportSequence が、採番と同じトランザクションの中の「現在の取込回の番号+1」と一致する
 //   - 検証の指紋(validationFingerprint)が、同じトランザクションの中で再計算した値と一致する
 //     (CSVの内容・列の対応・次の取込回の番号・既存の参加者/CSV内で重複している行が、検証時から変わっていない)
-//   - 既存の参加者とのメール重複・CSV内のメール重複は、それぞれ管理者の明示的な許可がある
-//   - 許可が必要な警告(確認が必要な行・メール重複)はすべて、現在の検証結果の許可の鍵(approvalKeys)で許可されている
+//   - 新規申込・既存申込の対応関係は管理者の確認済み。未確認の申込は登録しない。
+//   - 行の入力警告(review)は、現在の検証結果の許可の鍵(approvalKeys)で許可されている
 //     (行を修正した・重複相手が変わった等で鍵が変わった警告は、古い許可では取り込めない。改めて許可が必要)
 //   1つの取込回の番号につき作られる取込回は1つだけ(番号はeventのカウンタをトランザクションで進める)。
 //   既存の取込回の再送(冪等な再実行・続きからの完了)には適用しない(その取込回の作成時点で判断済みのため)。
 // ■ メールは一切送らない。
 
+const {resolveReimport} = require("./abandoned_imports");
+const {encodePlan, prepareIdentity, fail: identityFailure} = require("./application_identity");
 const {ApiError} = require("./api_error");
 const {validateImportMapping} = require("./import_mapping");
 const {isConfirmedFlow} = require("../flow");
@@ -111,15 +113,18 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
   async function validate({data}) {
     const request = parseImportRequest(data, {commit: false});
     const db = getDb();
+    const reimportBatchId = await resolveReimport(db, request);
     const context = await loadConfirmedEvent(db, request.eventId, request.normalizedMapping);
     const plan = buildPlan(request, context);
+    const identityPlan = await prepareIdentity(db, request, plan, context.event);
+    request.identityStateFingerprint = identityPlan.fingerprint;
     const [existing, eventSnap, participantsSnap, batchesSnap] = await Promise.all([
       db.collection("importBatches").doc(request.batchId).get(),
       db.collection("events").doc(request.eventId).get(),
       activeParticipantsQuery(db, request.eventId).get(),
       eventBatchesQuery(db, request.eventId).get(),
     ]);
-    const state = {participants: dataOf(participantsSnap), batches: batchesOf(batchesSnap)};
+    const state = {participants: dataOf(participantsSnap).filter((p) => !(identityPlan.ignoredParticipantIds || []).includes(p.participantId)), batches: batchesOf(batchesSnap)};
     const resuming = existing.exists && existing.data().eventId === request.eventId && existing.data().status !== "committed";
     const excludeBatchId = resuming ? request.batchId : null;
     const existingHashes = existingEmailHashes({eventId: request.eventId, ...state, excludeBatchId});
@@ -129,6 +134,9 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
     const expectedImportSequence = (eventSnap.data().importSequence || 0) + 1;
     const batches = [...state.batches].sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
     return {
+      ...(reimportBatchId ? {reimportBatchId} : {}),
+      identityRows: identityPlan.rows,
+      identityPendingCount: identityPlan.rows.filter((r) => r.action === "review").length,
       batchId: request.batchId,
       eventId: request.eventId,
       totalRecords: plan.batch.totalRecords,
@@ -157,8 +165,11 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
   async function preview({data}) {
     const request = parseImportRequest(data, {commit: false});
     const db = getDb();
+    const reimportBatchId = await resolveReimport(db, request);
     const context = await loadConfirmedEvent(db, request.eventId, request.normalizedMapping);
     const plan = buildPlan(request, context);
+    const identityPlan = await prepareIdentity(db, request, plan, context.event);
+    request.identityStateFingerprint = identityPlan.fingerprint;
     const [existing, sameFile] = await Promise.all([
       db.collection("importBatches").doc(request.batchId).get(),
       db.collection("importBatches").where("eventId", "==", request.eventId).where("fileHash", "==", request.fileHash)
@@ -168,6 +179,9 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
     const excluded = excludedSetOf(request);
     const corrected = correctedSetOf(request);
     return {
+      ...(reimportBatchId ? {reimportBatchId} : {}),
+      identityRows: identityPlan.rows,
+      identityPendingCount: identityPlan.rows.filter((r) => r.action === "review").length,
       batchId: request.batchId,
       eventId: request.eventId,
       mappingVersion: batch.mappingVersion,
@@ -217,8 +231,14 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
     const context = await loadConfirmedEvent(db, request.eventId, request.normalizedMapping);
     // previewの結果は使わず、ここでもう一度、サーバー側で変換・検証する。
     const plan = buildPlan(request, context);
+    const identityPlan = await prepareIdentity(db, request, plan, context.event);
+    request.identityStateFingerprint = identityPlan.fingerprint;
     const {eventId} = request;
     // 管理者の判断(承認・除外)の矛盾は、従来どおり先にinvalid-argumentで拒否する。
+    const existingBatch = await db.collection("importBatches").doc(request.batchId).get();
+    if (existingBatch.exists && !existingBatch.data().identityPlan) {
+      for (const r of plan.records) delete r.identity; // legacy batch replay only
+    }
     const items = resolveRecords(plan, request);
     const excluded = excludedSetOf(request);
     const approved = new Set(request.approvedReviewRows);
@@ -243,7 +263,7 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
     }
     // 採番と同じトランザクションの中で、検証時の状態(次の取込回の番号・取り込む内容(修正・除外を含む)・重複している行)を
     // 最新の状態で再計算して照合する。同時に別の取込が確定していれば番号か指紋が変わるため、勝手に次の回として取り込まず、再検証を求める。
-    const participants = dataOf(await activeParticipantsQuery(db, eventId).get());
+    const participants = dataOf(await activeParticipantsQuery(db, eventId).get()).filter((p) => !(identityPlan.ignoredParticipantIds || []).includes(p.participantId));
     const allowed = new Map(); // 行番号 → 許可した警告(監査用)
     const allow = (rows, code) => rows.forEach((n) => allowed.set(n, [...(allowed.get(n) || []), code]));
     const recordAllowed = (dup) => {
@@ -257,26 +277,29 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       batches: batchesOf(await eventBatchesQuery(db, eventId).get()), excludeBatchId: request.batchId})}));
     const guardNewBatch = async (tx, {sequence}) => {
       if (request.expectedImportSequence !== sequence) throw stale();
+      const currentEvent = (await tx.get(db.collection("events").doc(eventId))).data();
+      if (currentEvent.activeImportBatch && currentEvent.activeImportBatch !== request.batchId) throw identityFailure("import-in-progress");
+      // Transactionally reread identity material. Event lock serializes all import allocations.
+      const reader = {collection: (name) => {
+        const wrap = (q) => ({where: (...args) => wrap(q.where(...args)), doc: (id) => ({get: () => tx.get(q.doc(id))}), get: () => tx.get(q)});
+        return wrap(db.collection(name));
+      }};
+      const checked = await prepareIdentity(reader, request, plan, currentEvent);
+      if (checked.fingerprint !== identityPlan.fingerprint) throw stale();
       const state = {participants, batches: batchesOf(await tx.get(eventBatchesQuery(db, eventId)))};
+      if ([...state.batches.values()].some((b) => ["committing", "failed"].includes(b.status))) throw identityFailure("import-in-progress");
       const dup = duplicateRows({eventId, records: plan.records, existingHashes: existingEmailHashes({eventId, ...state}), excluded});
       const fingerprint = fingerprintOf({
         request, expectedImportSequence: sequence, existingDuplicateRows: dup.existingDuplicateRows, csvDuplicateRows: dup.csvDuplicateRows,
       });
       if (fingerprint !== request.validationFingerprint) throw stale();
-      if (dup.existingDuplicateRows.length > 0 && !request.acknowledgeExistingEmailDuplicates) {
-        throw new ApiError("failed-precondition", "このイベントの既存の参加者とメールアドレスが同じ参加者が含まれています。検証画面で重複を確認し、別参加者として取り込むことを選んでください。",
-          {code: "existing-email-duplicates-unacknowledged", count: dup.existingDuplicateRows.length});
-      }
-      if (dup.csvDuplicateRows.length > 0 && !request.acknowledgeCsvEmailDuplicates) {
-        throw new ApiError("failed-precondition", "CSV内に同じメールアドレスの行があります。検証画面で重複を確認し、別参加者として取り込むことを選んでください。",
-          {code: "csv-email-duplicates-unacknowledged", count: dup.csvDuplicateRows.length});
-      }
+      if (checked.rows.some((r) => r.action === "review")) throw identityFailure("identity-unconfirmed");
       // 許可した警告が、現在の検証結果の警告と一致すること(行番号ではなく、行の最終的な値と警告の内容から作る鍵で照合する)。
       const approvedKeys = new Set(request.approvalKeys);
       const outdated = [];
       for (const [n, keys] of approvalKeysOf({eventId, records: plan.records, planRows: toPlanRows(request), dup, excluded})) {
         // 鍵があるのは、今回の取込から除外していない行の、許可が必要な警告だけ(未許可のreviewは上で拒否済み)。
-        if (Object.values(keys).some((key) => !approvedKeys.has(key))) outdated.push(n);
+        if ((keys.review && !approvedKeys.has(keys.review))) outdated.push(n);
       }
       if (outdated.length > 0) {
         throw new ApiError("failed-precondition", "許可した後に内容が変わった警告があります。検証画面で改めて確認し、許可してください。",
@@ -285,6 +308,8 @@ function createImportApi({getDb, serverTimestamp, generatePublicId, concurrency}
       recordAllowed(dup);
       // 取込中に別の取込が同じメールを作らないかの確認用(メールそのものではなくハッシュ。importBatchesはクライアントから読めない)。
       return {
+        identityVersion: 1, identityFingerprint: identityPlan.fingerprint,
+        identityPlan: encodePlan(plan.records.map((r) => r.identity), request.identityDecisions),
         createdEmailHashes: createdEmailHashes(eventId, items),
         correctedRowCount: correctedSetOf(request).size,
         // 通知種別は取込回の作成時に1回だけ保存する(以後変更するAPIは無い)。送信ジョブはこの値でメールを決める。

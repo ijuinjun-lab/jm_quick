@@ -215,7 +215,7 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
     test("getSettings.previewParticipantId: cancelledな参加者・committedでないbatch由来は選ばれない", async () => {
       await importBatch("batchA", 2);
       await db.collection("participants").doc("batchA-000002").update({status: "cancelled"});
-      await importBatch("batchB", 2);
+      await importBatch("batchB", makeTable(2, (i) => ({"氏名": `別申込${i}`})));
       await db.collection("importBatches").doc("batchB").update({status: "committing"});
       const r = await mail.settings(asAdmin({eventId: "event1"}));
       assert.equal(r.previewParticipantId, "batchA-000003", "cancelledとcommitting由来は飛ばす");
@@ -426,11 +426,9 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
       const first = await create("batchA");
       assert.equal(first.targetCount, 10);
       assert.equal(await count("mailDeliveries"), 10, "第1回のジョブは第1回の参加者だけ");
-      const second = await create("batchB");
-      assert.equal(second.targetCount, 10);
-      assert.equal(await count("mailDeliveries"), 20);
-      const firstItems = new Set((await jobItems("winner-batchA")).map((d) => d.id));
-      for (const d of await jobItems("winner-batchB")) assert.ok(!firstItems.has(d.id));
+      await assert.rejects(create("batchB"), (e) => e.details.code === "no-targets");
+      assert.equal(await count("mailDeliveries"), 10);
+      assert.equal(await count("participants"), 10);
     });
 
     test("参加者が欠けていれば(取込結果の件数と不一致)、ジョブを作成しない", async () => {
@@ -495,7 +493,7 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
       await send.process(asAdmin({jobId: "winner-batchA"}));
       assert.deepEqual((await docs("participants")).map((d) => [d.id, JSON.stringify(d.data())]), before, "participantsは送信で一切変更されない");
       assert.equal(await count("mailJobs"), 0);
-      assert.deepEqual(await collections(), ["accessRoles", "events", "importBatches", "mailDeliveries", "participants", "programAttendances", "sendJobs"]);
+      assert.deepEqual(await collections(), ["accessRoles", "applicationLinks", "events", "importBatches", "mailDeliveries", "participants", "programAttendances", "qualificationGrants", "sendJobs"]);
       for (const d of await docs("participants")) {
         for (const key of ["invitationSent", "invitationMailStatus", "winnerMailSent", "mailSent", "reconfirmationMailSent"]) assert.ok(!(key in d.data()), key);
       }
@@ -778,7 +776,7 @@ describe("当選メール(Emulator + 実Admin SDK + 偽transport)", {skip: skipR
 
     test("templateVersion固定: ジョブ作成後にテンプレートを変更しても、処理中のジョブは作成時の文章のまま。次のbatchは新しいversion", async () => {
       await importBatch("batchA", 6);
-      await importBatch("batchB", 6);
+      await importBatch("batchB", makeTable(6, (i) => ({"氏名": `別申込${i}`})));
       await create("batchA");
       await processJob("winner-batchA", {limit: 3});
       await mail.update(asAdmin({eventId: "event1", template: {...TEMPLATE, subject: "第2回用の新しい件名", introBody: "新しい冒頭文"}}));

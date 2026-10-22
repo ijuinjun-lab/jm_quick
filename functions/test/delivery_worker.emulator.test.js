@@ -509,7 +509,7 @@ describe("サーバー側の継続処理(Emulator + 実Admin SDK + 偽transport)
     test("1回のsweepで扱うジョブ数にも上限がある(maxJobsPerSweep)", async () => {
       makeApis({maxJobsPerSweep: 1});
       await importBatch("batchA", 3);
-      await importBatch("batchB", 3);
+      await importBatch("batchB", makeTable(3, (i) => ({rd: `other-${i}`})));
       await create("batchA");
       await create("batchB");
       await start("winner-batchA");

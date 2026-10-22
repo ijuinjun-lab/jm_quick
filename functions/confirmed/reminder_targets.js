@@ -62,8 +62,10 @@ function ineligibleReason(p, batchCommitted) {
 }
 
 // 参加者・取込回を読み、受付・参加証と同じ条件で振り分ける(共通の読み取り)。
-async function loadEligible(db, eventId) {
-  const participants = (await db.collection("participants").where("eventId", "==", eventId).get()).docs;
+async function loadEligible(db, eventId, participantId = null) {
+  const single = participantId ? await db.collection("participants").doc(participantId).get() : null;
+  const participants = participantId ? (single.exists && single.data().eventId === eventId ? [single] : []) :
+    (await db.collection("participants").where("eventId", "==", eventId).get()).docs;
   const batchIds = [];
   for (const doc of participants) {
     const id = doc.data().importBatchId;
@@ -115,21 +117,32 @@ function pairKind(a, b) {
 //   recipients: [{participantId, name, email, notificationType, programs:[{programId, name, timeText, plannedCount}],
 //                 winnerStatus, target, excludedReason, duplicate, duplicateGroupSize}](participantId昇順。対象外も含む)
 //   counts: {normal, waitlistPromotion}(送信対象のうち)/ blocked: {unknownWinnerMail, suspectedDuplicates} / fingerprint
-async function collectReminderRecipients(db, eventId, {event} = {}) {
+async function collectReminderRecipients(db, eventId, {event, participantId = null} = {}) {
   const loadedEvent = event || (await db.collection("events").doc(eventId).get()).data() || {};
-  const {participants, batches, eligible, excludedByReason} = await loadEligible(db, eventId);
+  const {participants, batches, eligible, excludedByReason} = await loadEligible(db, eventId, participantId);
   const deliveryRefs = eligible.map((doc) => db.collection("mailDeliveries").doc(`${doc.id}_winner`));
   const deliveries = [];
   for (let i = 0; i < deliveryRefs.length; i += GET_ALL_CHUNK) {
     const chunk = deliveryRefs.slice(i, i + GET_ALL_CHUNK);
     if (chunk.length > 0) deliveries.push(...(await db.getAll(...chunk)));
   }
+  const grants = (await db.collection("qualificationGrants").where(participantId ? "participantId" : "additionalEventId", "==", participantId || eventId).get()).docs.map((d) => d.data()).filter((g) => g.eventId === eventId && !g.initial);
+  const grantDeliveries = new Map();
+  for (const g of grants) {
+    const d = await db.collection("mailDeliveries").doc(g.deliveryId || `${g.participantId}_winner_${g.batchId}`).get();
+    grantDeliveries.set(`${g.batchId}-${g.participantId}`, d.exists ? d.data().status : "none");
+    if (!batches.has(g.batchId)) {
+      const b = await db.collection("importBatches").doc(g.batchId).get();
+      batches.set(g.batchId, b.exists ? b.data() : null);
+    }
+  }
   const eligibleIds = new Set(eligible.map((doc) => doc.id));
   const attendancesBy = new Map();
   if (eligible.length > 0) {
-    for (const doc of (await db.collection("programAttendances").where("eventId", "==", eventId).get()).docs) {
+    for (const doc of (await db.collection("programAttendances").where(participantId ? "participantId" : "eventId", "==", participantId || eventId).get()).docs) {
       const a = doc.data();
-      if (!eligibleIds.has(a.participantId)) continue;
+      if (a.eventId !== eventId || !eligibleIds.has(a.participantId) || a.entitlementStatus === "revoked") continue;
+      if (a.identityVersion && batches.get(a.importBatchId)?.status !== "committed") continue;
       if (!attendancesBy.has(a.participantId)) attendancesBy.set(a.participantId, []);
       attendancesBy.get(a.participantId).push(a);
     }
@@ -142,8 +155,20 @@ async function collectReminderRecipients(db, eventId, {event} = {}) {
   const recipients = eligible.map((doc, index) => {
     const p = doc.data();
     const delivery = deliveries[index] && deliveries[index].exists ? deliveries[index].data() : null;
-    const status = delivery && Object.values(WINNER_STATUS).includes(delivery.status) ? delivery.status : WINNER_STATUS.NONE;
+    let status = delivery && Object.values(WINNER_STATUS).includes(delivery.status) ? delivery.status : WINNER_STATUS.NONE;
     const batch = typeof p.importBatchId === "string" ? batches.get(p.importBatchId) : null;
+    const changes = grants.filter((g) => g.participantId === doc.id);
+    const changeStates = changes.map((g) => [g.batchId, grantDeliveries.get(`${g.batchId}-${doc.id}`), batches.get(g.batchId)?.status || "missing"]).sort();
+    const activeProgramIds = new Set((attendancesBy.get(doc.id) || []).map((a) => a.programId));
+    const additionUnresolved = changes.some((g) => {
+      const state = grantDeliveries.get(`${g.batchId}-${doc.id}`);
+      // Explicit qualification revocation resolves an entirely cancelled, definitely-unsent grant.
+      // Unknown deliveries remain a safety concern even after revocation.
+      if (batches.get(g.batchId)?.status === "abandoned") return ["unknown", "sending", "sent"].includes(state);
+      return state === "unknown" || batches.get(g.batchId)?.status !== "committed" || ((g.programIds || []).some((id) => activeProgramIds.has(id)) &&
+        (state !== "sent" || batches.get(g.batchId)?.status !== "committed"));
+    });
+    if (additionUnresolved) status = changeStates.some((x) => x[1] === "unknown") ? WINNER_STATUS.UNKNOWN : WINNER_STATUS.PENDING;
     const entries = (attendancesBy.get(doc.id) || [])
       .map((a) => {
         const program = programById.get(a.programId) || {};
@@ -160,7 +185,12 @@ async function collectReminderRecipients(db, eventId, {event} = {}) {
     return {
       participantId: doc.id, name: typeof p.name === "string" ? p.name : "", email: typeof p.email === "string" ? p.email : "",
       notificationType: notificationTypeOf(batch), programs: entries, winnerStatus: status,
-      target: status === WINNER_STATUS.SENT, excludedReason, duplicate: DUPLICATE.NONE, duplicateGroupSize: 1,
+      additionUnresolved, changeStates,
+      safetyFingerprint: crypto.createHash("sha256").update(JSON.stringify([
+        doc.id, p.status, p.name, normalizedEmail(p.email), p.publicId, status, changeStates,
+        (attendancesBy.get(doc.id) || []).map((a) => require("./application_identity").qualification(a)).sort(),
+      ])).digest("hex"),
+      target: status === WINNER_STATUS.SENT && entries.length > 0, excludedReason, duplicate: DUPLICATE.NONE, duplicateGroupSize: 1,
       emailKey: normalizedEmail(p.email), nameKey: normalizedText(p.name),
     };
   });
@@ -190,17 +220,19 @@ async function collectReminderRecipients(db, eventId, {event} = {}) {
   const counts = {normal: 0, waitlistPromotion: 0};
   for (const r of recipients) if (r.target) counts[r.notificationType === "waitlistPromotion" ? "waitlistPromotion" : "normal"] += 1;
   const blocked = {
-    unknownWinnerMail: recipients.filter((r) => r.winnerStatus === WINNER_STATUS.UNKNOWN).length,
+    unknownWinnerMail: recipients.filter((r) => r.winnerStatus === WINNER_STATUS.UNKNOWN || r.additionUnresolved).length,
     suspectedDuplicates: recipients.filter((r) => r.target && r.duplicate === DUPLICATE.SUSPECTED).length,
   };
   // 照合値: 送信内容・宛先に関わる値すべて(個人情報そのものは含めず、ハッシュだけ)
-  const fingerprint = crypto.createHash("sha256").update(JSON.stringify(recipients.map((r) => [
-    r.participantId, r.winnerStatus, r.emailKey, r.nameKey, r.name, r.notificationType,
-    r.programs.map((x) => [x.programId, x.name, x.timeText, x.plannedCount]),
-  ]))).digest("hex");
+  const configuration = [loadedEvent.winnerMailTemplate?.version || null, loadedEvent.waitlistWinnerMailTemplate?.version || null,
+    loadedEvent.reminderMailTemplate?.version || null, loadedEvent.confirmedMailSettings || null];
+  for (const r of recipients) r.fingerprint = crypto.createHash("sha256").update(JSON.stringify([configuration,
+    r.participantId, r.winnerStatus, r.changeStates, r.emailKey, r.nameKey, r.name, r.notificationType,
+    r.programs.map((x) => [x.programId, x.name, x.timeText, x.plannedCount])])).digest("hex");
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify(recipients.map((r) => r.fingerprint))).digest("hex");
   return {
     targets, excludedByReason: merged, excludedCount: participants.length - targets.length, totalParticipants: participants.length,
-    recipients: recipients.map(({emailKey, nameKey, ...rest}) => rest), counts, blocked, fingerprint,
+    recipients: recipients.map(({emailKey, nameKey, changeStates, ...rest}) => rest), counts, blocked, fingerprint,
   };
 }
 
@@ -218,8 +250,9 @@ async function isReminderTarget(db, eventId, participantId) {
   }
   const committed = () => Boolean(batch) && batch.eventId === eventId && batch.status === "committed";
   if (ineligibleReason(p, committed)) return {target: false, participant: p};
-  const delivery = await db.collection("mailDeliveries").doc(`${participantId}_winner`).get();
-  return {target: delivery.exists && delivery.data().status === WINNER_STATUS.SENT, participant: p};
+  const collected = await collectReminderRecipients(db, eventId, {participantId});
+  return {target: collected.targets.includes(participantId), participant: p};
+
 }
 
 module.exports = {PARTICIPANT_SCHEMA_VERSION, EXCLUDED, WINNER_STATUS, DUPLICATE, collectReminderTargets, collectReminderRecipients, isReminderTarget};

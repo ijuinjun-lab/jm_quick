@@ -64,7 +64,7 @@ describe("当選メール送信管理API(Emulator + 実Admin SDK + 偽transport)
   }
   const importApi = () => withValidatedCommit(createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()}));
   async function importBatch(clientRequestId, tableOrN = 3, extra = {}) {
-    const table = typeof tableOrN === "number" ? makeTable(tableOrN) : tableOrN;
+    const table = typeof tableOrN === "number" ? makeTable(tableOrN, (i) => ({rd: `${clientRequestId}-${i}`})) : tableOrN;
     // テスト用の取込(複数の取込回で同じ架空メールを使う)。既存参加者・CSV内のメール重複は、管理者が許可した取込として扱う。
     return importApi().commit({identity: {uid: "u-admin"}, data: {...buildImportRequest({table, clientRequestId, ...extra}), acknowledgeExistingEmailDuplicates: true, acknowledgeCsvEmailDuplicates: true}});
   }

@@ -1561,7 +1561,9 @@ void main() {
       ]) {
         final source = File(path).readAsStringSync();
         for (final banned in ['Timer', 'Stream', 'cloud_firestore', 'snapshots', 'checkIn', 'correct', 'cancel', 'PollingSource']) {
-          expect(source.contains(banned), isFalse, reason: '$path: $banned');
+          // Displaying a cancelled enum value does not invoke a cancellation operation.
+          final used = banned == 'cancel' ? RegExp(r'\bcancel\s*\(').hasMatch(source) : source.contains(banned);
+          expect(used, isFalse, reason: '$path: $banned');
         }
       }
     });

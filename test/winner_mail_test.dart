@@ -68,6 +68,7 @@ class FakeWinnerMailService implements WinnerMailService {
   Future<WinnerMailPreview> preview({
     required String eventId,
     required String participantId,
+    String? batchId,
   }) async {
     calls.add('preview:$eventId:$participantId');
     if (previewError != null) throw previewError!;

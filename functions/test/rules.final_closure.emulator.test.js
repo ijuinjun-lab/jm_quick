@@ -9,6 +9,8 @@ const {RULES_PATH, skipReason, startEmulator, unsignedToken} = require("../test_
 
 // 業務データを持つ全collection(サブcollection含む)。ここに無いcollectionが増えたら、静的検査が失敗して気付ける。
 const DOCS = [
+  ["applicationLinks", "link1", {eventId: "e1", participantId: "p1"}],
+  ["qualificationGrants", "grant1", {eventId: "e1", participantId: "p1", programIds: ["a"]}],
   ["events", "e1", {eventId: "e1", eventName: "架空", flow: "confirmed", winnerMailTemplate: {subject: "秘密"}, senderName: "秘密の送信者", contact: "秘密の連絡先", venueInfo: {address: "秘密"}, reminderSendAt: "x", importSequence: 2}],
   ["participants", "p1", {participantId: "p1", eventId: "e1", publicId: "pub_secret_0123456789abcdef0123", name: "架空 花子", kana: "かくう", email: "secret@example.invalid", sourceReference: "SRC-秘密"}],
   ["checkIns", "p1", {participantId: "p1", eventId: "e1", checkedIn: false}],
@@ -74,7 +76,7 @@ describe("Firestore Rules(Phase 10D): 全collectionを、どのクライアン�
     assert.doesNotMatch(code, /request\.auth/, "request.authに依存した許可が無い");
     assert.doesNotMatch(code, /match\s+\/\{[^}]*=\*\*\}/);
     const allows = code.match(/allow[^;]*;/g) || [];
-    assert.equal(allows.length, 19, "match 19か所(サブcollection含む。Phase 1AでeventAssignments、Phase 4でeventInvitations、受付スタッフ用QRでreceptionStaffKeysを追加)");
+    assert.equal(allows.length, 21, "match 21か所(サブcollection含む。Phase 1AでeventAssignments、Phase 4でeventInvitations、受付スタッフ用QRでreceptionStaffKeysを追加)");
     assert.deepEqual([...new Set(allows)], ["allow read, write: if false;"]);
     // DOCSの全collection(先頭のcollection)に、明示のmatchがある(未知のcollectionだけがdefault deny)
     const matched = new Set([...code.matchAll(/match \/(\w+)\/\{/g)].map((m) => m[1]));

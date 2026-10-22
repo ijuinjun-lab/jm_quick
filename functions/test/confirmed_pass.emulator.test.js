@@ -231,7 +231,7 @@ describe("Web参加証・program別受付(Emulator + 実Admin SDK)", {skip: skip
       const before = await snapshot();
       for (let i = 0; i < 3; i += 1) await pass(idsOf(p));
       assert.equal(await snapshot(), before);
-      assert.deepEqual((await db.listCollections()).map((c) => c.id).sort(), ["accessRoles", "events", "importBatches", "participants", "programAttendances"]);
+      assert.deepEqual((await db.listCollections()).map((c) => c.id).sort(), ["accessRoles", "applicationLinks", "events", "importBatches", "participants", "programAttendances", "qualificationGrants"]);
     });
 
     test("参加証には受付状態(checkedIn)が反映されるが、受付時刻・人数・受付者は返さない", async () => {

@@ -182,6 +182,7 @@ abstract class WinnerMailService {
   Future<WinnerMailPreview> preview({
     required String eventId,
     required String participantId,
+    String? batchId,
   });
 
   /// キャンセル待ち繰り上げ当選メールを保存して、新しいversionを返す(本文だけ。会場・送信者等は通常当選メールの設定)。
@@ -256,10 +257,12 @@ class CallableWinnerMailService implements WinnerMailService {
   Future<WinnerMailPreview> preview({
     required String eventId,
     required String participantId,
+    String? batchId,
   }) async => WinnerMailPreview.fromJson(
     await _call('previewConfirmedWinnerMail', {
       'eventId': eventId,
       'participantId': participantId,
+      if (batchId != null) 'batchId': batchId,
     }),
   );
 

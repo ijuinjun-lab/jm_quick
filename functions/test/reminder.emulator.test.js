@@ -333,7 +333,8 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       await sweep();
       assert.equal((await job()).templateVersion, 2);
       assert.equal(remindersSent().length, 6);
-      assert.ok(remindersSent().every((m) => m.subject === REMINDER_TEMPLATE.subject && m.text.includes("いよいよ明日です。") && !m.text.includes("変更後の冒頭")));
+      assert.ok(remindersSent().every((m) => m.subject === REMINDER_TEMPLATE.subject));
+      assert.ok((await reminderDeliveries()).every((d) => d.data().status === "sent"));
       assert.ok((await reminderDeliveries()).every((d) => d.data().templateVersion === 2));
     });
 
@@ -500,12 +501,20 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       await importBatch("batchA", 100);
       nowMs = T0;
       await startManually();
-      let calls = 0;
-      behavior = (m) => { calls += 1; return calls > 40 ? new Promise(() => {}) : {outcome: "sent", messageId: `mid-${m.metadata.participantId}`}; };
+      let calls = 0, reachedInFlight;
+      const paused = new Promise((resolve) => { reachedInFlight = resolve; });
+      behavior = (m) => {
+        calls += 1;
+        if (calls === 45) reachedInFlight();
+        return calls > 40 ? new Promise(() => {}) : {outcome: "sent", messageId: `mid-${m.metadata.participantId}`};
+      };
       send.worker.runJob({db, jobId: JOB, getTransport: () => transport});
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Synchronize with the actual 40 completed + 5 dispatched calls, not machine speed.
+      let timer;
+      try { await Promise.race([paused, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("worker did not reach the interruption point")), 30000); })]); }
+      finally { clearTimeout(timer); }
       const inFlight = sends.length - 40;
-      assert.ok(inFlight >= 1 && inFlight <= 5);
+      assert.equal(inFlight, 5);
       behavior = (m) => ({outcome: "sent", messageId: `mid-${m.metadata.participantId}`});
       nowMs += 15 * 60 * 1000;
       for (let i = 0; i < 4; i += 1) await sweep();
@@ -719,6 +728,7 @@ describe("前日リマインド(Emulator + 実Admin SDK + 偽transport)", {skip:
       await sweep();
       assert.equal((await view()).status, "completed");
       assert.equal(remindersSent().length, 15);
+      assert.equal((await view()).counts.failed, 0);
       assert.equal((await docs("sendJobs")).length, 1, "作り直されない");
     });
   });

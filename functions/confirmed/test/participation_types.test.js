@@ -67,14 +67,16 @@ test("CSV互換: 空欄は不参加、残存人数を参加としない。未知
   const records = [...TYPES.map((t) => plan(t.value)), plan("cat", {"トークショー": "不明"})];
   assert.deepEqual(typeSummary(EVENT_ID, records).map((t) => t.count), [1, 1, 1, 1, 1, 1, 1]);
 });
-test("トーク時刻を推測しない。program時刻はメール設定より優先", async () => {
+test("トーク時刻は参加者別、保存済みメール設定、program共通時刻の順に参照する", async () => {
   const participant = person();
   const attendances = plan("talk").attendances.map((a) => ({...a, eventId: EVENT_ID, participantId: participant.participantId}));
   const render = async (e) => renderWinnerMail({snapshot: buildMailSnapshot(EVENT_ID, e).snapshot, participant, attendances, appBaseUrl: APP_BASE_URL, generateQrPng: fakeQrPng});
   assert.deepEqual((await render(event({confirmedMailSettings: {}}))).problems, ["attendance-time-missing"]);
   const e = event();
   Object.assign(e.programs[2], {startAt: new Date("2026-11-30T04:00:00Z"), endAt: new Date("2026-11-30T05:00:00Z")});
-  assert.equal((await render(e)).viewModel.programs[0].timeText, "13:00〜14:00");
+  assert.equal((await render(e)).viewModel.programs[0].timeText, "16:00〜17:00");
+  attendances[0].slotLabel = "18:00-19:00";
+  assert.equal((await render(e)).viewModel.programs[0].timeText, "18:00-19:00");
 });
 
 const {rolesFor, mappingFor} = require("../participation_types");

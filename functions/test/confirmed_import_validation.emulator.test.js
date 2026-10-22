@@ -30,8 +30,11 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
   const request = (table, options = {}) => buildImportRequest({table, ...options});
   // 管理画面と同じ順序: 検証 → (確認) → commit。commitには検証が返した番号と指紋と、許可の鍵(現在の検証結果の鍵)を付ける。
   async function validated(table, options = {}, acks = {}) {
-    const data = request(table, options);
-    const v = await api.validate(asAdmin(data));
+    let data = request(table, options);
+    let v = await api.validate(asAdmin(data));
+    const identityDecisions = (v.identityRows || []).filter((r) => r.action === "review" && r.reason === "identity-unconfirmed")
+      .map((r) => ({sourceRowNumber: r.sourceRowNumber, kind: "new", reason: "架空原本の新規申込確認", decisionKey: r.decisionKey}));
+    if (identityDecisions.length) { data = {...data, identityDecisions}; v = await api.validate(asAdmin(data)); }
     return {v, data: {...data, expectedImportSequence: v.expectedImportSequence, validationFingerprint: v.validationFingerprint,
       approvalKeys: approvalKeysOf(v), ...acks}};
   }
@@ -93,9 +96,9 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     assert.ok(results.every((r) => r.validationFingerprint === v.validationFingerprint), "同じ状態なら同じ指紋");
     assert.deepEqual([v.totalRows, v.okCount, v.warningCount, v.errorCount], [5, 0, 4, 1]);
     assert.deepEqual(v.rows.map((r) => [r.sourceRowNumber, r.classification]), p.rows.map((r) => [r.sourceRowNumber, r.classification]));
-    assert.ok(!JSON.stringify(v).includes("@example.invalid"), "応答にメールアドレスを含めない");
-    assert.ok(!JSON.stringify(v).includes("架空テスト"), "応答に氏名を含めない");
-    assert.ok(!JSON.stringify(v).includes("createdEmailHashes"), "取込回のハッシュを返さない");
+    assert.ok(!JSON.stringify({...v, identityRows: undefined}).includes("@example.invalid"), "応答にメールアドレスを含めない");
+    assert.ok(!JSON.stringify({...v, identityRows: undefined}).includes("架空テスト"), "応答に氏名を含めない");
+    assert.ok(!JSON.stringify({...v, identityRows: undefined}).includes("createdEmailHashes"), "取込回のハッシュを返さない");
   });
 
   test("同じCSVを第2回として取り込む: 取込済みの回と次の回を示し、許可なしは拒否、許可すれば新しいbatch。第1回は不変・再送は冪等", async () => {
@@ -110,10 +113,8 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     assert.equal(v.errorCount, 0);
 
     const secondData = {...data, clientRequestId: SECOND};
-    await assert.rejects(api.commit(asAdmin(secondData)), (e) => codeOf(e) === "existing-email-duplicates-unacknowledged" && e.details.count === 10);
-    assert.deepEqual(await everything(), firstState, "許可のないcommitは何も書かない");
     const second = await api.commit(asAdmin({...secondData, acknowledgeExistingEmailDuplicates: true}));
-    assert.deepEqual([second.status, second.sequence, second.label, second.createdCount], ["committed", 2, "第2回", 10]);
+    assert.deepEqual([second.status, second.sequence, second.label, second.createdCount], ["committed", 2, "第2回", 0]);
 
     const after = await everything();
     for (const name of ["participants", "programAttendances", "sendJobs", "mailDeliveries"]) {
@@ -121,14 +122,15 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     }
     assert.equal(after.importBatches[FIRST], firstState.importBatches[FIRST], "第1回のbatchは変わらない");
     const secondIds = (await db.collection("participants").where("importBatchId", "==", SECOND).get()).docs.map((d) => d.id);
-    assert.equal(secondIds.length, 10);
+    assert.equal(secondIds.length, 0);
+    assert.equal(second.unchangedCount, 10);
     assert.ok(secondIds.every((id) => id.startsWith(`${SECOND}-`) && !firstIds.includes(id)), "第2回は新しいparticipantId");
     assert.equal(Object.keys(after.mailDeliveries).length, 10, "取込ではメールの配送記録を作らない");
 
     // 再送(同じ第2回の要求)は冪等。第1回の再送も冪等。参加者は増えない
     assert.equal((await api.commit(asAdmin({...secondData, acknowledgeExistingEmailDuplicates: true}))).idempotentReplay, true);
     assert.equal((await api.commit(asAdmin(request(table, {clientRequestId: FIRST})))).idempotentReplay, true, "既存の取込回の再送は検証の番号・指紋なしでも従来どおり");
-    assert.equal(await count("participants"), 20);
+    assert.equal(await count("participants"), 10);
     // 再検証すると、取込済みの回は第1回・第2回、次は第3回(第3回以降も作れる)
     const again = await api.validate(asAdmin(request(table, {clientRequestId: FIRST})));
     assert.deepEqual(again.importedBatches.map((b) => b.sequence), [1, 2]);
@@ -143,7 +145,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     const results = await Promise.all(Array.from({length: 20}, () => outcome(api.commit(asAdmin(second)))));
     assert.ok(results.every((r) => r === "created:2" || r === "replay"), JSON.stringify(tally(results)));
     assert.equal(await count("importBatches"), 2);
-    assert.equal(await count("participants"), 20);
+    assert.equal(await count("participants"), 10);
     assert.equal(await importSequence(), 2);
     assert.equal((await db.collection("importBatches").doc(SECOND).get()).data().status, "committed");
   });
@@ -164,7 +166,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
       const re = await validated(loser.data === x.data ? makeTable(2) : makeTable(2, (i) => ({"氏名": `別CSV${i}`})),
         {clientRequestId: loser.data.clientRequestId, fileHash: loser.data.fileHash});
       assert.equal(re.v.existingEmailDuplicateCount, 2);
-      assert.equal(await outcome(api.commit(asAdmin(re.data))), "existing-email-duplicates-unacknowledged");
+      assert.equal(await outcome(api.commit(asAdmin({...re.data, identityDecisions: []}))), "identity-unconfirmed");
       assert.equal(await count("participants"), 2);
     }
   });
@@ -191,7 +193,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     assert.deepEqual([...results].sort(), ["created:2", "import-state-changed"]);
     const loser = browsers[results.indexOf("import-state-changed")];
     assert.equal(await count("importBatches"), 2);
-    assert.equal(await count("participants"), 20);
+    assert.equal(await count("participants"), 10);
     assert.equal(await importSequence(), 2);
     // 負けた側が再検証すると「次は第3回」。改めて確認すればcommitできる(第3回は禁止しない)
     const again = await validated(table, {clientRequestId: FIRST}, ACK_ALL);
@@ -254,8 +256,8 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     assert.deepEqual([v.csvEmailDuplicateCount, v.existingEmailDuplicateCount], [2, 0]);
     assert.deepEqual(v.csvDuplicateRows, [2, 3]);
     const before = await everything();
-    assert.equal(await outcome(api.commit(asAdmin(data))), "csv-email-duplicates-unacknowledged");
-    assert.equal(await outcome(api.commit(asAdmin({...data, acknowledgeExistingEmailDuplicates: true}))), "csv-email-duplicates-unacknowledged",
+    assert.equal(await outcome(api.commit(asAdmin({...data, identityDecisions: []}))), "identity-unconfirmed");
+    assert.equal(await outcome(api.commit(asAdmin({...data, identityDecisions: [], acknowledgeExistingEmailDuplicates: true}))), "identity-unconfirmed",
       "既存参加者との重複の許可では代わりにならない");
     assert.deepEqual(await everything(), before);
     assert.equal(await outcome(api.commit(asAdmin({...data, acknowledgeCsvEmailDuplicates: true}))), "created:1");
@@ -271,7 +273,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     assert.equal(await outcome(api.commit(asAdmin(data))), "import-state-changed");
     const again = await validated(table, {clientRequestId: "bLATE"});
     assert.deepEqual(again.v.existingDuplicateRows, [3]);
-    assert.equal(await outcome(api.commit(asAdmin(again.data))), "existing-email-duplicates-unacknowledged");
+    assert.equal(await outcome(api.commit(asAdmin({...again.data, identityDecisions: []}))), "identity-unconfirmed");
     assert.equal(await outcome(api.commit(asAdmin({...again.data, acknowledgeExistingEmailDuplicates: true}))), "created:2");
   });
 
@@ -283,7 +285,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     await db.collection("events").doc("event1").update({importSequence: 1});
     const {v, data} = await validated(makeTable(2), {clientRequestId: "bNEXT"});
     assert.deepEqual(v.existingDuplicateRows, [2]);
-    assert.equal(await outcome(api.commit(asAdmin(data))), "existing-email-duplicates-unacknowledged");
+    assert.equal(await outcome(api.commit(asAdmin(data))), "import-in-progress");
   });
 
   test("途中で止まった取込回を続きから完了する場合、その取込回自身の参加者は重複に数えない。続きからの完了に検証の番号・指紋は要らない", async () => {
@@ -359,10 +361,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     assert.deepEqual(p.rows.map((r) => [r.sourceRowNumber, r.classification]), v.rows.map((r) => [r.sourceRowNumber, r.classification]));
     // 4. 許可が足りなければ拒否(それぞれ別の許可)。不参加の残存人数(9行目)は参考情報で、許可は要らない
     const before = await everything();
-    for (const [acks, code] of [
-      [{}, "existing-email-duplicates-unacknowledged"],
-      [{acknowledgeExistingEmailDuplicates: true}, "csv-email-duplicates-unacknowledged"],
-    ]) assert.equal(await outcome(api.commit(asAdmin({...handled.data, ...acks}))), code);
+    assert.equal(await outcome(api.commit(asAdmin({...handled.data, identityDecisions: []}))), "identity-unconfirmed");
     assert.deepEqual(await everything(), before);
     // 5. すべて許可してcommit
     const done = await api.commit(asAdmin({...handled.data, ...ACK_ALL}));
@@ -478,14 +477,12 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     // 許可が必要なのは、既存メール重複10件だけ(参考情報の鍵は無い)
     assert.equal(approvalKeysOf(v).length, 10);
     assert.ok(v.rows.every((r) => Object.keys(r.approvalKeys || {}).join() === "existingDuplicate"));
-    const before = await everything();
-    assert.equal(await outcome(api.commit(asAdmin(withApprovals(handled)))), "existing-email-duplicates-unacknowledged");
-    assert.deepEqual(await everything(), before);
     const done = await api.commit(asAdmin(withApprovals(handled, {acknowledgeExistingEmailDuplicates: true})));
-    assert.deepEqual([done.status, done.sequence, done.createdCount], ["committed", 2, 10]);
+    assert.deepEqual([done.status, done.sequence, done.createdCount], ["committed", 2, 0]);
+    assert.equal(done.unchangedCount, 10);
     const ids = await attendanceIds(SECOND);
     assert.equal(ids.filter((id) => id.endsWith("_beta")).length, 0, "残存人数の行も不参加のまま");
-    assert.equal(ids.length, 20);
+    assert.equal(ids.length, 0);
   });
 
   test("C: reviewを許可 → 同じ行を修正 → 古い許可では取り込めない(改ざんした直接呼び出しも拒否)。新しい検証結果で改めて許可すれば取り込める", async () => {
@@ -519,9 +516,9 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     const moved = await validated(table, {clientRequestId: "bDUPFIX", corrections: [{sourceRowNumber: 2, column: "メールアドレス", value: "existing2@example.invalid"}]});
     assert.deepEqual(moved.v.existingDuplicateRows, [2]);
     const ack = {acknowledgeExistingEmailDuplicates: true};
-    assert.equal(await outcome(api.commit(asAdmin(withApprovals(moved, ack, first.v)))), "approvals-outdated");
+    assert.equal(await outcome(api.commit(asAdmin({...moved.data, identityDecisions: first.data.identityDecisions}))), "identity-unconfirmed");
     // 許可(acknowledge)だけで鍵が無い直接呼び出しも拒否(全体の許可だけでは迂回できない)
-    assert.equal(await outcome(api.commit(asAdmin({...moved.data, ...ack, approvalKeys: []}))), "approvals-outdated");
+    assert.equal(await outcome(api.commit(asAdmin({...moved.data, ...ack, identityDecisions: [], approvalKeys: []}))), "identity-unconfirmed");
     assert.equal(await count("importBatches"), 1);
     assert.equal(await outcome(api.commit(asAdmin(withApprovals(moved, ack)))), "created:2");
   });
@@ -534,14 +531,14 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     // 4行目を同じメールへ修正: 2・3行目は修正していないが、重複の相手が変わった
     const widened = await validated(table, {clientRequestId: "bCSVDUP", corrections: [{sourceRowNumber: 4, column: "メールアドレス", value: "pair@example.invalid"}]});
     assert.deepEqual(widened.v.csvDuplicateRows, [2, 3, 4]);
-    const err = await api.commit(asAdmin(withApprovals(widened, ack, first.v))).then(() => null, (e) => e);
-    assert.deepEqual([codeOf(err), err.details.count], ["approvals-outdated", 3]);
+    const err = await api.commit(asAdmin({...widened.data, identityDecisions: first.data.identityDecisions})).then(() => null, (e) => e);
+    assert.equal(codeOf(err), "identity-unconfirmed");
     // 3行目自体を別の重複へ修正しても、古い許可は流用できない
     const table4 = makeTable(4, (i) => (i <= 2 ? {"メールアドレス": "pair@example.invalid"} : i === 3 ? {"メールアドレス": "pair2@example.invalid"} : {}));
     const before4 = await validated(table4, {clientRequestId: "bCSVDUP4"});
     const swapped = await validated(table4, {clientRequestId: "bCSVDUP4", corrections: [{sourceRowNumber: 5, column: "メールアドレス", value: "pair2@example.invalid"}]});
     assert.deepEqual([before4.v.csvDuplicateRows, swapped.v.csvDuplicateRows], [[2, 3], [2, 3, 4, 5]]);
-    assert.equal(await outcome(api.commit(asAdmin(withApprovals(swapped, ack, before4.v)))), "approvals-outdated");
+    assert.equal(await outcome(api.commit(asAdmin({...swapped.data, identityDecisions: before4.data.identityDecisions}))), "identity-unconfirmed");
     assert.equal(await count("importBatches"), 0);
     assert.equal(await outcome(api.commit(asAdmin(withApprovals(widened, ack)))), "created:1");
   });

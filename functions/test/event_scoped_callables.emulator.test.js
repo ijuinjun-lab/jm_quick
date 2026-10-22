@@ -93,6 +93,19 @@ describe("confirmed業務callableのイベント単位の認可(実際のindex.j
   // 権限の無い側: 担当外(他イベントのmanager)・無効なassignment・assignment無し・従来の全体staff
   const OUTSIDERS_FOR_A = ["u-mgr-b", "u-off", "u-nobody", "u-legacy-staff"];
 
+  test("資格取消APIは公開せず、復旧APIと申込照合の個人情報は対象管理者だけに許可", async () => {
+    assert.equal(index.revokeConfirmedQualification, undefined);
+    for (const name of ["getConfirmedImportRecovery", "getConfirmedReminderRecovery"]) {
+      for (const uid of ["u-admin", "u-mgr-a"]) assert.equal(await call(name, uid, {eventId: EV_A}), "ok");
+      for (const uid of ["u-staff-a", ...OUTSIDERS_FOR_A]) assert.equal(await call(name, uid, {eventId: EV_A}), "permission-denied");
+      assert.equal(await outcome(index[name].run({data: {eventId: EV_A}})), "unauthenticated");
+    }
+    for (const name of ["abandonConfirmedImport", "confirmConfirmedReminderRecovery"]) {
+      for (const uid of ["u-staff-a", ...OUTSIDERS_FOR_A]) assert.equal(await call(name, uid, {eventId: EV_A}), "permission-denied");
+      assert.equal(await outcome(index[name].run({data: {eventId: EV_A}})), "unauthenticated");
+    }
+  });
+
   describe("CSV取込・イベント概要(eventManager)", () => {
     test("admin・担当managerは成功、担当staff・他イベントmanager・無効・未任命・従来staffは拒否", async () => {
       const previewA = buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2"});
@@ -107,10 +120,9 @@ describe("confirmed業務callableのイベント単位の認可(実際のindex.j
         assert.equal(await call("commitConfirmedImport", uid, buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: `x${uid.replace(/-/g, "")}`})), "permission-denied", uid);
         assert.equal(await call("getConfirmedEventSummary", uid, {eventId: EV_A}), "permission-denied", uid);
       }
-      // EV_Aには同じ架空メールの有効な参加者が既にいる(batchA1)。別参加者として取り込む明示的な許可が要る。
-      assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2"})), "failed-precondition");
-      assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2",
-        extra: {acknowledgeExistingEmailDuplicates: true}})), "ok");
+      // Confirmed correspondence makes a reimport a no-op, including for an event manager.
+      assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_A, clientRequestId: "batchA2"})), "ok");
+      assert.equal((await db.collection("participants").where("eventId", "==", EV_A).get()).size, 3);
       assert.equal(await call("validateConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_B, clientRequestId: "batchB9"})), "permission-denied");
       assert.equal(await call("previewConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_B, clientRequestId: "batchB9"})), "permission-denied");
       assert.equal(await call("commitConfirmedImport", "u-mgr-a", buildImportRequest({table: makeTable(2), eventId: EV_B, clientRequestId: "batchB9"})), "permission-denied");
@@ -122,6 +134,7 @@ describe("confirmed業務callableのイベント単位の認可(実際のindex.j
       const forged = buildImportRequest({table: makeTable(3), eventId: EV_A, clientRequestId: "batchB1"});
       const preview = await index.previewConfirmedImport.run(as("u-mgr-a", forged));
       assert.equal(preview.existingBatch, null, "EV_Bの取込回のstatus・sequenceを返さない");
+      assert.ok(preview.identityRows.every((r) => !r.participantId?.startsWith("batchB1-")), "他イベントの照合計画を返さない");
       assert.equal(await call("commitConfirmedImport", "u-mgr-a", forged), "already-exists");
       const batch = (await db.collection("importBatches").doc("batchB1").get()).data();
       assert.equal(batch.eventId, EV_B, "EV_Bの取込回は変わらない");

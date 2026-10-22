@@ -109,7 +109,8 @@ class _AttendanceReportPageState extends State<AttendanceReportPage> {
             const Text(
               '参加者全員(未来場の方を含む)について、取込回・氏名・かな・メールアドレス・HEBEL属性と、'
               'programごとの予定人数・予定時間・受付状況(受付済・未受付・欠席)・実来場人数・受付時刻(日本時間)を1行ずつ出力します。'
-              '2枚目のシートに、データ取得日時(日本時間)を記録します。',
+              '2枚目のシートに、データ取得日時(日本時間)と正式な申込件数・プログラム別人数を記録します。'
+              '放棄・未完了などの監査行は明細に残し、正式件数と予定人数には含めません。',
             ),
             const SizedBox(height: 6),
             const Text(
@@ -138,7 +139,7 @@ class _AttendanceReportPageState extends State<AttendanceReportPage> {
                 margin: const EdgeInsets.only(top: 12),
                 padding: const EdgeInsets.all(12),
                 color: const Color(0xffeef3f8),
-                child: Text('「${done!.fileName}」を出力しました(参加者${done!.count}名)。'),
+                child: Text('「${done!.fileName}」を出力しました(有効な申込${done!.count}件)。'),
               ),
             if (error != null)
               Container(

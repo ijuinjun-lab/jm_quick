@@ -48,11 +48,12 @@ function timeRangeText(start, end) {
   return null;
 }
 
-// programの時間表示: 参加者別のslotLabel → 参加者別のstartAt/endAt → programの共通時間 → 表示しない(null)
+// 時間表示: 参加者別slotLabel → 参加者別startAt/endAt → 保存済みトーク時間 → program共通時間 → null
 function programTimeText(attendance, program) {
   const label = typeof attendance.slotLabel === "string" ? attendance.slotLabel.trim() : "";
   if (label !== "") return label;
   return timeRangeText(toDate(attendance.startAt), toDate(attendance.endAt)) ||
+    (program.role === "talk" ? program.talkTimeText || null : null) ||
     timeRangeText(toDate(program.startAt), toDate(program.endAt));
 }
 
@@ -75,6 +76,12 @@ function normalizePrograms(rawPrograms) {
 // buildMailSnapshot と前日リマインドの宛先一覧(reminder_targets.js)が共通で使う(宛先一覧と本文が食い違わない)。
 // 名称: 割当の無いprogramはイベントに登録された名称。割当のある犬・猫は役割別の名称(NAMES)。
 //   トークはイベントに登録された名称(イベントごとに尊重する。Web参加証・受付と同じ)。登録名が空の場合だけ役割別の名称。
+function displayPrograms(eventId, event) {
+  const roles = rolesFor(eventId, event);
+  return normalizePrograms(event && event.programs).map((p) => ({...p,
+    role: roles && roles[p.programId], talkTimeText: talkTimeTextOf(event)}));
+}
+
 function mailPrograms(eventId, event) {
   const roles = rolesFor(eventId, event);
   const registered = new Map((Array.isArray(event && event.programs) ? event.programs : [])
@@ -82,7 +89,7 @@ function mailPrograms(eventId, event) {
   return normalizePrograms(event && event.programs).map((p) => {
     const role = roles && roles[p.programId];
     if (!role) return p;
-    return {...p, name: (role === "talk" && registered.get(p.programId)) || NAMES[role], role};
+    return {...p, talkTimeText: talkTimeTextOf(event), name: (role === "talk" && registered.get(p.programId)) || NAMES[role], role};
   });
 }
 // トークの共通時間(当選メール設定 confirmedMailSettings.talkTimeText)。未設定ならnull。
@@ -109,7 +116,7 @@ function buildProgramItems({programs, attendances, eventId, participantId}) {
     if (!isValidPlannedCount(attendance.plannedCount)) { problems.push("attendance-planned-count-invalid"); continue; }
     items.push({
       programId: program.programId, name: program.name, order: program.order,
-      timeText: programTimeText(attendance, program), plannedCount: attendance.plannedCount, attendance,
+      timeText: mailTimeText(programTimeText(attendance, program), program.role, program.talkTimeText), plannedCount: attendance.plannedCount, attendance,
     });
   }
   items.sort((a, b) => (a.order - b.order) || (a.programId < b.programId ? -1 : a.programId > b.programId ? 1 : 0));
@@ -218,5 +225,5 @@ function buildMailViewModel({snapshot, participant, attendances, appBaseUrl}) {
   };
 }
 
-module.exports = {toDate, formatEventDateTime, programTimeText, normalizePrograms, mailPrograms, talkTimeTextOf, mailTimeText, buildProgramItems, buildMailSnapshot,
+module.exports = {toDate, formatEventDateTime, programTimeText, normalizePrograms, displayPrograms, mailPrograms, talkTimeTextOf, mailTimeText, buildProgramItems, buildMailSnapshot,
   missingOptionalFields, buildMailViewModel};

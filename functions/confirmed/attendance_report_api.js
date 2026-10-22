@@ -12,7 +12,7 @@
 
 const {ApiError} = require("./api_error");
 const {isConfirmedFlow} = require("../flow");
-const {normalizePrograms, programTimeText, toDate} = require("./mail_view_model");
+const {displayPrograms, mailTimeText, talkTimeTextOf, programTimeText, toDate} = require("./mail_view_model");
 const {hebelResidenceView} = require("./hebel_residence");
 const {notificationTypeOf} = require("./notification_type");
 
@@ -29,13 +29,14 @@ const count = (value) => (Number.isInteger(value) ? value : null);
 // 純粋関数: Firestoreから読んだ値 → 応答。
 //   participants: [{id, data}] / batches: Map(batchId → batchのdata|null) / attendances: [data]
 function buildAttendanceReport({eventId, event, participants, batches, attendances}) {
-  const programs = normalizePrograms(event.programs)
+  const programs = displayPrograms(eventId, event)
     .sort((a, b) => (a.order - b.order) || (a.programId < b.programId ? -1 : a.programId > b.programId ? 1 : 0));
   const programById = new Map(programs.map((p) => [p.programId, p]));
   const participantIds = new Set(participants.map((p) => p.id));
   const byParticipant = new Map();
   const extraProgramIds = [];
   for (const a of attendances) {
+    if (a.identityVersion && batches.get(a.importBatchId)?.status !== "committed") continue;
     if (a.eventId !== eventId || !participantIds.has(a.participantId) || typeof a.programId !== "string") continue;
     if (!programById.has(a.programId) && !extraProgramIds.includes(a.programId)) extraProgramIds.push(a.programId);
     if (!byParticipant.has(a.participantId)) byParticipant.set(a.participantId, []);
@@ -50,12 +51,16 @@ function buildAttendanceReport({eventId, event, participants, batches, attendanc
     const batchId = typeof p.importBatchId === "string" ? p.importBatchId : null;
     const batch = batchId ? batches.get(batchId) || null : null;
     const hebel = hebelResidenceView(p.hebelResidence);
+    const withOrigins = (byParticipant.get(id) || []).some((a) => a.notificationType || a.entitlementStatus === "revoked");
     const programsOfRow = (byParticipant.get(id) || []).map((a) => {
       const checkedIn = a.checkedIn === true;
       return {
         programId: a.programId,
         plannedCount: count(a.plannedCount),
-        timeText: programTimeText(a, programById.get(a.programId) || {}) || null,
+        timeText: mailTimeText(programTimeText(a, programById.get(a.programId) || {}),
+          programById.get(a.programId)?.role, talkTimeTextOf(event)),
+        ...(withOrigins ? {notificationType: a.notificationType || notificationTypeOf(batches.get(a.importBatchId) || batch)} : {}),
+        ...(a.entitlementStatus === "revoked" ? {entitlementStatus: "revoked"} : {}),
         checkedIn,
         // 取消済み(checkedIn:false)の受付時刻・人数は使わない(取消後は正本でもnull)
         attendedCount: checkedIn ? count(a.attendedCount) : null,
@@ -109,7 +114,7 @@ function createAttendanceReportApi({getDb}) {
       throw new ApiError("failed-precondition", "参加者が多すぎるため、最終実績を出力できません。", {code: "report-too-large"});
     }
     const participants = participantSnap.docs.map((doc) => ({id: doc.id, data: doc.data()}));
-    const batchIds = [...new Set(participants.map((p) => p.data.importBatchId).filter((id) => typeof id === "string" && id !== ""))];
+    const batchIds = [...new Set([...participants.map((p) => p.data.importBatchId), ...attendanceSnap.docs.map((d) => d.data().importBatchId)].filter((id) => typeof id === "string" && id !== ""))];
     const batches = new Map();
     if (batchIds.length > 0) {
       const snaps = await db.getAll(...batchIds.map((id) => db.collection("importBatches").doc(id)));

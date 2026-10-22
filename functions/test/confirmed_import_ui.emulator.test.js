@@ -125,7 +125,7 @@ describe("取込画面の要求 × 実際の取込API(Emulator + 実Admin SDK)",
       assert.equal(byClass("ready") + byClass("review") + byClass("error"), result.totalRows);
       assert.ok(byClass("error") >= 1);
       assert.equal(JSON.stringify(result).includes("publicId"), false, "previewにpublicIdは含まれない");
-      assert.equal(JSON.stringify(result).includes("example.invalid"), false, "previewに個人情報(メール)を返さない");
+      assert.equal(JSON.stringify({...result, identityRows: undefined}).includes("example.invalid"), false, "照合画面以外にメールを複製しない");
     });
 
     test("共有fixture(error行あり)のcommitは、エラー行だけを除いて取り込まず、何も書かずに拒否される", async () => {

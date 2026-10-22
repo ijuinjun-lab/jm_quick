@@ -553,7 +553,7 @@ class _ReminderPageState extends State<ReminderPage> {
         children: [
           Text('${r.name}　${r.email}', style: const TextStyle(fontWeight: FontWeight.w600)),
           Text(
-            '${r.notificationTypeLabel}　当選メール：${r.winnerStatusLabel}',
+            '${r.additionUnresolved ? '追加当選通知の確認待ち / ' : ''}${r.notificationTypeLabel}　当選メール：${r.winnerStatusLabel}',
             style: TextStyle(
               color: r.winnerStatus == 'unknown' ? const Color(0xffb42318) : const Color(0xff5c6670),
               fontSize: 13,
@@ -601,7 +601,7 @@ class _ReminderPageState extends State<ReminderPage> {
                 padding: const EdgeInsets.all(10),
                 color: const Color(0xffffe8e8),
                 child: Text(
-                  '当選メールの送信結果が不明な参加者が${s.unknownWinnerMail}件います。届いたか確認できないため、この状態では前日リマインドを作成しません'
+                  '当選メールの結果不明、または追加当選通知が未確定の申込が${s.unknownWinnerMail}件あります。この状態では前日リマインドを作成しません'
                   '(手動・自動とも)。当選メールの送信状況を確認してください。',
                 ),
               ),
@@ -631,6 +631,39 @@ class _ReminderPageState extends State<ReminderPage> {
     );
   }
 
+  Future<void> _recoverRecipients() async {
+    final service = widget.service as ReminderRecoveryService;
+    try {
+      final rows = await service.recoveryPreview(_eventId);
+      if (!mounted) return;
+      final selected = await showDialog<Map<String, dynamic>>(context: context, builder: (context) => AlertDialog(
+        title: const Text('安全停止した宛先の再確認'),
+        content: SizedBox(width: 600, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('確実に未送信で、当選通知がすべて送信済みの宛先だけを表示します。送信済み・結果不明は再送しません。文面設定はジョブ作成時のまま、参加資格は再確認した現在の内容になります。'),
+          if (rows.isEmpty) const Text('再確認できる宛先はありません。追加当選通知の配送状態や有効な参加資格を確認してください。'),
+          for (final r in rows) TextButton(onPressed: () => Navigator.pop(context, r), child: Text('${r['name']} / ${r['email']}')),
+        ]))), actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('閉じる'))],
+      ));
+      if (selected == null || !mounted) return;
+      var reason = '';
+      final accepted = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+        title: const Text('宛先・参加資格・本文を確認'),
+        content: SizedBox(width: 600, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('${selected['name']} / ${selected['email']}'), SelectableText(selected['text'] as String),
+          TextField(maxLength: 200, onChanged: (v) => reason = v, decoration: const InputDecoration(labelText: '確認根拠（必須）')),
+        ]))), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('戻る')),
+          TextButton(onPressed: () { if (reason.trim().isNotEmpty) Navigator.pop(context, true); }, child: const Text('この宛先の再開を承認'))],
+      ));
+      if (accepted != true || !mounted) return;
+      await service.confirmRecovery(_eventId, selected, reason.trim());
+      if (!mounted) return;
+      setState(() => message = 'この宛先を未送信に戻しました。送信状況画面で配送を再開できます。');
+      await _load();
+    } on WinnerSendException catch (e) {
+      if (mounted) setState(() => error = e.message);
+    }
+  }
+
   Widget _jobCard(ReminderSettings s) {
     final job = s.job;
     return Card(
@@ -640,6 +673,8 @@ class _ReminderPageState extends State<ReminderPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text('送信状況', style: TextStyle(fontWeight: FontWeight.bold)),
+            if (job != null && job.counts.failed > 0 && widget.service is ReminderRecoveryService)
+              OutlinedButton(key: const Key('reminder-recovery'), onPressed: loading ? null : _recoverRecipients, child: const Text('安全停止した宛先を確認して復旧')),
             const SizedBox(height: 8),
             if (job == null) ...[
               const Text('リマインドはまだ作成されていません(未送信)。', key: ValueKey('no-job')),

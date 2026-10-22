@@ -223,6 +223,10 @@ const AUTHORIZATION_MAP_PHASE_1B = {
   deleteParticipant: "confirmedCallable:admin",
   deleteEvent: "confirmedCallable:admin",
   getMyAccessRole: "confirmedCallable:authenticated",
+  getConfirmedImportRecovery: E_MANAGER,
+  abandonConfirmedImport: E_MANAGER,
+  getConfirmedReminderRecovery: E_MANAGER,
+  confirmConfirmedReminderRecovery: E_MANAGER,
   validateConfirmedImport: E_MANAGER,
   previewConfirmedImport: E_MANAGER,
   commitConfirmedImport: E_MANAGER,
@@ -296,7 +300,7 @@ test("Phase 1B: 全exportの入口・認可レベル・対象イベントのreso
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
   // 60本 + イベント設定(getConfirmedEventSettings / updateConfirmedEventSettings。event_manager以上)の2本
-  assert.equal(exportsInIndex.length, 62);
+  assert.equal(exportsInIndex.length, 66);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {

@@ -425,7 +425,7 @@ ImportRequest buildImportRequest({
     fileHash: fileHash,
     mappingJson: mappingJson,
     newImportSequence: newImportSequence,
-    decisions: decisions.toJson(),
+    decisions: Map<String, dynamic>.from(decisions.toJson())..remove('identityDecisions'),
     sheetName: sheetName,
     notificationType: notificationType,
   );
@@ -460,20 +460,24 @@ class ImportDecisions {
   const ImportDecisions({
     this.corrections = const {},
     this.exclusions = const {},
+    this.identities = const {},
   });
 
   /// キーは (行番号, 列名)。
   final Map<(int, String), String> corrections;
   final Map<int, String> exclusions;
+  final Map<int, Map<String, dynamic>> identities;
 
-  bool get isEmpty => corrections.isEmpty && exclusions.isEmpty;
+  bool get isEmpty => corrections.isEmpty && exclusions.isEmpty && identities.isEmpty;
 
   /// サーバーへ送る形(空の項目は送らない。行番号・列名の順に並べる)。
   Map<String, dynamic> toJson() {
     final keys = corrections.keys.toList()
       ..sort((a, b) => a.$1 != b.$1 ? a.$1 - b.$1 : a.$2.compareTo(b.$2));
     final rows = exclusions.keys.toList()..sort();
+    final identityRows = identities.keys.toList()..sort();
     return {
+      if (identityRows.isNotEmpty) 'identityDecisions': [for (final n in identityRows) {'sourceRowNumber': n, ...identities[n]!}],
       if (keys.isNotEmpty)
         'corrections': [
           for (final k in keys)
@@ -538,6 +542,7 @@ class ImportPreview {
     required this.existingSequence,
     required this.warningColumns,
     this.participationTypes = const [],
+    this.identityRows = const [],
     required this.rows,
     this.decisionSummary,
   });
@@ -575,6 +580,7 @@ class ImportPreview {
             ),
       notificationType: NotificationType.parse(json['notificationType']),
       participationTypes: maps(json['participationTypes']),
+      identityRows: maps(json['identityRows']),
       batchId: json['batchId'] as String? ?? '',
       totalRecords: number('totalRecords'),
       totalRows: number('totalRows'),
@@ -643,6 +649,7 @@ class ImportPreview {
   final List<String> warningColumns;
   final List<Map<String, dynamic>> participationTypes;
   final List<PreviewRow> rows;
+  final List<Map<String, dynamic>> identityRows;
 
   /// 最終的に取り込まれる内容の集計(原本の行数・修正・除外(自動除外を含む)・取込予定)。
   final ({
@@ -668,6 +675,8 @@ class ImportResult {
     required this.totalRows,
     required this.totalRecords,
     required this.createdCount,
+    this.addedCount = 0,
+    this.unchangedCount = 0,
     required this.reviewPendingCount,
     required this.errorCount,
     required this.excludedCount,
@@ -685,6 +694,8 @@ class ImportResult {
       totalRows: number('totalRows'),
       totalRecords: number('totalRecords'),
       createdCount: number('createdCount'),
+      addedCount: number('addedCount'),
+      unchangedCount: number('unchangedCount'),
       reviewPendingCount: number('reviewPendingCount'),
       errorCount: number('errorCount'),
       excludedCount: number('excludedByOperatorCount'),
@@ -700,6 +711,8 @@ class ImportResult {
   final int totalRows;
   final int totalRecords;
   final int createdCount;
+  final int addedCount;
+  final int unchangedCount;
   final int reviewPendingCount;
   final int errorCount;
   final int excludedCount;
@@ -784,6 +797,7 @@ class ValidationRow {
 class ImportValidation {
   const ImportValidation({
     required this.batchId,
+    this.reimportBatchId,
     required this.totalRecords,
     required this.totalRows,
     required this.blankRecordCount,
@@ -791,6 +805,7 @@ class ImportValidation {
     required this.warningCount,
     required this.errorCount,
     this.infoCount = 0,
+    this.identityRows = const [],
     required this.findingCounts,
     required this.existingEmailDuplicateCount,
     required this.csvEmailDuplicateCount,
@@ -816,6 +831,8 @@ class ImportValidation {
     this.waitlistPromotion,
     this.autoExcludedRowCount = 0,
   });
+
+  final List<Map<String, dynamic>> identityRows;
 
   factory ImportValidation.fromJson(Map<String, dynamic> json) {
     int number(Object? v) => (v as num?)?.toInt() ?? 0;
@@ -868,6 +885,7 @@ class ImportValidation {
       correctedRowCount: number(json['correctedRowCount']),
       importRowCount: number(json['importRowCount']),
       batchId: json['batchId'] as String? ?? '',
+      reimportBatchId: json['reimportBatchId'] as String?,
       totalRecords: number(json['totalRecords']),
       totalRows: number(json['totalRows']),
       blankRecordCount: number(json['blankRecordCount']),
@@ -894,6 +912,7 @@ class ImportValidation {
       nextImportSequence: number(
         json['expectedImportSequence'] ?? json['nextImportSequence'],
       ),
+      identityRows: maps(json['identityRows']),
       validationFingerprint: json['validationFingerprint'] as String? ?? '',
       importedBatches: [
         for (final b in maps(json['importedBatches']))
@@ -943,6 +962,9 @@ class ImportValidation {
   }
 
   final String batchId;
+
+  /// 放棄済み取込回を復活させず、サーバーが指定した後続回で再検証する。
+  final String? reimportBatchId;
   final int totalRecords;
   final int totalRows;
   final int blankRecordCount;

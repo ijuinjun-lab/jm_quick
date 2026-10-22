@@ -554,7 +554,7 @@ describe("受付の訂正・取消・再受付(admin専用 / Emulator + 実Admin
       await doCorrect(p, "alpha", 1);
       await doCancel(p, "alpha");
       const collections = (await db.listCollections()).map((c) => c.id).sort();
-      assert.deepEqual(collections, ["accessRoles", "events", "importBatches", "participants", "programAttendances"]);
+      assert.deepEqual(collections, ["accessRoles", "applicationLinks", "events", "importBatches", "participants", "programAttendances", "qualificationGrants"]);
       const source = fs.readFileSync(path.join(__dirname, "..", "confirmed", "pass_api.js"), "utf8");
       assert.ok(!source.includes("registered" + "Count"));
     });

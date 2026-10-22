@@ -8,8 +8,13 @@ const {composeReminderMailFor} = require("../confirmed/winner_mail_message");
 const {buildMailSnapshot} = require("../confirmed/mail_view_model");
 const {buildImportRequest} = require("../test_support/import_request_builder");
 const {EVENT_ID, TYPES} = require("../confirmed/participation_types");
-const {mapping, table, event} = require("../confirmed/test_support/participation_fixture");
+const {mapping, table: fixtureTable, event} = require("../confirmed/test_support/participation_fixture");
 const {fakeQrPng, APP_BASE_URL} = require("../confirmed/test_support/mail_fixtures");
+// Seven distinct applications, not seven duplicate rows of one application.
+const table = () => {
+  const source = fixtureTable();
+  return {...source, records: source.records.map((r, i) => r.map((v, c) => c === 0 ? `${v}${i + 1}` : v))};
+};
 describe("7タイプ: CSV→正本保存→参加者別メール・リマインド (localhost Emulator only)", {skip: skipReason()}, () => {
   let env;
   before(async () => { env = await startAdminEmulator(); });

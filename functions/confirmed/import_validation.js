@@ -61,7 +61,7 @@ function existingEmailHashes({eventId, participants, batches, excludeBatchId = n
     if (p && p.status === "active" && typeof p.email === "string" && normalizeEmail(p.email) !== "") hashes.add(emailHash(eventId, p.email));
   }
   for (const b of batches) {
-    if (b.id === excludeBatchId || !Array.isArray(b.createdEmailHashes)) continue;
+    if (b.id === excludeBatchId || b.status === "abandoned" || !Array.isArray(b.createdEmailHashes)) continue;
     for (const h of b.createdEmailHashes) hashes.add(h);
   }
   return hashes;
@@ -114,7 +114,7 @@ function pendingRows({records, excluded = new Set()}) {
 // 検証の指紋。サーバーが再計算できる値だけから作る(改ざんされた値は、commitの再計算と一致しない)。
 function fingerprintOf({request, expectedImportSequence, existingDuplicateRows, csvDuplicateRows}) {
   return sha256(canonical({
-    v: FINGERPRINT_VERSION, content: contentHash(request), expectedImportSequence, existingDuplicateRows, csvDuplicateRows,
+    v: FINGERPRINT_VERSION, ...(request.identityStateFingerprint ? {identity: request.identityStateFingerprint} : {}), content: contentHash(request), expectedImportSequence, existingDuplicateRows, csvDuplicateRows,
   }));
 }
 

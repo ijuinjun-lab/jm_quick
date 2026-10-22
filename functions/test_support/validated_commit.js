@@ -17,8 +17,12 @@ async function validatedData(validate, req) {
   if (data === null || typeof data !== "object" || "expectedImportSequence" in data || "validationFingerprint" in data) return data;
   const base = Object.fromEntries(Object.entries(data).filter(([key]) => !COMMIT_ONLY_KEYS.includes(key)));
   try {
-    const v = await validate({...req, data: base});
-    return {...data, expectedImportSequence: v.expectedImportSequence, validationFingerprint: v.validationFingerprint,
+    let v = await validate({...req, data: base});
+    // Test fixtures explicitly confirm new applications. Production never makes this decision.
+    const identityDecisions = data.identityDecisions || (v.identityRows || []).filter((r) => (r.action === "review" && r.reason === "identity-unconfirmed") || r.decision?.kind === "new")
+      .map((r) => ({sourceRowNumber: r.sourceRowNumber, kind: "new", reason: r.decision?.kind === "new" ? r.decision.reason : "架空データの別申込をテストが確認", decisionKey: r.decisionKey}));
+    if (identityDecisions.length) v = await validate({...req, data: {...base, identityDecisions}});
+    return {...data, ...(identityDecisions.length ? {identityDecisions} : {}), expectedImportSequence: v.expectedImportSequence, validationFingerprint: v.validationFingerprint,
       ...("approvalKeys" in data ? {} : {approvalKeys: approvalKeysOf(v)})};
   } catch (error) {
     return data;

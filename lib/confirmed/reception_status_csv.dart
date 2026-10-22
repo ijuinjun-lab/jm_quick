@@ -169,9 +169,10 @@ ReceptionStatusCsv buildReceptionStatusCsv({
   final info = _toCsv(
     _infoRows(eventId: eventId, c: conditions, exportedAt: exportedAt, rowCount: rows.length),
   );
+  final withOrigins = rows.any((r) => r.notificationType != null || r.revoked);
   final table = _toCsv([
-    receptionStatusCsvHeaders,
-    for (final r in rows) _row(r),
+    [...receptionStatusCsvHeaders, if (withOrigins) ...['資格の当選区分', '資格状態']],
+    for (final r in rows) [..._row(r), if (withOrigins) ...[r.notificationType == 'waitlistPromotion' ? '繰り上げ当選' : '通常当選', r.revoked ? '取消' : '有効']],
   ]);
   // 情報欄 → 空行1行 → 参加者一覧(見出し・データ)。最後の行もCRLFで終える。
   return ReceptionStatusCsv(

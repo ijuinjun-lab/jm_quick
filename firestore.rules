@@ -109,6 +109,9 @@ service cloud.firestore {
     }
 
     // Phase 10D: 公開callableのrate limit用カウンタ(識別子はHMAC化済み)。Admin SDK(Functions)だけが読み書きする。
+    match /applicationLinks/{linkId} { allow read, write: if false; }
+    match /qualificationGrants/{grantId} { allow read, write: if false; }
+
     match /rateLimits/{documentId} {
       allow read, write: if false;
     }
