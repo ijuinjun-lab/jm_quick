@@ -26,6 +26,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
   let env;
   let db;
   let api;
+  const completionWrites = new Map();
   const asAdmin = (data) => ({auth: {uid: "u-admin"}, data});
   const request = (table, options = {}) => buildImportRequest({table, ...options});
   // 管理画面と同じ順序: 検証 → (確認) → commit。commitには検証が返した番号と指紋と、許可の鍵(現在の検証結果の鍵)を付ける。
@@ -53,6 +54,7 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
   const importSequence = async () => (await db.collection("events").doc("event1").get()).data().importSequence || 0;
   async function reset() {
     await env.clear();
+    completionWrites.clear();
     await db.collection("accessRoles").doc("u-admin").set({role: "admin", active: true});
     await db.collection("events").doc("event1").set({
       eventId: "event1", eventName: "架空イベント", flow: "confirmed",
@@ -75,7 +77,29 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
   before(async () => {
     env = await startAdminEmulator();
     db = env.db;
-    const raw = createImportApi({getDb: () => db, serverTimestamp: () => env.FieldValue.serverTimestamp()});
+    // Observe successfully committed completion transitions, not aborted transaction
+    // attempts. A duplicate request must not rewrite a completed batch's audit fields.
+    const observedDb = new Proxy(db, {get(target, prop) {
+      if (prop === "runTransaction") return async (fn, options) => {
+        const committed = await target.runTransaction(async (tx) => {
+          const completions = [];
+          const observedTx = new Proxy(tx, {get(transaction, key) {
+            if (key === "update") return (ref, data, ...rest) => {
+              if (ref.parent.id === "importBatches" && data.status === "committed") completions.push(ref.id);
+              return transaction.update(ref, data, ...rest);
+            };
+            const value = Reflect.get(transaction, key, transaction);
+            return typeof value === "function" ? value.bind(transaction) : value;
+          }});
+          return {result: await fn(observedTx), completions};
+        }, options);
+        for (const id of committed.completions) completionWrites.set(id, (completionWrites.get(id) || 0) + 1);
+        return committed.result;
+      };
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }});
+    const raw = createImportApi({getDb: () => observedDb, serverTimestamp: () => env.FieldValue.serverTimestamp()});
     const wrap = (handler) => {
       const callable = confirmedCallable("admin", handler, {db, logger: silent});
       return (req) => callable.run(req);
@@ -148,6 +172,10 @@ describe("CSV取込の検証とcommitのサーバー側の保証(Emulator + 実A
     assert.equal(await count("participants"), 10);
     assert.equal(await importSequence(), 2);
     assert.equal((await db.collection("importBatches").doc(SECOND).get()).data().status, "committed");
+    assert.equal(completionWrites.get(SECOND), 1, "完了への遷移は1回だけ。同時再実行で完了日時・集計値を上書きしない");
+    const completed = await everything();
+    assert.equal((await api.commit(asAdmin(second))).idempotentReplay, true);
+    assert.deepEqual(await everything(), completed, "完了後の再送はQR・資格・監査・履歴も変更しない");
   });
 
   test("B: 同じメールを含む別々のCSVを、どちらも許可なしで同時にcommit(20組) → 未承認の重複は1件も作られない", async () => {

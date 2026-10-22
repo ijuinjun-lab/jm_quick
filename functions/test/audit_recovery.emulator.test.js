@@ -92,7 +92,7 @@ test('H1: frozen templates/contact; qualification change stops; explicit same-jo
   const recovery = createReminderRecoveryApi({getDb: () => db, serverTimestamp: stamp, generateQrPng: fakeQrPng, getAppBaseUrl: app});
   const mails = []; const transport = {send: async (m) => { mails.push(m); return {outcome: 'sent', messageId: `fake-${mails.length}`}; }};
   try {
-    await db.collection('events').doc(eventId).set(f.event({eventId}));
+    await db.collection('events').doc(eventId).set(f.event({eventId, reminderSendAt: new Date("2026-11-20T01:00:00Z")}));
     for (let i = 0; i < 5; i++) {
       await db.collection('participants').doc(`p${i}`).set({eventId, name: `架空${i}`, email: `p${i}@example.invalid`, publicId: `pub_${String(i).repeat(24)}`, schemaVersion: 2, status: 'active'});
       await db.collection('programAttendances').doc(`p${i}_program-3`).set({eventId, participantId: `p${i}`, programId: 'program-3', plannedCount: 2});

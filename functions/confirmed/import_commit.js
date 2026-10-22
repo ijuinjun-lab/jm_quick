@@ -107,8 +107,12 @@ const TRANSIENT_ATTEMPTS = 5;
 const isTransientTransactionError = (error) => Boolean(error) && error.isApiError !== true &&
   (error.code === 10 || (error.code === 3 && /Transaction is invalid or closed/i.test(String(error.message))));
 
-async function runTransactionWithRetry(db, fn) {
+async function runTransactionWithRetry(db, fn, alreadyApplied) {
   for (let attempt = 1; ; attempt += 1) {
+    // Immutable audit rows prove that the atomic row write already succeeded.
+    // Check outside the write transaction, including after a lock timeout, so
+    // duplicate requests do not keep taking locks while the batch is finishing.
+    if (alreadyApplied && await alreadyApplied()) return;
     try {
       return await db.runTransaction(fn);
     } catch (error) {
@@ -223,13 +227,16 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     await runTransactionWithRetry(db, async (tx) => {
       const state = await tx.get(batchRef);
       if (!state.exists || state.data().status === BATCH_STATUS.ABANDONED) throw identityFailure("batch-abandoned");
+      // Check the audit row before locking participant/qualification documents.
+      // Duplicate requests for completed rows need none of those additional locks.
+      const rowSnap = await tx.get(rowRef);
+      if (rowSnap.exists) { verifyExistingRow(rowSnap.data(), item); return; }
       const created = item.result === RESULT.CREATED;
       const affected = [RESULT.CREATED, RESULT.ADDED, RESULT.UNCHANGED].includes(item.result);
       const participantRef = affected ? db.collection("participants").doc(item.record.participantId) : null;
       const attendanceRefs = affected ? item.record.attendances.map((a) => db.collection("programAttendances").doc(a.attendanceId)) : [];
       const linkRef = affected && item.record.identity ? db.collection("applicationLinks").doc(item.record.identity.key) : null;
-      const [rowSnap, ...others] = await tx.getAll(rowRef, ...(affected ? [participantRef, ...attendanceRefs] : []));
-      if (rowSnap.exists) { verifyExistingRow(rowSnap.data(), item); return; }
+      const others = affected ? await tx.getAll(participantRef, ...attendanceRefs) : [];
       const link = linkRef ? await tx.get(linkRef) : null;
       const grantRef = ctx.identityVersion && affected ? db.collection("qualificationGrants").doc(`${ctx.batchId}-${item.record.participantId}`) : null;
       const priorGrant = grantRef ? await tx.get(grantRef) : null;
@@ -301,6 +308,12 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
         }
       }
       tx.create(rowRef, rowDoc(item, ctx.uid, ctx.rowAudit));
+    }, async () => {
+      const saved = await rowRef.get();
+      if (!saved.exists) return false;
+      verifyExistingRow(saved.data(), item);
+      // No mutation here. The final batch transaction still fences abandonment.
+      return true;
     });
   }
 
@@ -380,7 +393,6 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
     // 1. batchの作成(または既存の再利用)。採番はeventのカウンタを同じトランザクションで進める。
     const started = await runTransactionWithRetry(db, async (tx) => {
       const batchSnap = await tx.get(batchRef);
-      const eventSnap = await tx.get(eventRef);
       if (batchSnap.exists) {
         const existing = batchSnap.data();
         if (existing.eventId !== eventId || existing.requestHash !== hash) {
@@ -392,6 +404,7 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
         }
         return {existing: true, status: existing.status, sequence: existing.sequence};
       }
+      const eventSnap = await tx.get(eventRef);
       if (!eventSnap.exists) throw new ApiError("not-found", "イベントが見つかりません。");
       if (!isConfirmedFlow(eventSnap.data())) {
         throw new ApiError("failed-precondition", "このイベントは新方式(confirmed)ではありません。");
@@ -433,8 +446,11 @@ function createImportCommitter({serverTimestamp, generatePublicId = defaultPubli
       await runTransactionWithRetry(db, async (tx) => {
         // All import transactions acquire the batch before the event/rows (including abandonment).
         const currentBatch = await tx.get(batchRef);
-        const currentEvent = await tx.get(eventRef);
         if (currentBatch.data().status === BATCH_STATUS.ABANDONED) throw identityFailure("batch-abandoned");
+        // Another request may already have finished. Keep its completion timestamp and
+        // counts, and avoid upgrading another batch/event lock for an identical replay.
+        if (currentBatch.data().status === BATCH_STATUS.COMMITTED) return;
+        const currentEvent = await tx.get(eventRef);
         if (currentEvent.data().activeImportBatch === batchId) tx.update(eventRef, {activeImportBatch: null});
         tx.update(batchRef, {
           status: BATCH_STATUS.COMMITTED, failureReason: null,

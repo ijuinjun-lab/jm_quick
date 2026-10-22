@@ -29,7 +29,7 @@ DateTime? parseJstDateTime(String text) {
   return utc.subtract(const Duration(hours: 9));
 }
 
-/// 前日リマインド(イベント管理者以上): 文面・送信前の宛先一覧・プレビュー・手動送信・現在の状態。
+/// リマインド(イベント管理者以上): 文面・送信前の宛先一覧・プレビュー・手動送信・現在の状態。
 /// 対象人数・対象外人数・宛先・状態はすべてサーバー(callable)の値。対象は当選メールが送信済みの有効な参加者(取込回は問わない)。
 /// 手動送信専用: 自動送信の有効化・送信予定日時の入力は無い(サーバーも自動送信の有効化を拒否し、自動ではジョブを作らない)。
 /// 文面の保存だけではメールは送られない。送信は宛先一覧を確認してから「今すぐリマインド送信を開始…」で行う。
@@ -38,6 +38,48 @@ DateTime? parseJstDateTime(String text) {
 ///   イベントIDを見る・入力する・書き換える欄は無い。[initialEventId]が無い状態(直接この画面に来た場合)は、
 ///   イベントを推測したり最初のイベントを自動選択したりせず、「イベント管理画面から開いてください」という
 ///   案内だけを表示する。
+class ReminderRoundsPage extends StatelessWidget {
+  const ReminderRoundsPage({
+    super.key,
+    required this.service,
+    this.initialEventId,
+  });
+  final ReminderService service;
+  final String? initialEventId;
+  @override
+  Widget build(BuildContext context) {
+    if (service is! ReminderRoundService) {
+      return ReminderPage(service: service, initialEventId: initialEventId);
+    }
+    final rounds = service as ReminderRoundService;
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('リマインド'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: '第1回'),
+              Tab(text: '第2回'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            for (final round in [1, 2])
+              ReminderPage(
+                key: ValueKey('reminder-round-$round'),
+                service: rounds.forRound(round),
+                initialEventId: initialEventId,
+                round: round,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class ReminderPage extends StatefulWidget {
   const ReminderPage({
     super.key,
@@ -45,8 +87,10 @@ class ReminderPage extends StatefulWidget {
     this.initialEventId,
     this.pollInterval = const Duration(seconds: 5),
     this.now,
+    this.round,
   });
   final ReminderService service;
+  final int? round;
 
   /// イベント管理画面(`/console?eventId=…`)から渡される、対象イベントのID(正本)。
   final String? initialEventId;
@@ -59,11 +103,17 @@ class ReminderPage extends StatefulWidget {
   State<ReminderPage> createState() => _ReminderPageState();
 }
 
-class _ReminderPageState extends State<ReminderPage> {
+class _ReminderPageState extends State<ReminderPage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+  final plannedDate = TextEditingController();
+  final plannedTime = TextEditingController();
   final subject = TextEditingController();
   final intro = TextEditingController();
   final closing = TextEditingController();
   final notes = TextEditingController();
+  final adoptionNotes = TextEditingController();
   final participantId = TextEditingController();
   ReminderSettings? settings;
   bool loading = false;
@@ -86,13 +136,7 @@ class _ReminderPageState extends State<ReminderPage> {
   @override
   void dispose() {
     pollTimer?.cancel();
-    for (final c in [
-      subject,
-      intro,
-      closing,
-      notes,
-      participantId,
-    ]) {
+    for (final c in [subject, intro, closing, notes, participantId]) {
       c.dispose();
     }
     super.dispose();
@@ -108,10 +152,17 @@ class _ReminderPageState extends State<ReminderPage> {
         settings = result;
         if (!silent) {
           // フォームは、サーバーの現在値で埋める(silent=pollingでは、入力中の内容を上書きしない)
+          final jst = result.sendAt
+              ?.toUtc()
+              .add(const Duration(hours: 9))
+              .toIso8601String();
+          plannedDate.text = result.plannedDate ?? jst?.substring(0, 10) ?? "";
+          plannedTime.text = result.plannedTime ?? jst?.substring(11, 16) ?? "";
           subject.text = result.subject;
           intro.text = result.introBody;
           closing.text = result.closingBody;
           notes.text = result.notesBody;
+          adoptionNotes.text = result.adoptionNotesBody;
           if (participantId.text.isEmpty) {
             participantId.text = result.previewParticipantId ?? '';
           }
@@ -121,7 +172,7 @@ class _ReminderPageState extends State<ReminderPage> {
     } on WinnerSendException catch (e) {
       if (mounted && !silent) setState(() => error = e.message);
     } catch (_) {
-      if (mounted && !silent) setState(() => error = '前日リマインドの情報を取得できませんでした。');
+      if (mounted && !silent) setState(() => error = 'リマインドの情報を取得できませんでした。');
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -146,7 +197,8 @@ class _ReminderPageState extends State<ReminderPage> {
     return subject.text != s.subject ||
         intro.text != s.introBody ||
         closing.text != s.closingBody ||
-        notes.text != s.notesBody;
+        notes.text != s.notesBody ||
+        adoptionNotes.text != s.adoptionNotesBody;
   }
 
   String? _validate() {
@@ -158,7 +210,7 @@ class _ReminderPageState extends State<ReminderPage> {
     }
     if (intro.text.trim().isEmpty) return '冒頭本文を入力してください。';
     if (closing.text.trim().isEmpty) return '締め本文を入力してください。';
-    for (final c in [intro, closing, notes]) {
+    for (final c in [intro, closing, notes, adoptionNotes]) {
       if (c.text.trim().length > _maxBody) {
         return '本文は$_maxBody文字以内で入力してください。';
       }
@@ -182,7 +234,7 @@ class _ReminderPageState extends State<ReminderPage> {
     ];
     final ok = await confirmSendAction(
       context,
-      title: '前日リマインドの文面を保存します',
+      title: 'リマインドの文面を保存します',
       lines: lines,
       confirmLabel: '保存',
     );
@@ -194,17 +246,27 @@ class _ReminderPageState extends State<ReminderPage> {
     });
     try {
       // 文面だけを保存する(自動送信の有効・無効、送信予定日時は送らない=手動送信専用)
-      await widget.service.updateSettings(
-        eventId: s.eventId,
-        template: _templateDirty
-            ? (
-                subject: subject.text,
-                introBody: intro.text,
-                closingBody: closing.text,
-                notesBody: notes.text,
-              )
-            : null,
-      );
+      if (widget.service is ReminderRoundService) {
+        await (widget.service as ReminderRoundService).saveTemplate(s.eventId, {
+          'subject': subject.text,
+          'introBody': intro.text,
+          'closingBody': closing.text,
+          'notesBody': notes.text,
+          'adoptionNotesBody': adoptionNotes.text,
+        });
+      } else {
+        await widget.service.updateSettings(
+          eventId: s.eventId,
+          template: _templateDirty
+              ? (
+                  subject: subject.text,
+                  introBody: intro.text,
+                  closingBody: closing.text,
+                  notesBody: notes.text,
+                )
+              : null,
+        );
+      }
       if (mounted) setState(() => message = '文面を保存しました(メールは送信していません)。');
     } on WinnerSendException catch (e) {
       if (mounted) setState(() => error = e.message);
@@ -250,18 +312,27 @@ class _ReminderPageState extends State<ReminderPage> {
   Future<void> _startNow() async {
     if (busy) return;
     final s = settings!;
+    if (widget.round != null &&
+        (s.sendAt == null || _scheduleDirty || _templateDirty)) {
+      setState(() => error = '送信予定日・時刻と文面を保存し、プレビューを確認してください。');
+      return;
+    }
     final version = s.templateVersion;
     if (version == null || s.blocked || s.targetsFingerprint == null) return;
     final ok = await confirmSendAction(
       context,
-      title: '前日リマインドを今すぐ開始します',
+      title: widget.round == null
+          ? 'リマインドを今すぐ開始します'
+          : '第${widget.round}回リマインドを今すぐ開始します',
       lines: [
         'イベント：${s.eventName}',
+        if (widget.round != null)
+          '送信予定：${s.plannedDate ?? "未設定"} ${s.plannedTime ?? "時刻未設定"}（日本時間）。自動送信はありません。',
         '送信対象：${s.targetCount}件(当選メール送信済みの参加者。通常当選${s.normalCount}件・繰り上げ当選${s.waitlistCount}件)',
         '送信対象外：${s.recipients.where((r) => !r.target).length}件(当選メール未送信・送信失敗など。送信されません)',
         '宛先は、この画面の宛先一覧のとおりです(確認後に変わっていれば、サーバーが開始を止めます)。',
         'テンプレート：v$version',
-        '送信はサーバーが行います(このイベントのリマインドは1つだけで、二重には作られません)。',
+        '送信はサーバーが行います(この回のリマインドジョブは1つだけで、二重には作られません)。',
         'この操作でメールが送信されます(送信はサーバーが行い、この画面を閉じても続きます)。',
       ],
       confirmLabel: '送信を開始',
@@ -302,7 +373,10 @@ class _ReminderPageState extends State<ReminderPage> {
           service: ReminderJobAdapter(widget.service),
           eventId: s.eventId,
           eventName: s.eventName,
-          jobId: ReminderJobAdapter.jobIdFor(s.eventId),
+          jobId: ReminderJobAdapter.jobIdFor(
+            s.eventId,
+            round: widget.round ?? 1,
+          ),
           pollInterval: widget.pollInterval,
         ),
       ),
@@ -311,59 +385,75 @@ class _ReminderPageState extends State<ReminderPage> {
   }
 
   @override
-  Widget build(BuildContext context) => PageFrame(
-    title: '前日リマインド',
-    child: !_hasEventId
-        ? missingEventCard(context)
-        : Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: Column(
+  Widget build(BuildContext context) {
+    super.build(context);
+    return PageFrame(
+      title: widget.round == null ? 'リマインド' : '第${widget.round}回リマインド',
+      child: !_hasEventId
+          ? missingEventCard(context)
+          : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
-                  '前日リマインド(新方式のイベント)',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 10),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: FilledButton(
-                    key: const Key('reminder-reload'),
-                    onPressed: loading ? null : () => _load(),
-                    child: const Text('最新の状態に更新'),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          widget.round == null
+                              ? 'リマインド(新方式のイベント)'
+                              : '第${widget.round}回リマインド',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: FilledButton(
+                            key: const Key('reminder-reload'),
+                            onPressed: loading ? null : () => _load(),
+                            child: const Text('最新の状態に更新'),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
+                if (error != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    error!,
+                    style: const TextStyle(color: Color(0xffb42318)),
+                  ),
+                ],
+                if (message != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    message!,
+                    style: const TextStyle(color: Color(0xff067647)),
+                  ),
+                ],
+                if (settings != null) ...[
+                  const SizedBox(height: 12),
+                  _overview(settings!),
+                  const SizedBox(height: 12),
+                  if (widget.service is ReminderRoundService)
+                    _scheduleForm(settings!),
+                  _settingsForm(settings!),
+                  const SizedBox(height: 12),
+                  _recipientsCard(settings!),
+                  const SizedBox(height: 12),
+                  _previewCard(settings!),
+                  const SizedBox(height: 12),
+                  _jobCard(settings!),
+                ],
               ],
             ),
-          ),
-        ),
-        if (error != null) ...[
-          const SizedBox(height: 10),
-          Text(error!, style: const TextStyle(color: Color(0xffb42318))),
-        ],
-        if (message != null) ...[
-          const SizedBox(height: 10),
-          Text(message!, style: const TextStyle(color: Color(0xff067647))),
-        ],
-        if (settings != null) ...[
-          const SizedBox(height: 12),
-          _overview(settings!),
-          const SizedBox(height: 12),
-          _settingsForm(settings!),
-          const SizedBox(height: 12),
-          _recipientsCard(settings!),
-          const SizedBox(height: 12),
-          _previewCard(settings!),
-          const SizedBox(height: 12),
-          _jobCard(settings!),
-        ],
-      ],
-    ),
-  );
+    );
+  }
 
   Widget _overview(ReminderSettings s) => Card(
     child: Padding(
@@ -384,7 +474,7 @@ class _ReminderPageState extends State<ReminderPage> {
           const Padding(
             padding: EdgeInsets.only(top: 6),
             child: Text(
-              '前日リマインドは手動送信です。送信前の宛先一覧を確認してから「今すぐリマインド送信を開始…」で送信します(自動送信はありません)。',
+              'リマインドは各回とも手動送信です。送信前の宛先一覧を確認してから「今すぐリマインド送信を開始…」で送信します(自動送信はありません)。',
               key: ValueKey('note-manual-only'),
               style: TextStyle(color: Color(0xff5c6670)),
             ),
@@ -411,6 +501,111 @@ class _ReminderPageState extends State<ReminderPage> {
     ),
   );
 
+  bool get _scheduleDirty =>
+      plannedDate.text != (settings?.plannedDate ?? '') ||
+      plannedTime.text != (settings?.plannedTime ?? '');
+
+  Future<void> _saveSchedule() async {
+    final date = plannedDate.text.trim(), time = plannedTime.text.trim();
+    if ((date.isNotEmpty && parseJstDateTime('$date 00:00') == null) ||
+        (time.isNotEmpty &&
+            !RegExp(r'^([01]\d|2[0-3]):[0-5]\d$').hasMatch(time))) {
+      setState(() => error = '日付はYYYY-MM-DD、時刻はHH:mm（日本時間）で入力してください。');
+      return;
+    }
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await (widget.service as ReminderRoundService).updateSchedule(
+        _eventId,
+        date: date.isEmpty ? null : date,
+        time: time.isEmpty ? null : time,
+      );
+      if (mounted) {
+        setState(() {
+          previewResult = null;
+          message = '送信予定を保存しました。自動送信は行いません。';
+        });
+        await _load(silent: true);
+      }
+    } on WinnerSendException catch (e) {
+      if (mounted) setState(() => error = e.message);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _copyOtherTemplate() async {
+    setState(() => busy = true);
+    try {
+      final other = await (widget.service as ReminderRoundService)
+          .forRound(widget.round == 2 ? 1 : 2)
+          .getSettings(_eventId);
+      if (!mounted) return;
+      setState(() {
+        subject.text = other.subject;
+        intro.text = other.introBody;
+        closing.text = other.closingBody;
+        notes.text = other.notesBody;
+        adoptionNotes.text = other.adoptionNotesBody;
+        previewResult = null;
+        message = 'もう一方の文面を入力欄にコピーしました。確認して保存してください（未保存）。';
+      });
+    } on WinnerSendException catch (e) {
+      if (mounted) setState(() => error = e.message);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Widget _scheduleForm(ReminderSettings s) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            '送信予定（日本時間）',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          const Text('予定日時になっても自動送信しません。日付だけ保存できますが、時刻未設定では送信開始できません。'),
+          TextField(
+            key: const Key('reminder-date'),
+            controller: plannedDate,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: '送信予定日',
+              hintText: 'YYYY-MM-DD',
+            ),
+          ),
+          TextField(
+            key: const Key('reminder-time'),
+            controller: plannedTime,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: '送信予定時刻',
+              hintText: 'HH:mm（未確定なら空欄）',
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (s.sendAt == null) const Text('送信予定日時が未確定です。送信は開始できません。'),
+          if (s.job != null)
+            const Text('作成済みジョブの予定・本文・宛先は変更されません。送信済みには再送しません。'),
+          OutlinedButton(
+            onPressed: busy ? null : _saveSchedule,
+            child: const Text('送信予定を保存'),
+          ),
+          OutlinedButton(
+            onPressed: busy ? null : _copyOtherTemplate,
+            child: const Text('もう一方の回の文面をコピー'),
+          ),
+        ],
+      ),
+    ),
+  );
+
   Widget _settingsForm(ReminderSettings s) => Card(
     child: Padding(
       padding: const EdgeInsets.all(16),
@@ -426,11 +621,13 @@ class _ReminderPageState extends State<ReminderPage> {
           const SizedBox(height: 8),
           TextField(
             controller: subject,
+            onChanged: (_) => setState(() {}),
             decoration: const InputDecoration(labelText: '件名'),
           ),
           const SizedBox(height: 10),
           TextField(
             controller: intro,
+            onChanged: (_) => setState(() {}),
             minLines: 3,
             maxLines: 6,
             decoration: const InputDecoration(
@@ -441,6 +638,7 @@ class _ReminderPageState extends State<ReminderPage> {
           const SizedBox(height: 10),
           TextField(
             controller: closing,
+            onChanged: (_) => setState(() {}),
             minLines: 3,
             maxLines: 6,
             decoration: const InputDecoration(
@@ -451,6 +649,7 @@ class _ReminderPageState extends State<ReminderPage> {
           const SizedBox(height: 10),
           TextField(
             controller: notes,
+            onChanged: (_) => setState(() {}),
             minLines: 2,
             maxLines: 5,
             decoration: const InputDecoration(
@@ -458,6 +657,14 @@ class _ReminderPageState extends State<ReminderPage> {
               alignLabelWithHint: true,
             ),
           ),
+          if (widget.service is ReminderRoundService)
+            TextField(
+              controller: adoptionNotes,
+              onChanged: (_) => setState(() {}),
+              minLines: 2,
+              maxLines: 5,
+              decoration: const InputDecoration(labelText: '譲渡会の注意事項（任意）'),
+            ),
           const SizedBox(height: 12),
           Align(
             alignment: Alignment.centerLeft,
@@ -547,15 +754,22 @@ class _ReminderPageState extends State<ReminderPage> {
     Widget row(ReminderRecipient r) => Container(
       key: ValueKey('reminder-recipient-${r.participantId}'),
       padding: const EdgeInsets.symmetric(vertical: 6),
-      decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0xffe5e7eb)))),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xffe5e7eb))),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('${r.name}　${r.email}', style: const TextStyle(fontWeight: FontWeight.w600)),
+          Text(
+            '${r.name}　${r.email}',
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
           Text(
             '${r.additionUnresolved ? '追加当選通知の確認待ち / ' : ''}${r.notificationTypeLabel}　当選メール：${r.winnerStatusLabel}',
             style: TextStyle(
-              color: r.winnerStatus == 'unknown' ? const Color(0xffb42318) : const Color(0xff5c6670),
+              color: r.winnerStatus == 'unknown'
+                  ? const Color(0xffb42318)
+                  : const Color(0xff5c6670),
               fontSize: 13,
             ),
           ),
@@ -569,7 +783,9 @@ class _ReminderPageState extends State<ReminderPage> {
               '${r.duplicateLabel}(同じアドレス${r.duplicateGroupSize}件)',
               style: TextStyle(
                 fontSize: 13,
-                color: r.duplicate == 'suspected-duplicate' || r.duplicate == 'undetermined'
+                color:
+                    r.duplicate == 'suspected-duplicate' ||
+                        r.duplicate == 'undetermined'
                     ? const Color(0xffb54708)
                     : const Color(0xff5c6670),
               ),
@@ -584,7 +800,10 @@ class _ReminderPageState extends State<ReminderPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text('送信前の宛先一覧', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              '送信前の宛先一覧',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 6),
             Text(
               '送信予定：${targets.length}件(通常当選${s.normalCount}件・繰り上げ当選${s.waitlistCount}件)　送信対象外：${excluded.length}件',
@@ -601,7 +820,7 @@ class _ReminderPageState extends State<ReminderPage> {
                 padding: const EdgeInsets.all(10),
                 color: const Color(0xffffe8e8),
                 child: Text(
-                  '当選メールの結果不明、または追加当選通知が未確定の申込が${s.unknownWinnerMail}件あります。この状態では前日リマインドを作成しません'
+                  '当選メールの結果不明、または追加当選通知が未確定の申込が${s.unknownWinnerMail}件あります。この状態ではリマインドを作成しません'
                   '(手動・自動とも)。当選メールの送信状況を確認してください。',
                 ),
               ),
@@ -613,16 +832,26 @@ class _ReminderPageState extends State<ReminderPage> {
                 color: const Color(0xffffe8e8),
                 child: Text(
                   '重複登録の疑い(同じメールアドレス・氏名・プログラム・時間帯)が${s.suspectedDuplicates}件あります。'
-                  '誤送信を防ぐため、この状態では前日リマインドを作成しません(参加者の統合・削除はしません)。',
+                  '誤送信を防ぐため、この状態ではリマインドを作成しません(参加者の統合・削除はしません)。',
                 ),
               ),
             const SizedBox(height: 10),
-            Text('送信予定(${targets.length}件)', style: const TextStyle(fontWeight: FontWeight.w600)),
-            if (targets.isEmpty) const Text('送信予定の参加者はいません。', style: TextStyle(color: Color(0xff5c6670))),
+            Text(
+              '送信予定(${targets.length}件)',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            if (targets.isEmpty)
+              const Text(
+                '送信予定の参加者はいません。',
+                style: TextStyle(color: Color(0xff5c6670)),
+              ),
             for (final r in targets) row(r),
             if (excluded.isNotEmpty) ...[
               const SizedBox(height: 12),
-              Text('送信対象外(${excluded.length}件。送信されません)', style: const TextStyle(fontWeight: FontWeight.w600)),
+              Text(
+                '送信対象外(${excluded.length}件。送信されません)',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
               for (final r in excluded) row(r),
             ],
           ],
@@ -636,24 +865,75 @@ class _ReminderPageState extends State<ReminderPage> {
     try {
       final rows = await service.recoveryPreview(_eventId);
       if (!mounted) return;
-      final selected = await showDialog<Map<String, dynamic>>(context: context, builder: (context) => AlertDialog(
-        title: const Text('安全停止した宛先の再確認'),
-        content: SizedBox(width: 600, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text('確実に未送信で、当選通知がすべて送信済みの宛先だけを表示します。送信済み・結果不明は再送しません。文面設定はジョブ作成時のまま、参加資格は再確認した現在の内容になります。'),
-          if (rows.isEmpty) const Text('再確認できる宛先はありません。追加当選通知の配送状態や有効な参加資格を確認してください。'),
-          for (final r in rows) TextButton(onPressed: () => Navigator.pop(context, r), child: Text('${r['name']} / ${r['email']}')),
-        ]))), actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('閉じる'))],
-      ));
+      final selected = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('安全停止した宛先の再確認'),
+          content: SizedBox(
+            width: 600,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    '確実に未送信で、当選通知がすべて送信済みの宛先だけを表示します。送信済み・結果不明は再送しません。文面設定はジョブ作成時のまま、参加資格は再確認した現在の内容になります。',
+                  ),
+                  if (rows.isEmpty)
+                    const Text('再確認できる宛先はありません。追加当選通知の配送状態や有効な参加資格を確認してください。'),
+                  for (final r in rows)
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, r),
+                      child: Text('${r['name']} / ${r['email']}'),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('閉じる'),
+            ),
+          ],
+        ),
+      );
       if (selected == null || !mounted) return;
       var reason = '';
-      final accepted = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
-        title: const Text('宛先・参加資格・本文を確認'),
-        content: SizedBox(width: 600, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text('${selected['name']} / ${selected['email']}'), SelectableText(selected['text'] as String),
-          TextField(maxLength: 200, onChanged: (v) => reason = v, decoration: const InputDecoration(labelText: '確認根拠（必須）')),
-        ]))), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('戻る')),
-          TextButton(onPressed: () { if (reason.trim().isNotEmpty) Navigator.pop(context, true); }, child: const Text('この宛先の再開を承認'))],
-      ));
+      final accepted = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('宛先・参加資格・本文を確認'),
+          content: SizedBox(
+            width: 600,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('${selected['name']} / ${selected['email']}'),
+                  SelectableText(selected['text'] as String),
+                  TextField(
+                    maxLength: 200,
+                    onChanged: (v) => reason = v,
+                    decoration: const InputDecoration(labelText: '確認根拠（必須）'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('戻る'),
+            ),
+            TextButton(
+              onPressed: () {
+                if (reason.trim().isNotEmpty) Navigator.pop(context, true);
+              },
+              child: const Text('この宛先の再開を承認'),
+            ),
+          ],
+        ),
+      );
       if (accepted != true || !mounted) return;
       await service.confirmRecovery(_eventId, selected, reason.trim());
       if (!mounted) return;
@@ -673,8 +953,14 @@ class _ReminderPageState extends State<ReminderPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text('送信状況', style: TextStyle(fontWeight: FontWeight.bold)),
-            if (job != null && job.counts.failed > 0 && widget.service is ReminderRecoveryService)
-              OutlinedButton(key: const Key('reminder-recovery'), onPressed: loading ? null : _recoverRecipients, child: const Text('安全停止した宛先を確認して復旧')),
+            if (job != null &&
+                job.counts.failed > 0 &&
+                widget.service is ReminderRecoveryService)
+              OutlinedButton(
+                key: const Key('reminder-recovery'),
+                onPressed: loading ? null : _recoverRecipients,
+                child: const Text('安全停止した宛先を確認して復旧'),
+              ),
             const SizedBox(height: 8),
             if (job == null) ...[
               const Text('リマインドはまだ作成されていません(未送信)。', key: ValueKey('no-job')),
@@ -685,6 +971,10 @@ class _ReminderPageState extends State<ReminderPage> {
                   onPressed:
                       busy ||
                           !_previewed ||
+                          (widget.round != null &&
+                              (s.sendAt == null ||
+                                  _scheduleDirty ||
+                                  _templateDirty)) ||
                           s.targetCount == 0 ||
                           s.templateVersion == null ||
                           s.blocked ||

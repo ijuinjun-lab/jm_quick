@@ -118,7 +118,8 @@ function pairKind(a, b) {
 //                 winnerStatus, target, excludedReason, duplicate, duplicateGroupSize}](participantId昇順。対象外も含む)
 //   counts: {normal, waitlistPromotion}(送信対象のうち)/ blocked: {unknownWinnerMail, suspectedDuplicates} / fingerprint
 async function collectReminderRecipients(db, eventId, {event, participantId = null} = {}) {
-  const loadedEvent = event || (await db.collection("events").doc(eventId).get()).data() || {};
+  const sourceEvent = event || (await db.collection("events").doc(eventId).get()).data() || {};
+  const loadedEvent = require("./reminder_rounds").roundEvent(sourceEvent, sourceEvent.reminderRound || 1);
   const {participants, batches, eligible, excludedByReason} = await loadEligible(db, eventId, participantId);
   const deliveryRefs = eligible.map((doc) => db.collection("mailDeliveries").doc(`${doc.id}_winner`));
   const deliveries = [];
@@ -226,6 +227,7 @@ async function collectReminderRecipients(db, eventId, {event, participantId = nu
   // 照合値: 送信内容・宛先に関わる値すべて(個人情報そのものは含めず、ハッシュだけ)
   const configuration = [loadedEvent.winnerMailTemplate?.version || null, loadedEvent.waitlistWinnerMailTemplate?.version || null,
     loadedEvent.reminderMailTemplate?.version || null, loadedEvent.confirmedMailSettings || null];
+  if (loadedEvent.reminderRound === 2 || loadedEvent.reminderScheduleVersion) configuration.push(loadedEvent.reminderRound, loadedEvent.reminderPlannedDate, loadedEvent.reminderPlannedTime);
   for (const r of recipients) r.fingerprint = crypto.createHash("sha256").update(JSON.stringify([configuration,
     r.participantId, r.winnerStatus, r.changeStates, r.emailKey, r.nameKey, r.name, r.notificationType,
     r.programs.map((x) => [x.programId, x.name, x.timeText, x.plannedCount])])).digest("hex");

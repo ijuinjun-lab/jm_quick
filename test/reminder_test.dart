@@ -94,7 +94,7 @@ class FakeReminderService implements ReminderService {
       : SendJob(
           jobId: 'reminder-event1',
           batchId: '',
-          batchLabel: '前日リマインド',
+          batchLabel: 'リマインド',
           state: JobState.fromValue(jobStatus),
           templateVersion: jobVersion,
           targetCount: states!.length,
@@ -446,7 +446,7 @@ void main() {
       await tester.enterText(find.widgetWithText(TextField, '件名'), '新しい件名');
       await tester.tap(find.text('文面を保存'));
       await settle(tester);
-      expect(find.text('前日リマインドの文面を保存します'), findsOneWidget);
+      expect(find.text('リマインドの文面を保存します'), findsOneWidget);
       expect(find.text('テンプレート：文面を更新します(v3)'), findsOneWidget);
       expect(find.textContaining('この保存では、メールは送信されません'), findsOneWidget);
       expect(find.descendant(of: find.byType(AlertDialog), matching: find.textContaining('自動送信')), findsNothing,
@@ -487,7 +487,7 @@ void main() {
       setPhone(tester);
       final service = FakeReminderService()
         ..updateError = const WinnerSendException(
-          '前日リマインドの自動送信は使用できません。宛先一覧を確認してから、手動で送信してください。',
+          'リマインドの自動送信は使用できません。宛先一覧を確認してから、手動で送信してください。',
           code: 'auto-send-disabled',
         );
       await tester.pumpWidget(page(service));
@@ -575,7 +575,7 @@ void main() {
         expect(tester.widget<OutlinedButton>(button).onPressed, isNotNull);
         await tester.tap(button);
         await settle(tester);
-        expect(find.text('前日リマインドを今すぐ開始します'), findsOneWidget);
+        expect(find.text('リマインドを今すぐ開始します'), findsOneWidget);
         expect(find.text('イベント：架空イベント'), findsOneWidget);
         expect(find.text('送信対象：150件(当選メール送信済みの参加者。通常当選150件・繰り上げ当選0件)'), findsOneWidget);
         expect(find.textContaining('宛先は、この画面の宛先一覧のとおりです'), findsOneWidget);
@@ -939,6 +939,7 @@ void main() {
       );
       expect(seen.headers['Authorization'], 'Bearer tok');
       expect((jsonDecode(seen.body) as Map)['data'], {
+        'round': 1,
         'eventId': 'event1',
         'reminderEnabled': true,
         'reminderSendAt': '2026-11-29T01:00:00.000Z',
@@ -946,6 +947,7 @@ void main() {
       });
       await s.updateSettings(eventId: 'event1', enabled: false);
       expect((jsonDecode(seen.body) as Map)['data'], {
+        'round': 1,
         'eventId': 'event1',
         'reminderEnabled': false,
       });

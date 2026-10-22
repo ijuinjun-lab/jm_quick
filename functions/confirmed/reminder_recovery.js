@@ -1,4 +1,5 @@
 // Reconfirm only a definitely-unsent recipient, inside the original job. No new job or transport.
+const {roundOf, jobIdForReminder, deliveryIdForReminder} = require('./reminder_rounds');
 const {ApiError} = require('./api_error');
 const {collectReminderRecipients} = require('./reminder_targets');
 const {loadAttendances} = require('./winner_mail_message');
@@ -17,14 +18,15 @@ function transactionalReader(db, tx) {
 function createReminderRecoveryApi({getDb, serverTimestamp, generateQrPng, getAppBaseUrl}) {
   function parse(data, confirm) {
     const keys = confirm ? ['eventId', 'participantId', 'expectedFingerprint', 'reason'] : ['eventId'];
-    if (!data || Object.keys(data).some((k) => !keys.includes(k)) || !/^[A-Za-z0-9_-]{1,128}$/.test(data.eventId || '')) throw fail('invalid-request');
+    if (!data || Object.keys(data).some((k) => k !== 'round' && !keys.includes(k)) || !/^[A-Za-z0-9_-]{1,128}$/.test(data.eventId || '')) throw fail('invalid-request');
+    roundOf(data.round);
     if (confirm && (!/^[A-Za-z0-9_-]{1,128}$/.test(data.participantId || '') || typeof data.reason !== 'string' || !data.reason.trim() || data.reason.length > 200)) throw fail('invalid-recovery');
   }
   const busy = (job) => job.dispatchActive === true ||
     (job.dispatchWorkerLeaseUntil?.toMillis?.() || 0) > Date.now() || !['ready', 'completed'].includes(job.status);
   const token = (job, item, r) => digest([job.snapshot, item.status, item.attemptCount || 0, r.safetyFingerprint]);
   async function preview({data}) {
-    parse(data, false); const db = getDb(), ref = db.collection('sendJobs').doc(`reminder-${data.eventId}`);
+    parse(data, false); const db = getDb(), ref = db.collection('sendJobs').doc(jobIdForReminder(data.eventId, data.round));
     const job = await ref.get(); if (!job.exists) return {recipients: []};
     if (job.data().eventId !== data.eventId) throw fail('job-conflict');
     if (busy(job.data())) return {recipients: []};
@@ -34,7 +36,7 @@ function createReminderRecoveryApi({getDb, serverTimestamp, generateQrPng, getAp
     for (const item of failed.docs) {
       const r = current.recipients.find((x) => x.participantId === item.id);
       if (!r?.target || r.duplicate === 'suspected-duplicate') continue;
-      const delivery = await db.collection('mailDeliveries').doc(`${item.id}_reminder`).get();
+      const delivery = await db.collection('mailDeliveries').doc(deliveryIdForReminder(item.id, data.round)).get();
       if (delivery.data()?.status !== 'failed' || delivery.data()?.jobId !== ref.id) continue;
       const person = await db.collection('participants').doc(item.id).get();
       const rendered = await renderReminderMail({snapshot: job.data().snapshot,
@@ -47,8 +49,8 @@ function createReminderRecoveryApi({getDb, serverTimestamp, generateQrPng, getAp
     return {recipients};
   }
   async function confirm({identity, data}) {
-    parse(data, true); const db = getDb(), ref = db.collection('sendJobs').doc(`reminder-${data.eventId}`);
-    const itemRef = ref.collection('items').doc(data.participantId), deliveryRef = db.collection('mailDeliveries').doc(`${data.participantId}_reminder`);
+    parse(data, true); const db = getDb(), ref = db.collection('sendJobs').doc(jobIdForReminder(data.eventId, data.round));
+    const itemRef = ref.collection('items').doc(data.participantId), deliveryRef = db.collection('mailDeliveries').doc(deliveryIdForReminder(data.participantId, data.round));
     return db.runTransaction(async (tx) => {
       const [job, item, delivery] = await tx.getAll(ref, itemRef, deliveryRef);
       if (!job.exists || job.data().eventId !== data.eventId || !item.exists || !delivery.exists ||

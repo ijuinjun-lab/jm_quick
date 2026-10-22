@@ -24,7 +24,7 @@ const rel = (file) => path.relative(FUNCTIONS_DIR, file);
 test("走査対象のファイルが存在する(走査が空振りしていない)", () => {
   const names = files.map(rel);
   for (const expected of ["confirmed/import_mapping.js", "confirmed/import_rows.js", "confirmed/import_batch_plan.js",
-    "confirmed/test/no_loss.test.js"]) {
+    "confirmed/test/no_loss.test.js", "confirmed/winner_mail_copy_revision.js"]) {
     assert.ok(names.includes(expected), `${expected} が見つかりません`);
   }
 });
@@ -68,9 +68,9 @@ test("テスト・fixtureに実CSV由来のデータが入っていない(実在
     const matches = fs.readFileSync(file, "utf8").match(emailLike) || [];
     for (const match of matches) {
       // User-approved public contact in the production preset and its exact-wording test; no exception for fixtures.
-      // 繰り上げ当選メールの文案(sippo_waitlist_mail_preset.js)も、ユーザー提供の文案にある同じ公開問い合わせ先だけを許可する。
+      // 通常・繰り上げ文案と正式文案改訂モジュールも、同じ公開問い合わせ先の完全一致だけを許可する。
       const approvedContact = ["confirmed/sippo_mail_preset.js", "confirmed/sippo_waitlist_mail_preset.js",
-        "confirmed/test/participation_types.test.js"].includes(rel(file)) &&
+        "confirmed/winner_mail_copy_revision.js", "confirmed/test/participation_types.test.js"].includes(rel(file)) &&
         match === "sippo-support@info-event-jimukyoku.jp";
       assert.ok(approvedContact || /\.invalid$/i.test(match), `${rel(file)} に想定外のメール形式: ${match}`);
     }

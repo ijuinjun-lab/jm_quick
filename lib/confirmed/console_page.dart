@@ -495,7 +495,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 ),
                 'リマインド': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => ReminderPage(
+                    builder: (_) => ReminderRoundsPage(
                       initialEventId: id,
                       service: widget.reminderService,
                     ),
@@ -551,7 +551,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 '参加者ファイル取込': 'Excel／CSVの参加者ファイルを検証して取り込みます(メールは送信されません)',
                 '当選メール送信': '取込回ごとの送信・進行状況・失敗分の再送',
                 '当選メール設定': '件名・本文の設定とプレビュー',
-                'リマインド': '前日リマインドの設定・プレビュー・送信状況',
+                'リマインド': '第1回・第2回の予定・文面・送信状況',
                 'スタッフ管理': 'このイベントの受付スタッフを追加・解除する',
                 '受付': '受付スタッフ用QRを表示する(受付スタッフがスマホで読み取って受付する)',
                 '受付状況一覧': '受付状況(全体・プログラム別・時間帯別・参加者)を確認します。閲覧のみです。',

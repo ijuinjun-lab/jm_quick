@@ -38,8 +38,8 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const LEASE_EXPIRED_AFTER_DISPATCH = "lease-expired-after-dispatch";
 
 const jobIdForBatch = (batchId) => `winner-${batchId}`;
-const jobIdForReminder = (eventId) => `reminder-${eventId}`;
-const typeOfJobId = (jobId) => (typeof jobId === "string" && jobId.startsWith("reminder-") ? TYPES.REMINDER : TYPES.WINNER);
+const {jobIdForReminder, deliveryIdForReminder} = require("./reminder_rounds");
+const typeOfJobId = (jobId) => (typeof jobId === "string" && /^reminder2?-/.test(jobId) ? TYPES.REMINDER : TYPES.WINNER);
 const deliveryIdFor = (participantId, type = TYPE, grantBatchId = null) => `${participantId}_${type}${grantBatchId ? `_${grantBatchId}` : ""}`;
 const toMillis = (value) => (value && typeof value.toMillis === "function" ? value.toMillis() : value instanceof Date ? value.getTime() : Number(value) || 0);
 
@@ -71,6 +71,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
   };
   const deliveryForJob = async (db, jobId, participantId) => {
     const job = (await jobRef(db, jobId).get()).data();
+    if (typeOfJobId(jobId) === TYPES.REMINDER) return db.collection("mailDeliveries").doc(deliveryIdForReminder(participantId, job?.snapshot?.reminderRound || 1));
     return deliveryForGrant(db, participantId, typeOfJobId(jobId), job?.snapshot?.grantBatchId || null);
   };
 
@@ -168,7 +169,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       // 各参加者の item と delivery を、1トランザクションで冪等に作る(再実行しても増えない・上書きしない)。
       await runPool(targets, concurrency, async (participantId) => {
         const iRef = itemRef(db, jobId, participantId);
-        const dRef = await deliveryForGrant(db, participantId, type, snapshot.grantBatchId || null);
+        const dRef = type === TYPES.REMINDER ? db.collection("mailDeliveries").doc(deliveryIdForReminder(participantId, snapshot.reminderRound || 1)) : await deliveryForGrant(db, participantId, type, snapshot.grantBatchId || null);
         await db.runTransaction(async (tx) => {
           const [itemSnap, deliverySnap] = await tx.getAll(iRef, dRef);
           if (itemSnap.exists) return;
@@ -198,7 +199,10 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
         throw new ApiError("data-loss", "送信対象の件数とジョブ項目の件数が一致しません。ジョブを作成しませんでした。",
           {code: "job-items-mismatch", targetCount: targets.length, items: items.data().count, deliveries: deliveries.data().count});
       }
-      await ref.update({status: JOB.READY, updatedAt: serverTimestamp()});
+      await db.runTransaction(async (tx) => {
+        const current = await tx.get(ref);
+        if (current.data().status === JOB.PREPARING) tx.update(ref, {status: JOB.READY, updatedAt: serverTimestamp()});
+      });
     } catch (error) {
       if (error && error.isApiError === true) throw error;
       throw new ApiError("internal", "ジョブの準備を最後まで完了できませんでした。同じ操作をもう一度実行すると、続きから完了できます。", {code: "job-preparation-interrupted"});

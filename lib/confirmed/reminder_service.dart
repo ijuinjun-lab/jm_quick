@@ -6,8 +6,8 @@ import 'auth_client.dart';
 import 'winner_mail_service.dart';
 import 'winner_send_service.dart';
 
-/// 前日リマインドの設定・対象・ジョブの状態(すべてサーバーの値。個人情報は含まない)。
-/// 前日リマインドの宛先(送信前の確認用。サーバーの getConfirmedReminderSettings が返す。対象外も含む)。
+/// リマインドの設定・対象・ジョブの状態(すべてサーバーの値。個人情報は含まない)。
+/// リマインドの宛先(送信前の確認用。サーバーの getConfirmedReminderSettings が返す。対象外も含む)。
 class ReminderRecipient {
   const ReminderRecipient({
     required this.participantId,
@@ -23,27 +23,31 @@ class ReminderRecipient {
     this.additionUnresolved = false,
   });
 
-  factory ReminderRecipient.fromJson(Map<String, dynamic> json) => ReminderRecipient(
-    participantId: json['participantId'] as String? ?? '',
-    name: json['name'] as String? ?? '',
-    email: json['email'] as String? ?? '',
-    notificationType: json['notificationType'] as String? ?? 'normal',
-    programs: [
-      for (final p in (json['programs'] is List ? json['programs'] as List : const []))
-        if (p is Map)
-          (
-            name: p['name'] as String? ?? '',
-            timeText: p['timeText'] as String?,
-            plannedCount: (p['plannedCount'] as num?)?.toInt(),
-          ),
-    ],
-    winnerStatus: json['winnerStatus'] as String? ?? 'none',
-    target: json['target'] == true,
-    excludedReason: json['excludedReason'] as String?,
-    duplicate: json['duplicate'] as String? ?? 'none',
-    duplicateGroupSize: (json['duplicateGroupSize'] as num?)?.toInt() ?? 1,
-    additionUnresolved: json['additionUnresolved'] == true,
-  );
+  factory ReminderRecipient.fromJson(Map<String, dynamic> json) =>
+      ReminderRecipient(
+        participantId: json['participantId'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        email: json['email'] as String? ?? '',
+        notificationType: json['notificationType'] as String? ?? 'normal',
+        programs: [
+          for (final p
+              in (json['programs'] is List
+                  ? json['programs'] as List
+                  : const []))
+            if (p is Map)
+              (
+                name: p['name'] as String? ?? '',
+                timeText: p['timeText'] as String?,
+                plannedCount: (p['plannedCount'] as num?)?.toInt(),
+              ),
+        ],
+        winnerStatus: json['winnerStatus'] as String? ?? 'none',
+        target: json['target'] == true,
+        excludedReason: json['excludedReason'] as String?,
+        duplicate: json['duplicate'] as String? ?? 'none',
+        duplicateGroupSize: (json['duplicateGroupSize'] as num?)?.toInt() ?? 1,
+        additionUnresolved: json['additionUnresolved'] == true,
+      );
 
   final String participantId;
   final String name;
@@ -65,7 +69,8 @@ class ReminderRecipient {
   final int duplicateGroupSize;
   final bool additionUnresolved;
 
-  String get notificationTypeLabel => notificationType == 'waitlistPromotion' ? '繰り上げ当選' : '通常当選';
+  String get notificationTypeLabel =>
+      notificationType == 'waitlistPromotion' ? '繰り上げ当選' : '通常当選';
 
   String get winnerStatusLabel => switch (winnerStatus) {
     'sent' => '送信済み',
@@ -95,12 +100,16 @@ class ReminderSettings {
     required this.targetCount,
     required this.excludedCount,
     this.sendAt,
+    this.plannedDate,
+    this.plannedTime,
+    this.round = 1,
     this.eventEnded = false,
     this.templateVersion,
     this.subject = '',
     this.introBody = '',
     this.closingBody = '',
     this.notesBody = '',
+    this.adoptionNotesBody = '',
     this.previewParticipantId,
     this.job,
     this.changedSinceJob = false,
@@ -120,6 +129,9 @@ class ReminderSettings {
         ? json['changedSinceJob'] as Map
         : null;
     return ReminderSettings(
+      round: (json['round'] as num?)?.toInt() ?? 1,
+      plannedDate: json['plannedDate'] as String?,
+      plannedTime: json['plannedTime'] as String?,
       eventId: json['eventId'] as String? ?? '',
       eventName: json['eventName'] as String? ?? '',
       enabled: json['enabled'] == true,
@@ -138,6 +150,7 @@ class ReminderSettings {
       introBody: template?['introBody'] as String? ?? '',
       closingBody: template?['closingBody'] as String? ?? '',
       notesBody: template?['notesBody'] as String? ?? '',
+      adoptionNotesBody: template?['adoptionNotesBody'] as String? ?? '',
       targetCount: (targets['targetCount'] as num?)?.toInt() ?? 0,
       excludedCount: (targets['excludedCount'] as num?)?.toInt() ?? 0,
       previewParticipantId: json['previewParticipantId'] as String?,
@@ -146,14 +159,31 @@ class ReminderSettings {
           : null,
       changedSinceJob: changed?['changed'] == true,
       recipients: [
-        for (final r in (json['recipients'] is List ? json['recipients'] as List : const []))
-          if (r is Map) ReminderRecipient.fromJson(Map<String, dynamic>.from(r)),
+        for (final r
+            in (json['recipients'] is List
+                ? json['recipients'] as List
+                : const []))
+          if (r is Map)
+            ReminderRecipient.fromJson(Map<String, dynamic>.from(r)),
       ],
       targetsFingerprint: targets['fingerprint'] as String?,
-      normalCount: ((targets['countsByNotificationType'] as Map?)?['normal'] as num?)?.toInt() ?? 0,
-      waitlistCount: ((targets['countsByNotificationType'] as Map?)?['waitlistPromotion'] as num?)?.toInt() ?? 0,
-      unknownWinnerMail: ((targets['blocked'] as Map?)?['unknownWinnerMail'] as num?)?.toInt() ?? 0,
-      suspectedDuplicates: ((targets['blocked'] as Map?)?['suspectedDuplicates'] as num?)?.toInt() ?? 0,
+      normalCount:
+          ((targets['countsByNotificationType'] as Map?)?['normal'] as num?)
+              ?.toInt() ??
+          0,
+      waitlistCount:
+          ((targets['countsByNotificationType'] as Map?)?['waitlistPromotion']
+                  as num?)
+              ?.toInt() ??
+          0,
+      unknownWinnerMail:
+          ((targets['blocked'] as Map?)?['unknownWinnerMail'] as num?)
+              ?.toInt() ??
+          0,
+      suspectedDuplicates:
+          ((targets['blocked'] as Map?)?['suspectedDuplicates'] as num?)
+              ?.toInt() ??
+          0,
       currentTargetCount: (changed?['currentTargetCount'] as num?)?.toInt(),
     );
   }
@@ -166,6 +196,9 @@ class ReminderSettings {
 
   /// 送信予定日時(絶対時刻)。
   final DateTime? sendAt;
+  final String? plannedDate;
+  final String? plannedTime;
+  final int round;
   final bool eventEnded;
   final bool ready;
   final List<String> problems;
@@ -174,6 +207,7 @@ class ReminderSettings {
   final String introBody;
   final String closingBody;
   final String notesBody;
+  final String adoptionNotesBody;
 
   /// リマインド対象(イベント全体の全active participant。サーバーの計算結果)と、対象外の件数。
   final int targetCount;
@@ -204,7 +238,7 @@ class ReminderSettings {
   bool get blocked => unknownWinnerMail > 0 || suspectedDuplicates > 0;
 }
 
-/// 前日リマインド(admin専用)。状態・対象・設定はすべてサーバーから取得し、Firestoreを直接読まない。
+/// リマインド(admin専用)。状態・対象・設定はすべてサーバーから取得し、Firestoreを直接読まない。
 abstract class ReminderService {
   Future<ReminderSettings> getSettings(String eventId);
 
@@ -252,14 +286,20 @@ class ReminderJobAdapter implements WinnerSendService {
   final ReminderService service;
 
   static const prefix = 'reminder-';
-  static String jobIdFor(String eventId) => '$prefix$eventId';
-  String _eventOf(String jobId) => jobId.startsWith(prefix)
-      ? jobId.substring(prefix.length)
+  static String jobIdFor(String eventId, {int round = 1}) =>
+      '${round == 2 ? 'reminder2-' : prefix}$eventId';
+  String get _prefix =>
+      service is ReminderRoundService &&
+          (service as ReminderRoundService).round == 2
+      ? 'reminder2-'
+      : prefix;
+  String _eventOf(String jobId) => jobId.startsWith(_prefix)
+      ? jobId.substring(_prefix.length)
       : throw const WinnerSendException('対象が見つかりません。');
 
   @override
   Future<SendBatchList> listBatches(String eventId) =>
-      throw UnsupportedError('前日リマインドは取込回ごとの一覧を持たない');
+      throw UnsupportedError('リマインドは取込回ごとの一覧を持たない');
 
   @override
   Future<SendJobDetail> getJob(
@@ -293,24 +333,83 @@ class ReminderJobAdapter implements WinnerSendService {
 
 abstract class ReminderRecoveryService {
   Future<List<Map<String, dynamic>>> recoveryPreview(String eventId);
-  Future<void> confirmRecovery(String eventId, Map<String, dynamic> recipient, String reason);
+  Future<void> confirmRecovery(
+    String eventId,
+    Map<String, dynamic> recipient,
+    String reason,
+  );
 }
 
-class CallableReminderService implements ReminderService, ReminderRecoveryService {
+abstract class ReminderRoundService {
+  int get round;
+  ReminderService forRound(int round);
+  Future<void> updateSchedule(String eventId, {String? date, String? time});
+  Future<void> saveTemplate(String eventId, Map<String, String> template);
+}
+
+class CallableReminderService
+    implements ReminderService, ReminderRecoveryService, ReminderRoundService {
   @override
-  Future<List<Map<String, dynamic>>> recoveryPreview(String eventId) async {
-    final result = await _call('getConfirmedReminderRecovery', {'eventId': eventId});
-    return [for (final r in result['recipients'] as List? ?? []) Map<String, dynamic>.from(r as Map)];
+  Future<void> saveTemplate(
+    String eventId,
+    Map<String, String> template,
+  ) async {
+    await _call('updateConfirmedReminderSettings', {
+      'eventId': eventId,
+      'template': template,
+    });
   }
 
   @override
-  Future<void> confirmRecovery(String eventId, Map<String, dynamic> recipient, String reason) async {
-    await _call('confirmConfirmedReminderRecovery', {'eventId': eventId, 'participantId': recipient['participantId'],
-      'expectedFingerprint': recipient['fingerprint'], 'reason': reason});
+  final int round;
+  @override
+  ReminderService forRound(int round) => CallableReminderService(
+    authClient: authClient,
+    httpClient: _httpClient,
+    baseUrl: baseUrl,
+    round: round,
+  );
+  @override
+  Future<void> updateSchedule(
+    String eventId, {
+    String? date,
+    String? time,
+  }) async {
+    await _call('updateConfirmedReminderSettings', {
+      'eventId': eventId,
+      'plannedDate': date,
+      'plannedTime': time,
+    });
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> recoveryPreview(String eventId) async {
+    final result = await _call('getConfirmedReminderRecovery', {
+      'eventId': eventId,
+    });
+    return [
+      for (final r in result['recipients'] as List? ?? [])
+        Map<String, dynamic>.from(r as Map),
+    ];
+  }
+
+  @override
+  Future<void> confirmRecovery(
+    String eventId,
+    Map<String, dynamic> recipient,
+    String reason,
+  ) async {
+    await _call('confirmConfirmedReminderRecovery', {
+      'eventId': eventId,
+      'participantId': recipient['participantId'],
+      'expectedFingerprint': recipient['fingerprint'],
+      'reason': reason,
+    });
   }
 
   CallableReminderService({
     required this.authClient,
+    this.round = 1,
     http.Client? httpClient,
     String? baseUrl,
   }) : _httpClient = httpClient ?? http.Client(),
@@ -415,7 +514,9 @@ class CallableReminderService implements ReminderService, ReminderRecoveryServic
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
         },
-        body: jsonEncode({'data': data}),
+        body: jsonEncode({
+          'data': {...data, 'round': round},
+        }),
       );
     } catch (_) {
       throw const WinnerSendException(
@@ -440,17 +541,19 @@ class CallableReminderService implements ReminderService, ReminderRecoveryServic
     'recovery-delivery-active': '配送処理中は復旧できません。処理が止まってから状態を更新して確認してください。',
     'recovery-not-failed': 'この宛先は確実な未送信失敗ではないため、復旧できません。送信済み・結果不明は再送しません。',
     'recovery-state-changed': '再確認の後に宛先・参加資格・配送状態が変わりました。復旧画面を開き直して確認してください。',
-    'send-at-in-past': '送信予定日時が過去です。有効にすると直ちに送信されます。',
-    'send-at-required': '自動送信を有効にするには、送信予定日時を設定してください。',
+    'send-at-in-past': '送信予定日時が過去です。予定を確認してください（自動送信はありません）。',
+    'send-at-required': '送信予定日と時刻を設定してから開始してください。',
+    'invalid-planned-date': '送信予定日をYYYY-MM-DDで入力してください。',
+    'invalid-planned-time': '送信予定時刻をHH:mmで入力してください。',
     'event-ended': 'イベントが終了しているため、実行できません。',
     'target-count-changed': '確認した対象人数と現在の対象人数が異なります。画面を更新して、もう一度確認してください。',
-    'participant-not-target': 'この参加者は前日リマインドの対象ではありません。',
+    'participant-not-target': 'この参加者はリマインドの対象ではありません。',
     'no-targets': '送信対象の参加者がいません。',
-    'mail-not-ready': '前日リマインドの文面またはイベント情報が不足しています。',
+    'mail-not-ready': 'リマインドの文面またはイベント情報が不足しています。',
     'targets-changed':
         '確認した後に、送信対象または送信内容(宛先・参加内容・当選メールの状態)が変わりました。画面を更新して、宛先一覧をもう一度確認してください。',
     'reminder-targets-unresolved':
-        '当選メールの結果が不明な参加者、または重複登録の疑いがある参加者がいるため、前日リマインドを作成できません。宛先一覧で確認してください。',
+        '当選メールの結果が不明な参加者、または重複登録の疑いがある参加者がいるため、リマインドを作成できません。宛先一覧で確認してください。',
     'targets-fingerprint-required': '宛先一覧を確認してから開始してください。画面を更新して、もう一度確認してください。',
   };
 

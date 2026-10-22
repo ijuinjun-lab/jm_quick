@@ -29,7 +29,7 @@ async function composeReminderMailFor({db, snapshot, participantId, participant,
   if (snapshot.reminderFingerprint) {
     const {collectReminderRecipients} = require("./reminder_targets");
     const current = await collectReminderRecipients(db, snapshot.event.eventId, {participantId});
-    const item = await db.collection("sendJobs").doc(`reminder-${snapshot.event.eventId}`).collection("items").doc(participantId).get();
+    const item = await db.collection("sendJobs").doc(snapshot.reminderJobId || `reminder-${snapshot.event.eventId}`).collection("items").doc(participantId).get();
     const approved = item.exists ? item.data().approvedSafetyFingerprint : null;
     const expected = approved || snapshot.recipientSafetyFingerprints?.[participantId];
     const actual = expected ? current.recipients[0]?.safetyFingerprint : current.recipients[0]?.fingerprint;
