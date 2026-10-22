@@ -3,7 +3,20 @@ import 'dart:convert';
 /// The server's complete email document, with its MIME attachment resolved for
 /// the browser. No email text, styles, layout, dates or URLs are reconstructed.
 /// The original document remains untouched in WinnerMailPreview.html.
-String mailPreviewDocument(String html, String qrPngBase64) {
+String mailPreviewDocument(
+  String html,
+  String qrPngBase64, {
+  bool allowWithoutQr = false,
+}) {
+  if (allowWithoutQr &&
+      qrPngBase64.isEmpty &&
+      !html.contains("cid:") &&
+      html.contains("<head>") &&
+      html.contains("<body ")) {
+    return html
+        .replaceFirst("<head>", "<head>$mailPreviewSecurityHead")
+        .replaceFirst("<body ", "<body inert ");
+  }
   if (html.isEmpty) throw const FormatException('HTMLメールを取得できませんでした。');
   if (qrPngBase64.isEmpty) throw const FormatException('QR画像を取得できませんでした。');
   final bytes = base64Decode(qrPngBase64);

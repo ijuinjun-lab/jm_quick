@@ -214,6 +214,15 @@ const E_MANAGER = "confirmedEventCallable:eventManager:dataEventId";
 const E_MANAGER_JOB = "confirmedEventCallable:eventManager:sendJobEventId";
 const E_STAFF = "confirmedEventCallable:eventStaff:dataEventId";
 const AUTHORIZATION_MAP_PHASE_1B = {
+  getConfirmedBroadcastSettings: E_MANAGER,
+  previewConfirmedBroadcastMail: E_MANAGER,
+  startConfirmedBroadcastDelivery: E_MANAGER,
+  getConfirmedBroadcastJob: E_MANAGER,
+  resumeConfirmedBroadcastDelivery: E_MANAGER,
+  retryFailedConfirmedBroadcastMails: E_MANAGER,
+  getConfirmedBroadcastRecovery: E_MANAGER,
+  confirmConfirmedBroadcastRecovery: E_MANAGER,
+
   getConfirmedTestMailSettings: E_MANAGER,
   previewConfirmedTestMail: E_MANAGER,
   sendConfirmedTestMail: E_MANAGER,
@@ -304,7 +313,7 @@ test("Phase 1B: 全exportの入口・認可レベル・対象イベントのreso
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
   // 60本 + イベント設定(getConfirmedEventSettings / updateConfirmedEventSettings。event_manager以上)の2本
-  assert.equal(exportsInIndex.length, 70);
+  assert.equal(exportsInIndex.length, 78);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {

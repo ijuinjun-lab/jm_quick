@@ -17,7 +17,8 @@ import 'import_service.dart';
 import 'reception_staff_key_service.dart';
 import 'reception_staff_qr_page.dart';
 import 'reception_status_page.dart';
-import 'reminder_page.dart';
+import 'broadcast_page.dart';
+import 'test_mail_page.dart';
 import 'reminder_service.dart';
 import 'winner_mail_page.dart';
 import 'winner_mail_service.dart';
@@ -36,7 +37,7 @@ const List<String> eventConsoleFeatureLabels = [
   '参加者ファイル取込',
   '当選メール設定',
   '当選メール送信',
-  'リマインド',
+  '一斉メール送信',
   'スタッフ管理',
   '受付',
   '受付状況一覧',
@@ -66,6 +67,7 @@ class ConfirmedConsolePage extends StatelessWidget {
     WinnerMailService? winnerMailService,
     WinnerSendService? winnerSendService,
     ReminderService? reminderService,
+    TestMailService? broadcastService,
     AssignmentService? assignmentService,
     ReceptionStaffKeyIssuer? receptionStaffKeyIssuer,
     AttendanceReportService? attendanceReportService,
@@ -80,6 +82,7 @@ class ConfirmedConsolePage extends StatelessWidget {
        _winnerMailService = winnerMailService,
        _winnerSendService = winnerSendService,
        _reminderService = reminderService,
+       _broadcastService = broadcastService,
        _assignmentService = assignmentService;
 
   final AuthClient authClient;
@@ -92,6 +95,7 @@ class ConfirmedConsolePage extends StatelessWidget {
   final WinnerMailService? _winnerMailService;
   final WinnerSendService? _winnerSendService;
   final ReminderService? _reminderService;
+  final TestMailService? _broadcastService;
 
   // Phase 3: 担当イベント(listMyEvents)・スタッフ管理(任命API)。
   final AssignmentService? _assignmentService;
@@ -132,6 +136,7 @@ class ConfirmedConsolePage extends StatelessWidget {
         _winnerMailService ?? CallableWinnerMailService(authClient: authClient),
     winnerSendService:
         _winnerSendService ?? CallableWinnerSendService(authClient: authClient),
+    broadcastService: _broadcastService ?? TestMailService(auth: authClient),
     reminderService:
         _reminderService ?? CallableReminderService(authClient: authClient),
     assignmentService: _assignments,
@@ -378,6 +383,7 @@ class _EventConsole extends StatefulWidget {
     required this.winnerMailService,
     required this.winnerSendService,
     required this.reminderService,
+    required this.broadcastService,
     required this.assignmentService,
     required this.receptionStaffKeyIssuer,
     required this.attendanceReportService,
@@ -390,6 +396,7 @@ class _EventConsole extends StatefulWidget {
   final WinnerMailService winnerMailService;
   final WinnerSendService winnerSendService;
   final ReminderService reminderService;
+  final TestMailService broadcastService;
   final AssignmentService assignmentService;
   final ReceptionStaffKeyIssuer receptionStaffKeyIssuer;
   final AttendanceReportService attendanceReportService;
@@ -493,11 +500,11 @@ class _EventConsoleState extends State<_EventConsole> {
                     ),
                   ),
                 ),
-                'リマインド': () => Navigator.of(context).push(
+                '一斉メール送信': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => ReminderRoundsPage(
-                      initialEventId: id,
-                      service: widget.reminderService,
+                    builder: (_) => BroadcastPage(
+                      eventId: id,
+                      service: widget.broadcastService,
                     ),
                   ),
                 ),
@@ -551,7 +558,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 '参加者ファイル取込': 'Excel／CSVの参加者ファイルを検証して取り込みます(メールは送信されません)',
                 '当選メール送信': '取込回ごとの送信・進行状況・失敗分の再送',
                 '当選メール設定': '件名・本文の設定とプレビュー',
-                'リマインド': '第1回・第2回の予定・文面・送信状況',
+                '一斉メール送信': '件名・本文・宛先確認・送信履歴',
                 'スタッフ管理': 'このイベントの受付スタッフを追加・解除する',
                 '受付': '受付スタッフ用QRを表示する(受付スタッフがスマホで読み取って受付する)',
                 '受付状況一覧': '受付状況(全体・プログラム別・時間帯別・参加者)を確認します。閲覧のみです。',

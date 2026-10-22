@@ -963,6 +963,16 @@ exports.retryFailedConfirmedWinnerMails = confirmedEventCallable("eventManager",
 exports.startConfirmedWinnerMailDelivery = confirmedEventCallable("eventManager", EVENT_SCOPES.sendJobEventId, winnerSendApi.startDelivery, {timeoutSeconds: 60});
 // 前日リマインド(Phase 9B)。イベント全体の全active participantが対象(取込回は問わない)。当選メールとは別のtype・別のjob・別の配送記録・別のテンプレート。
 // 配送エンジンとサーバー側の継続処理(下のsweep)は当選メールと共通。設定・プレビュー・手動開始・状態・失敗分の再送はすべて対象イベントのevent_manager以上(Phase 1B)。
+const {createBroadcastApi} = require("./confirmed/broadcast_api");
+const broadcastApi = createBroadcastApi({getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(), winnerSendApi});
+exports.getConfirmedBroadcastSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.settings, {enforceAppCheck: true, timeoutSeconds: 300});
+exports.previewConfirmedBroadcastMail = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.preview, {enforceAppCheck: true, timeoutSeconds: 300});
+exports.startConfirmedBroadcastDelivery = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.start, {enforceAppCheck: true, timeoutSeconds: 300});
+exports.getConfirmedBroadcastJob = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.getJob, {enforceAppCheck: true, timeoutSeconds: 300});
+exports.resumeConfirmedBroadcastDelivery = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.resume, {enforceAppCheck: true, timeoutSeconds: 300});
+exports.retryFailedConfirmedBroadcastMails = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.retry, {enforceAppCheck: true, timeoutSeconds: 300});
+exports.getConfirmedBroadcastRecovery = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.recovery, {enforceAppCheck: true, timeoutSeconds: 300});
+exports.confirmConfirmedBroadcastRecovery = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, broadcastApi.confirmRecovery, {enforceAppCheck: true, timeoutSeconds: 300});
 const reminderApi = createReminderApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(), winnerSendApi,
 });

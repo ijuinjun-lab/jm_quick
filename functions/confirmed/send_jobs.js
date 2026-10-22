@@ -31,7 +31,7 @@ const JOB = Object.freeze({PREPARING: "preparing", READY: "ready", COMPLETED: "c
 // 配送の種別。jobIdの接頭辞で決まる(winner-{batchId} / reminder-{eventId})。mailDeliveriesのIDも種別ごとに別
 // ({participantId}_winner / {participantId}_reminder)なので、当選メールの配送状態とリマインドの配送状態は混ざらない。
 const TYPE = "winner";
-const TYPES = Object.freeze({WINNER: "winner", REMINDER: "reminder"});
+const TYPES = Object.freeze({WINNER: "winner", REMINDER: "reminder", BROADCAST: "broadcast"});
 const DEFAULT_LEASE_MS = 120000;
 const DEFAULT_CONCURRENCY = 5;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -39,7 +39,7 @@ const LEASE_EXPIRED_AFTER_DISPATCH = "lease-expired-after-dispatch";
 
 const jobIdForBatch = (batchId) => `winner-${batchId}`;
 const {jobIdForReminder, deliveryIdForReminder} = require("./reminder_rounds");
-const typeOfJobId = (jobId) => (typeof jobId === "string" && /^reminder2?-/.test(jobId) ? TYPES.REMINDER : TYPES.WINNER);
+const typeOfJobId = (jobId) => typeof jobId === "string" && jobId.startsWith("broadcast-") ? TYPES.BROADCAST : (typeof jobId === "string" && /^reminder2?-/.test(jobId) ? TYPES.REMINDER : TYPES.WINNER);
 const deliveryIdFor = (participantId, type = TYPE, grantBatchId = null) => `${participantId}_${type}${grantBatchId ? `_${grantBatchId}` : ""}`;
 const toMillis = (value) => (value && typeof value.toMillis === "function" ? value.toMillis() : value instanceof Date ? value.getTime() : Number(value) || 0);
 
@@ -71,6 +71,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
   };
   const deliveryForJob = async (db, jobId, participantId) => {
     const job = (await jobRef(db, jobId).get()).data();
+    if (typeOfJobId(jobId) === TYPES.BROADCAST) return db.collection("mailDeliveries").doc(`${jobId}_${participantId}`);
     if (typeOfJobId(jobId) === TYPES.REMINDER) return db.collection("mailDeliveries").doc(deliveryIdForReminder(participantId, job?.snapshot?.reminderRound || 1));
     return deliveryForGrant(db, participantId, typeOfJobId(jobId), job?.snapshot?.grantBatchId || null);
   };
@@ -169,7 +170,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       // 各参加者の item と delivery を、1トランザクションで冪等に作る(再実行しても増えない・上書きしない)。
       await runPool(targets, concurrency, async (participantId) => {
         const iRef = itemRef(db, jobId, participantId);
-        const dRef = type === TYPES.REMINDER ? db.collection("mailDeliveries").doc(deliveryIdForReminder(participantId, snapshot.reminderRound || 1)) : await deliveryForGrant(db, participantId, type, snapshot.grantBatchId || null);
+        const dRef = type === TYPES.BROADCAST ? db.collection("mailDeliveries").doc(`${jobId}_${participantId}`) : type === TYPES.REMINDER ? db.collection("mailDeliveries").doc(deliveryIdForReminder(participantId, snapshot.reminderRound || 1)) : await deliveryForGrant(db, participantId, type, snapshot.grantBatchId || null);
         await db.runTransaction(async (tx) => {
           const [itemSnap, deliverySnap] = await tx.getAll(iRef, dRef);
           if (itemSnap.exists) return;

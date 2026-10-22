@@ -68,4 +68,4 @@ function createReminderRecoveryApi({getDb, serverTimestamp, generateQrPng, getAp
   }
   return {preview, confirm};
 }
-module.exports = {createReminderRecoveryApi};
+module.exports = {createReminderRecoveryApi, transactionalReader};

@@ -35,15 +35,18 @@ function winnerIntroHtml(text) {
 }
 
 // テキスト版。QR画像は表示できないため、Web参加証URLを必ず載せる。
-function buildText(vm, template, {showEventName = false} = {}) {
+function buildText(vm, template, {showEventName = false, broadcastOptions = null} = {}) {
   const lines = [];
   // 前日リマインドなど: 冒頭にイベント名を明示する(当選メールの出力は変えない)
   if (showEventName) lines.push(`【${vm.eventName}】`, "");
   lines.push(`${vm.recipientName} 様`, "", template.introBody, "", RULE);
+  if (!broadcastOptions || broadcastOptions.includeQr) {
   lines.push("【受付用QRコード】");
   lines.push("当日は、受付用QRコードを受付でご提示ください。");
   lines.push("QRコードは、メールのHTML表示で画像として表示されます。");
   lines.push("", "受付用QRコードが表示できない場合はこちら", vm.webPassUrl, "", RULE);
+  }
+  if (broadcastOptions && !broadcastOptions.includeDetails) return `${lines.join("\n")}\n`;
   const eventLines = ["", RULE, "【開催情報】", `開催日時：${vm.dateTimeText}`, `会場：${vm.venue}`];
   if (vm.address) eventLines.push(`住所：${vm.address}`);
   if (vm.access) eventLines.push(`アクセス：${vm.access}`);
@@ -69,16 +72,19 @@ const P = "margin:0 0 14px 0;";
 const H2 = "margin:24px 0 8px 0;padding-top:16px;border-top:1px solid #d9dde3;font-size:16px;color:#17324d;";
 const H3 = "margin:14px 0 4px 0;font-size:15px;color:#17324d;";
 
-function buildHtml(vm, template, subject, {showEventName = false} = {}) {
+function buildHtml(vm, template, subject, {showEventName = false, broadcastOptions = null} = {}) {
   const parts = [];
   if (showEventName) parts.push(`<p style="${P}font-size:18px;font-weight:bold;color:#17324d;">${escapeHtml(vm.eventName)}</p>`);
   parts.push(`<p style="${P}font-size:16px;font-weight:bold;">${escapeHtml(vm.recipientName)} 様</p>`);
   parts.push(showEventName ? paragraphsHtml(template.introBody, P) : winnerIntroHtml(template.introBody));
+  if (!broadcastOptions || broadcastOptions.includeQr) {
   parts.push(`<h2 style="${H2}">受付用QRコード</h2>`);
   parts.push(`<p style="${P}">当日は、下記のQRコードを受付でご提示ください。</p>`);
   parts.push(`<p style="${P}text-align:center;"><img src="cid:${QR_CONTENT_ID}" alt="受付用QRコード" width="240" height="240" style="width:240px;height:240px;border:0;"></p>`);
   parts.push(`<p style="${P}">QRコードが表示されない場合は<a href="${escapeHtml(vm.webPassUrl)}">こちら</a></p>`);
   parts.push(`<p style="${P}font-size:12px;word-break:break-all;">${escapeHtml(vm.webPassUrl)}</p>`);
+  }
+  if (!broadcastOptions || broadcastOptions.includeDetails) {
   const info = [`開催日時：${escapeHtml(vm.dateTimeText)}`, `会場：${linesHtml(vm.venue)}`];
   if (vm.address) info.push(`住所：${linesHtml(vm.address)}`);
   if (vm.access) info.push(`アクセス：${linesHtml(vm.access)}`);
@@ -104,6 +110,7 @@ function buildHtml(vm, template, subject, {showEventName = false} = {}) {
   if (vm.contact) {
     parts.push(`<h2 style="${H2}">お問い合わせ先</h2>`, paragraphsHtml(vm.contact, P));
   }
+  }
   return `<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(subject)}</title></head>
 <body style="margin:0;padding:0;background:#f4f5f7;">
@@ -118,24 +125,24 @@ ${parts.join("\n")}
 //   snapshot: buildMailSnapshot の結果 / participant: {participantId, name, publicId} / attendances: programAttendancesの内容
 //   generateQrPng(payload) → Promise<Buffer>: QR画像(PNG)の生成(注入)。
 // 戻り値: {ok:true, subject, text, html, qrPayload, webPassUrl, attachments, viewModel} | {ok:false, problems}
-async function renderMail({snapshot, participant, attendances, appBaseUrl, generateQrPng, showEventName = false}) {
+async function renderMail({snapshot, participant, attendances, appBaseUrl, generateQrPng, showEventName = false, broadcastOptions = null}) {
   const built = buildMailViewModel({snapshot, participant, attendances, appBaseUrl});
   if (!built.ok) return {ok: false, problems: built.problems};
   const vm = built.viewModel;
   const {template} = snapshot;
   const subject = singleLine(template.subject);
-  const png = await generateQrPng(vm.qrPayload);
+  const png = !broadcastOptions || broadcastOptions.includeQr ? await generateQrPng(vm.qrPayload) : null;
   return {
     ok: true,
     subject,
-    text: buildText(vm, template, {showEventName}),
-    html: buildHtml(vm, template, subject, {showEventName}),
+    text: buildText(vm, template, {showEventName, broadcastOptions}),
+    html: buildHtml(vm, template, subject, {showEventName, broadcastOptions}),
     qrPayload: vm.qrPayload,
     webPassUrl: vm.webPassUrl,
-    attachments: [{
+    attachments: png ? [{
       filename: QR_FILENAME, contentType: "image/png", contentBase64: Buffer.from(png).toString("base64"),
       contentId: QR_CONTENT_ID, disposition: "inline",
-    }],
+    }] : [],
     viewModel: vm,
     ...(!showEventName && !vm.sourceRegisteredAtText ? {warnings: ["source-registered-at-missing-or-invalid"]} : {}),
   };
@@ -146,5 +153,6 @@ const renderWinnerMail = (args) => renderMail(args);
 // 前日リマインド。同じレンダラー・同じview model(program・時間・plannedCount・QR・Web参加証URL・会場)を使い、文章(snapshot.template)と
 // 冒頭のイベント名だけが異なる。QR・publicIdは当選メールと同一(再発行しない)。
 const renderReminderMail = (args) => renderMail({...args, showEventName: true});
+const renderBroadcastMail = (args) => renderMail({...args, showEventName: true, broadcastOptions: args.snapshot.broadcastOptions});
 
-module.exports = {QR_CONTENT_ID, QR_FILENAME, DOTTED_RULE, escapeHtml, renderWinnerMail, renderReminderMail};
+module.exports = {QR_CONTENT_ID, QR_FILENAME, DOTTED_RULE, escapeHtml, renderWinnerMail, renderReminderMail, renderBroadcastMail};

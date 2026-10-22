@@ -93,8 +93,8 @@ async function loadEligible(db, eventId, participantId = null) {
 }
 
 // 戻り値: {targets: [participantId昇順], excludedByReason: {理由: 件数}, excludedCount, totalParticipants}
-async function collectReminderTargets(db, eventId) {
-  const {participants, eligible, excludedByReason} = await loadEligible(db, eventId);
+async function collectReminderTargets(db, eventId, participantId = null) {
+  const {participants, eligible, excludedByReason} = await loadEligible(db, eventId, participantId);
   const targets = eligible.map((doc) => doc.id);
   return {targets, excludedByReason, excludedCount: participants.length - targets.length, totalParticipants: participants.length};
 }

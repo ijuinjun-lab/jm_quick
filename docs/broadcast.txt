@@ -1,0 +1,53 @@
+一斉メール送信（confirmedイベント）
+
+操作
+イベント管理の「一斉メール送信」を開き、件名・本文を入力する。
+開催情報・参加内容・問い合わせ先と、QR・Web参加証リンクはそれぞれ任意。
+宛名とイベント名は常に表示する。本文はプレーンテキストとしてHTMLエスケープする。
+「宛先一覧・HTMLプレビューを確認」で全対象を取得し、内容と宛先を確認する。
+社内テストは独立したテストメール画面を利用する。イベントの正式設定は保存しない。
+確認チェックと最終確認の後に「正式送信開始」。日時登録・回数制限・自動開始はない。
+ブラウザを閉じても、既存のsweepConfirmedMailDeliveryが開始済みの配送を続ける。
+別の案内を送る場合は「新しい一斉メールを作成」。通信失敗の再開とは区別する。
+
+対象と保存
+申込のparticipantIdを単位とし、active/schemaVersion=2/有効な確定取込回と、
+取消・放棄されていない資格が1つ以上ある申込を対象にする。
+過去の当選メール配送状態は対象を制限しない。通常・繰り上げを統合する。
+同一メールアドレスの別申込を勝手に統合しない。1申込1通。
+参加者・資格・QR・publicId・イベント設定・受付には書き込まない。
+送信開始時にtransaction内で確認済みの本文・対象を再照合して固定する。
+sendJobs/broadcast-{SHA256(eventId, operationId)} と、
+mailDeliveries/{jobId}_{participantId} に独立した履歴を作成する。
+件名・本文・表示オプション・作成者・作成日時・開始日時・対象人数・配送結果を保持する。
+ジョブにはメールアドレス・氏名を複製せず、IDと安全照合ハッシュを保存する。
+
+再開と安全確認
+同じ操作IDの二重クリック・再実行・同時要求では同じジョブへ戻る。
+準備途中の失敗は、元の確定スナップショットと対象だけで続きを作成する。
+送信済みは同じジョブ内で再送しない。結果不明も自動再送しない。
+確実な配送失敗だけを再開準備し、未送信分の続行を手動で開始できる。
+宛先・参加資格が変わった申込は配送前に停止する。
+停止後、配送処理が終了している間だけ、管理者が現在の宛先・内容を再確認できる。
+確認理由・確認者・確認日時を同じジョブ内に記録し、その未送信宛先だけ再開する。
+取消で有効資格がなくなった申込は再確認の対象にもせず、送らない。
+イベントの問い合わせ先や旧テンプレートだけの変更では固定済み本文を変更しない。
+
+互換性
+旧reminder-/reminder2-の設定・ジョブ・配送記録・APIは保持する。移行処理はない。
+新画面の履歴から旧ジョブの内容と配送結果を閲覧できる。
+通常当選・繰り上げ当選の生成・対象・配送IDは従来どおり。
+テストメールはbroadcast種別を追加し、正式生成結果に従来のテスト表示だけを付加する。
+許可リスト・App Check・権限・毎時10通・同内容の再送防止は従来どおり。
+テスト用の仮本文は正式設定に保存せず、正式な送信回数・履歴にも影響しない。
+
+後日の本番反映対象（今回deployしない）
+新規8 API: getConfirmedBroadcastSettings / previewConfirmedBroadcastMail /
+startConfirmedBroadcastDelivery / getConfirmedBroadcastJob /
+resumeConfirmedBroadcastDelivery / retryFailedConfirmedBroadcastMails /
+getConfirmedBroadcastRecovery / confirmConfirmedBroadcastRecovery。
+既存sweepConfirmedMailDeliveryは新しいbroadcast種別を配送できるコードへ更新が必要。
+previewConfirmedTestMail / sendConfirmedTestMailはbroadcast種別対応の更新が必要。
+Hostingを同じ確定コードのビルドで更新する。サーバー側を先に反映する。
+Rules・Indexes・Secret・認証設定の変更、既存データの移行は不要。
+すべての新APIは既存のイベント管理者認可とApp Checkを使用する。

@@ -36,7 +36,7 @@ function createWinnerSendApi({getDb, serverTimestamp, generateQrPng, getAppBaseU
   const engine = createSendJobEngine({
     serverTimestamp, generateQrPng, getAppBaseUrl, composeMail: composeWinnerMailFor, buildMessage: buildMailApiMessage,
     // 前日リマインド(reminder-{eventId}のジョブ)だけ、別テンプレートのレンダリングとtype=reminderのメッセージを使う。配送エンジンは共通。
-    mailKinds: {reminder: {composeMail: composeReminderMailFor, buildMessage: (args) => buildMailApiMessage({...args, type: "reminder"})}},
+    mailKinds: {broadcast: {composeMail: require("./broadcast_message").composeBroadcastMailFor, buildMessage: (args) => buildMailApiMessage({...args, type: "broadcast"})}, reminder: {composeMail: composeReminderMailFor, buildMessage: (args) => buildMailApiMessage({...args, type: "reminder"})}},
     ...engineOptions,
   });
   // サーバー側の継続処理(引き渡し・定期実行)。配送の状態・claim・leaseは engine(send_jobs.js)が正本。

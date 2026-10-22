@@ -10,15 +10,21 @@ class MailHtmlPreview extends StatelessWidget {
     super.key,
     required this.html,
     required this.qrPngBase64,
+    this.allowWithoutQr = false,
   });
 
+  final bool allowWithoutQr;
   final String html;
   final String qrPngBase64;
 
   @override
   Widget build(BuildContext context) {
     try {
-      final document = mailPreviewDocument(html, qrPngBase64);
+      final document = mailPreviewDocument(
+        html,
+        qrPngBase64,
+        allowWithoutQr: allowWithoutQr,
+      );
       return SizedBox(
         width: double.infinity,
         height: 700,

@@ -15,6 +15,24 @@ import 'package:jm_quick/confirmed/winner_send_service.dart';
 
 import 'confirmed_auth_test.dart' show FakeAccessService, FakeAuthClient;
 import 'import_page_test.dart' show FakeImportService;
+import 'package:jm_quick/confirmed/test_mail_page.dart';
+import 'app_check_fake.dart';
+
+class FakeBroadcastService extends TestMailService {
+  FakeBroadcastService()
+    : super(auth: FakeAuthClient(signedIn: true), appCheck: FakeAppCheck());
+  int settingsCalls = 0;
+  @override
+  Future<Map<String, dynamic>> call(
+    String name,
+    Map<String, dynamic> data,
+  ) async {
+    expect(name, 'getConfirmedBroadcastSettings');
+    expect(data['eventId'], 'evfixture0123456789');
+    settingsCalls++;
+    return {'recipients': [], 'history': []};
+  }
+}
 
 /// サーバーの状態を模したメモリ上の偽サービス(Firestore・ネットワーク・メール送信は一切ない)。
 class FakeReminderService implements ReminderService {
@@ -290,41 +308,41 @@ String count(WidgetTester tester, String state) =>
 
 void main() {
   group('メニューと認可(admin専用)', () {
-    // イベント選択後の管理画面(/console?eventId=…)に「リマインド」が表示される想定なので、
+    // イベント選択後の管理画面(/console?eventId=…)に「一斉メール送信」が表示される想定なので、
     // eventIdとイベント名表示に使う読み取り専用のサービス(FakeImportService)を渡す。
     Widget console(AccessRole role) => MaterialApp(
       home: ConfirmedConsolePage(
         authClient: FakeAuthClient(signedIn: true),
         accessService: FakeAccessService([AccessCheck.granted(role)]),
-        reminderService: FakeReminderService(),
+        broadcastService: FakeBroadcastService(),
         eventSummaryService: FakeImportService(),
         initialEventId: 'evfixture0123456789',
       ),
     );
 
-    testWidgets('adminには「リマインド」が表示され、開ける', (tester) async {
+    testWidgets('adminには「一斉メール送信」が表示され、開ける', (tester) async {
       await tester.pumpWidget(console(AccessRole.admin));
       await settle(tester);
-      expect(find.text('リマインド'), findsOneWidget);
-      await tester.ensureVisible(find.text('リマインド'));
-      await tester.tap(find.text('リマインド'));
+      expect(find.text('一斉メール送信'), findsOneWidget);
+      await tester.ensureVisible(find.text('一斉メール送信'));
+      await tester.tap(find.text('一斉メール送信'));
       await settle(tester);
       // eventIdは自動的に引き継がれ、入力欄なしで設定が読み込まれる(Phase 11D)。
-      expect(find.text('最新の状態に更新'), findsOneWidget);
-      expect(find.text('架空イベント'), findsWidgets);
+      expect(find.text('配送結果を更新'), findsOneWidget);
+      expect(find.text('新しい一斉メールを作成'), findsOneWidget);
     });
 
-    testWidgets('staffには「リマインド」が表示されない(送信管理・設定も)', (tester) async {
+    testWidgets('staffには「一斉メール送信」が表示されない(送信管理・設定も)', (tester) async {
       await tester.pumpWidget(console(AccessRole.staff));
       await settle(tester);
-      expect(find.text('リマインド'), findsNothing);
-      expect(find.textContaining('リマインド'), findsNothing);
+      expect(find.text('一斉メール送信'), findsNothing);
+      expect(find.textContaining('一斉メール送信'), findsNothing);
     });
   });
 
   group('Phase 11D: eventIdはイベント管理画面から内部的に渡されるものだけを正本とする', () {
     testWidgets('イベント管理画面から開くと、eventId入力欄が無い', (tester) async {
-      final service = FakeReminderService();
+      final service = FakeBroadcastService();
       await tester.pumpWidget(
         MaterialApp(
           home: ConfirmedConsolePage(
@@ -332,15 +350,15 @@ void main() {
             accessService: FakeAccessService([
               AccessCheck.granted(AccessRole.admin),
             ]),
-            reminderService: service,
+            broadcastService: service,
             eventSummaryService: FakeImportService(),
             initialEventId: 'evfixture0123456789',
           ),
         ),
       );
       await settle(tester);
-      await tester.ensureVisible(find.text('リマインド'));
-      await tester.tap(find.text('リマインド'));
+      await tester.ensureVisible(find.text('一斉メール送信'));
+      await tester.tap(find.text('一斉メール送信'));
       await settle(tester);
       expect(
         find.byWidgetPredicate(
@@ -348,7 +366,11 @@ void main() {
         ),
         findsNothing,
       );
-      expect(service.settingsCalls, greaterThan(0), reason: 'eventIdは自動的に継承されて読み込まれる');
+      expect(
+        service.settingsCalls,
+        greaterThan(0),
+        reason: 'eventIdは自動的に継承されて読み込まれる',
+      );
     });
 
     testWidgets(

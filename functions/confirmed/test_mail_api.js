@@ -10,7 +10,8 @@ const {validateTemplateInput} = require('./winner_mail_template');
 const {roundEvent} = require('./reminder_rounds');
 const {collectReminderTargets} = require('./reminder_targets');
 const {isValidParticipantId} = require('../programs');
-const TYPES = ['normal', 'waitlistPromotion', 'reminder1', 'reminder2'];
+const {broadcastSnapshot, composeBroadcastMailFor} = require('./broadcast_message');
+const TYPES = ['broadcast', 'normal', 'waitlistPromotion', 'reminder1', 'reminder2'];
 const NOTICE = 'これはテストメールです。正式な参加案内ではありません。';
 const hash = (v) => crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const fail = (code, message = code) => { throw new ApiError('failed-precondition', message, {code}); };
@@ -58,14 +59,22 @@ function createTestMailApi(deps) {
     let {event} = await loadConfirmedEvent(db, data.eventId);
     const reminder = data.kind.startsWith('reminder');
     if (reminder) event = roundEvent(event, data.kind === 'reminder2' ? 2 : 1);
-    if (data.draft !== undefined) {
+    if (data.draft !== undefined && data.kind !== 'broadcast') {
       if (!reminder || event.reminderMailTemplate) fail('draft-only-for-unconfigured-reminder');
       const t = validateTemplateInput(data.draft);
       if (!t.ok || !t.value.subject.includes('テスト送信・正式文面ではありません') || !t.value.introBody.includes('テスト送信・正式文面ではありません')) fail('invalid-test-draft');
       event = {...event, reminderMailTemplate: {...t.value, version: 1}};
     }
     let r;
-    if (data.syntheticProgramIds !== undefined) {
+    if (data.kind === 'broadcast') {
+      if (!isValidParticipantId(data.participantId) || data.syntheticProgramIds || data.batchId) fail('invalid-participant');
+      const doc = await db.collection('participants').doc(data.participantId).get();
+      const eligible = await collectReminderTargets(db, data.eventId);
+      if (!doc.exists || !eligible.targets.includes(data.participantId)) fail('participant-not-active');
+      const snapshot = broadcastSnapshot(data.eventId, event, data.draft);
+      r = await composeBroadcastMailFor({db, snapshot, participantId: data.participantId, participant: doc.data(), appBaseUrl: getAppBaseUrl(), generateQrPng});
+      r.senderName = snapshot.event.senderName;
+    } else if (data.syntheticProgramIds !== undefined) {
       if (data.participantId || data.batchId || !Array.isArray(data.syntheticProgramIds) || !data.syntheticProgramIds.length || new Set(data.syntheticProgramIds).size !== data.syntheticProgramIds.length || data.syntheticProgramIds.some((id) => !event.programs?.some((p) => p.programId === id))) fail('invalid-synthetic-programs');
       const built = buildMailSnapshot(data.eventId, event, {templateField: reminder ? 'reminderMailTemplate' : data.kind === 'normal' ? 'winnerMailTemplate' : 'waitlistWinnerMailTemplate'});
       if (!built.ok) fail('mail-not-ready', built.problems.join(', '));
@@ -107,7 +116,7 @@ function createTestMailApi(deps) {
   }
   async function preview({data}) {
     request(data, KEYS); const {result, message, fingerprint} = await compose(data);
-    return {ready: true, ...message, qrPngBase64: result.attachments[0].contentBase64, qrPayload: result.qrPayload, webPassUrl: result.webPassUrl, fingerprint, synthetic: !!data.syntheticProgramIds};
+    return {ready: true, ...message, qrPngBase64: result.attachments[0]?.contentBase64 || '', qrPayload: result.qrPayload, webPassUrl: result.webPassUrl, fingerprint, synthetic: !!data.syntheticProgramIds};
   }
   function view(id, d) {
     return {id, kind: d.kind, to: d.to, startedMs: d.startedMs, status: d.status === 'sending' && now() - d.startedMs > 120000 ? 'unknown' : d.status};

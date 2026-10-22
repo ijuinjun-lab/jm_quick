@@ -43,9 +43,17 @@ class TestMailService {
 }
 
 class TestMailPage extends StatefulWidget {
-  const TestMailPage({super.key, required this.eventId, this.service});
+  const TestMailPage({
+    super.key,
+    required this.eventId,
+    this.service,
+    this.broadcastDraft,
+    this.initialParticipantId,
+  });
   final String eventId;
   final TestMailService? service;
+  final Map<String, dynamic>? broadcastDraft;
+  final String? initialParticipantId;
   @override
   State<TestMailPage> createState() => _TestMailPageState();
 }
@@ -64,6 +72,10 @@ class _TestMailPageState extends State<TestMailPage> {
   @override
   void initState() {
     super.initState();
+    if (widget.broadcastDraft != null) {
+      kind = 'broadcast';
+      person = widget.initialParticipantId;
+    }
     load();
   }
 
@@ -118,8 +130,12 @@ class _TestMailPageState extends State<TestMailPage> {
       'participantId': person
     else
       'syntheticProgramIds': synthetic.toList()..sort(),
-    if (batchId != null && person != null && !kind.startsWith('reminder'))
+    if (batchId != null &&
+        person != null &&
+        !kind.startsWith('reminder') &&
+        kind != 'broadcast')
       'batchId': batchId,
+    if (kind == 'broadcast') 'draft': widget.broadcastDraft,
     if (draft && kind.startsWith('reminder'))
       'draft': {
         'subject': subject.text,
@@ -235,8 +251,13 @@ class _TestMailPageState extends State<TestMailPage> {
             DropdownButtonFormField<String>(
               initialValue: kind,
               decoration: const InputDecoration(labelText: 'メール種類'),
-              items: const [
-                DropdownMenuItem(value: 'normal', child: Text('通常当選')),
+              items: [
+                if (widget.broadcastDraft != null)
+                  const DropdownMenuItem(
+                    value: 'broadcast',
+                    child: Text('一斉メール送信'),
+                  ),
+                const DropdownMenuItem(value: 'normal', child: Text('通常当選')),
                 DropdownMenuItem(
                   value: 'waitlistPromotion',
                   child: Text('繰り上げ当選'),
@@ -257,7 +278,11 @@ class _TestMailPageState extends State<TestMailPage> {
               isExpanded: true,
               decoration: const InputDecoration(labelText: 'プレビュー対象'),
               items: [
-                const DropdownMenuItem(value: '', child: Text('架空申込（QRは受付不可）')),
+                if (kind != 'broadcast')
+                  const DropdownMenuItem(
+                    value: '',
+                    child: Text('架空申込（QRは受付不可）'),
+                  ),
                 for (final p in settings!['participants'] as List)
                   DropdownMenuItem(
                     value: p['participantId'] as String,
@@ -268,7 +293,9 @@ class _TestMailPageState extends State<TestMailPage> {
                   ? null
                   : (v) => changed(() => person = v == '' ? null : v),
             ),
-            if (person != null && !kind.startsWith('reminder'))
+            if (person != null &&
+                !kind.startsWith('reminder') &&
+                kind != 'broadcast')
               DropdownButtonFormField<String>(
                 initialValue: batchId ?? '',
                 isExpanded: true,
@@ -362,6 +389,7 @@ class _TestMailPageState extends State<TestMailPage> {
             if (preview != null) ...[
               SelectableText('宛先：${preview!['to']}\n件名：${preview!['subject']}'),
               MailHtmlPreview(
+                allowWithoutQr: kind == 'broadcast',
                 html: preview!['html'] as String,
                 qrPngBase64: preview!['qrPngBase64'] as String,
               ),
