@@ -63,7 +63,7 @@ class _TestMailPageState extends State<TestMailPage> {
   Map<String, dynamic>? settings, preview;
   String kind = 'normal';
   String? person, to, message, batchId;
-  bool busy = false, draft = false;
+  bool busy = false, draft = false, confirmingSend = false;
   final synthetic = <String>{};
   final policyInput = TextEditingController();
   final subject = TextEditingController(text: 'テスト送信・正式文面ではありません リマインド');
@@ -198,26 +198,34 @@ class _TestMailPageState extends State<TestMailPage> {
   });
   Future<void> send() async {
     final p = preview;
-    if (p == null) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('テストメールを1通送信します'),
-        content: Text(
-          '宛先：${p['to']}\n件名：${p['subject']}\n正式送信ではありません。表示した本文で送信します。',
+    if (p == null || confirmingSend || busy) return;
+    // Native iframe clicks do not bubble to Flutter dialogs drawn above them.
+    // Remove only the preview frame while confirming; keep its layout space.
+    setState(() => confirmingSend = true);
+    bool? ok;
+    try {
+      ok = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('テストメールを1通送信します'),
+          content: Text(
+            '宛先：${p['to']}\n件名：${p['subject']}\n正式送信ではありません。表示した本文で送信します。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('戻る'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('確認してテスト送信'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c, false),
-            child: const Text('戻る'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, true),
-            child: const Text('確認してテスト送信'),
-          ),
-        ],
-      ),
-    );
+      );
+    } finally {
+      if (mounted) setState(() => confirmingSend = false);
+    }
     if (ok != true || !mounted) return;
     await run(() async {
       final result = await service.call('sendConfirmedTestMail', {
@@ -397,17 +405,25 @@ class _TestMailPageState extends State<TestMailPage> {
                 SelectableText(
                   '宛先：${preview!['to']}\n件名：${preview!['subject']}',
                 ),
-                MailHtmlPreview(
-                  // Leave room outside the iframe: its wheel/touch events do not
-                  // reach Flutter's enclosing scroll view on the web.
-                  height: (MediaQuery.sizeOf(context).height * 0.5).clamp(
-                    120,
-                    700,
+                if (confirmingSend)
+                  SizedBox(
+                    height: (MediaQuery.sizeOf(context).height * 0.5).clamp(
+                      120,
+                      700,
+                    ),
+                  )
+                else
+                  MailHtmlPreview(
+                    // Leave room outside the iframe: its wheel/touch events do not
+                    // reach Flutter's enclosing scroll view on the web.
+                    height: (MediaQuery.sizeOf(context).height * 0.5).clamp(
+                      120,
+                      700,
+                    ),
+                    allowWithoutQr: kind == 'broadcast',
+                    html: preview!['html'] as String,
+                    qrPngBase64: preview!['qrPngBase64'] as String,
                   ),
-                  allowWithoutQr: kind == 'broadcast',
-                  html: preview!['html'] as String,
-                  qrPngBase64: preview!['qrPngBase64'] as String,
-                ),
                 ExpansionTile(
                   title: const Text('テキスト版'),
                   children: [SelectableText(preview!['text'] as String)],

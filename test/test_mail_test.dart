@@ -47,12 +47,20 @@ void main() {
               'to': 'internal@example.invalid',
               'fingerprint': 'fixed',
             },
-            _ => throw StateError(
-              'No send or mutation allowed: ${request.url.path}',
-            ),
+            '/sendConfirmedTestMail' => {'status': 'sent'},
+            _ => throw StateError('Unexpected request: ${request.url.path}'),
           };
-          if (request.url.path == '/previewConfirmedTestMail') {
+          if (request.url.path == '/previewConfirmedTestMail' ||
+              request.url.path == '/sendConfirmedTestMail') {
             expect(data['kind'], kind);
+          }
+          if (request.url.path == '/sendConfirmedTestMail') {
+            expect(data['to'], 'internal@example.invalid');
+            expect(data['fingerprint'], 'fixed');
+            if (kind == 'broadcast') {
+              expect(data['participantId'], 'p1');
+              expect(data['draft']['body'], '本文');
+            }
           }
           return http.Response(
             jsonEncode({'result': result}),
@@ -122,6 +130,23 @@ void main() {
           '/getConfirmedTestMailSettings',
           '/previewConfirmedTestMail',
         ]);
+        expect(
+          find.byType(MailHtmlPreview),
+          findsNothing,
+          reason: 'No native iframe may intercept the dialog buttons',
+        );
+        await tester.tap(find.text('戻る'));
+        await tester.pumpAndSettle();
+        expect(find.byType(MailHtmlPreview), findsOneWidget);
+        expect(calls.where((c) => c.contains('sendConfirmed')), isEmpty);
+        await tester.tap(find.text('テスト送信の最終確認へ'));
+        await tester.pumpAndSettle();
+        expect(find.byType(MailHtmlPreview), findsNothing);
+        await tester.tap(find.text('確認してテスト送信'));
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(calls.where((c) => c == '/sendConfirmedTestMail'), hasLength(1));
+        expect(find.text('テスト配送結果：sent'), findsOneWidget);
         expect(tester.takeException(), isNull);
       },
     );
