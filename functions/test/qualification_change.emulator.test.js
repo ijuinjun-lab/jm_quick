@@ -71,6 +71,7 @@ test('qualification changes: atomic swaps, replay, races, capabilities, reportin
     await assert.rejects(api.change({identity,data:await request('program-3')}),e=>e.details.code==='operation-in-progress');
     await db.collection('events').doc(eventId).update({activeImportBatch:null});
     await db.collection('sendJobs').doc('busy').set({eventId,status:'completed',dispatchActive:true});
+    await db.collection('sendJobs').doc('busy').collection('items').doc(participantId).set({participantId,status:'sending'});
     await assert.rejects(api.change({identity,data:await request('program-3')}),e=>e.details.code==='operation-in-progress');
     await db.collection('sendJobs').doc('busy').delete();
     // Actual callable wrapper and Firestore-backed event assignment checks.

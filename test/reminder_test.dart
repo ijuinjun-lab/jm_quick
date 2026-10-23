@@ -329,7 +329,8 @@ void main() {
       await settle(tester);
       // eventIdは自動的に引き継がれ、入力欄なしで設定が読み込まれる(Phase 11D)。
       expect(find.text('配送結果を更新'), findsOneWidget);
-      expect(find.text('新しい一斉メールを作成'), findsOneWidget);
+      expect(find.widgetWithText(TextField, '件名'), findsOneWidget);
+      expect(find.widgetWithText(TextField, '本文'), findsOneWidget);
     });
 
     testWidgets('staffには「一斉メール送信」が表示されない(送信管理・設定も)', (tester) async {

@@ -1,5 +1,8 @@
 // Administrative changes preserve participant capabilities and all delivery records.
 const {createHash} = require('node:crypto');
+const {mappingFor} = require('./participation_types');
+const {programTimeText} = require('./mail_view_model');
+const {parseTimeRange} = require('./waitlist_promotion');
 const {ApiError} = require('./api_error');
 const {isConfirmedFlow} = require('../flow');
 const {isValidParticipantId, programAttendanceId, isValidPlannedCount} = require('../programs');
@@ -9,19 +12,21 @@ const stamp = (v) => v?.toDate?.().toISOString() || v || null;
 const view = (a) => ({programId: a.programId, plannedCount: a.plannedCount, slotLabel: a.slotLabel || '', startAt: stamp(a.startAt), endAt: stamp(a.endAt), entitlementStatus: a.entitlementStatus || 'active', checkedIn: a.checkedIn === true});
 function createQualificationChangeApi({getDb, serverTimestamp}) {
   function parse(d, changing = false) {
-    const keys = ['eventId', 'participantId', ...(changing ? ['operationId', 'fingerprint', 'programId', 'targetProgramId', 'slotLabel', 'plannedCount', 'reason'] : [])];
+    const keys = ['eventId', 'participantId', ...(changing ? ['action', 'operationId', 'fingerprint', 'programId', 'targetProgramId', 'slotLabel', 'plannedCount', 'reason'] : [])];
     if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some(k => !keys.includes(k)) || !/^[A-Za-z0-9_-]{1,128}$/.test(d.eventId || '') || !isValidParticipantId(d.participantId)) fail('invalid-input');
     if (changing && d.targetProgramId !== undefined && (typeof d.targetProgramId !== 'string' || !d.targetProgramId)) fail('invalid-input');
     if (changing && (!/^[A-Za-z0-9_-]{20,100}$/.test(d.operationId || '') || !/^[a-f0-9]{64}$/.test(d.fingerprint || '') || typeof d.reason !== 'string' || !d.reason.trim() || d.reason.length > 200 || typeof d.programId !== 'string')) fail('invalid-input');
   }
   async function state(db, tx, d) {
     const e = db.collection('events').doc(d.eventId), p = db.collection('participants').doc(d.participantId);
-    const [es, ps, as, bs, jobs, deliveries, tests] = await Promise.all([
+    const [es, ps, as, bs, jobs, deliveries, notices, recoveries, inventory] = await Promise.all([
       tx.get(e), tx.get(p), tx.get(db.collection('programAttendances').where('participantId', '==', d.participantId)),
       tx.get(db.collection('importBatches').where('eventId', '==', d.eventId)),
       tx.get(db.collection('sendJobs').where('eventId', '==', d.eventId)),
       tx.get(db.collection('mailDeliveries').where('participantId', '==', d.participantId)),
-      tx.get(db.collection('testMailDeliveries').where('eventId', '==', d.eventId)),
+      tx.get(db.collection('qualificationNotices').where('participantId', '==', d.participantId)),
+      tx.get(p.collection('deliveryReviews')),
+      tx.get(db.collection('programAttendances').where('eventId', '==', d.eventId)),
     ]);
     if (!es.exists || !isConfirmedFlow(es.data()) || !ps.exists || ps.data().eventId !== d.eventId || ps.data().status !== 'active' || ps.data().schemaVersion !== 2) fail('participant-unavailable');
     const event = es.data(), person = ps.data(), batches = new Map(bs.docs.map(s => [s.id, s.data()]));
@@ -31,46 +36,54 @@ function createQualificationChangeApi({getDb, serverTimestamp}) {
     // import recovery (resume or abandon); age alone is not proof of quiescence.
     let busyReason = event.activeImportBatch || bs.docs.some(s => ['committing','failed'].includes(s.data().status))
       ? '未完了の取込があります。既存の取込復旧画面で再開・完了、または放棄してから再取得してください。' : null;
+    const reviewed = x => recoveries.docs.some(r => r.id === x.id && r.data().fingerprint === digest(x.data()));
+    const unresolved = x => ['pending', 'sending'].includes(x.data().status) ||
+      (x.data().status === 'unknown' && !reviewed(x));
     for (const job of jobs.docs) {
       const j = job.data();
-      const items = await tx.get(job.ref.collection('items'));
-      // openJob never adds recipients to ready/completed jobs. retryFailed and
-      // recovery only reset existing items; neither retries sent/unknown items.
-      // Check the full frozen population inside this transaction, also locking
-      // against requestDelivery, claims and recovery. Partial preparation or
-      // malformed populations are not sufficient evidence to relax the guard.
-      const unsafe = j.dispatchActive || (j.dispatchWorkerLeaseUntil?.toMillis?.() || 0) > Date.now() ||
-        j.dispatchWorkerId || !['ready','completed'].includes(j.status) ||
-        !Number.isInteger(j.targetCount) || j.targetCount !== items.size ||
-        items.docs.some(i => (i.data().participantId && i.data().participantId !== i.id) ||
-          !['pending','sending','sent','failed','unknown'].includes(i.data().status) ||
-          i.data().status === 'sending' || (i.data().leaseUntil?.toMillis?.() || 0) > Date.now() ||
-          (i.id === d.participantId && ['pending','unknown'].includes(i.data().status)));
-      if (unsafe && !busyReason) busyReason = '配送中、または安全を確認できない送信ジョブがあります。既存の送信管理・復旧画面で確認してください。';
+      const own = await tx.get(job.ref.collection('items').doc(d.participantId));
+      // Preparing jobs can still grow their population. Terminal/ready jobs only
+      // retry existing items; another person's worker never locks this person.
+      if (j.status === 'preparing' || (own.exists &&
+          (['pending', 'sending'].includes(own.data().status) ||
+           (own.data().status === 'unknown' && !deliveries.docs.some(x => x.data().jobId === job.id && x.data().status === 'unknown' && reviewed(x))) ||
+           (own.data().participantId && own.data().participantId !== d.participantId) ||
+           (own.data().leaseUntil?.toMillis?.() || 0) > Date.now()))) {
+        busyReason ||= '本人の配送待ち・配送中、または送信対象の準備中です。送信管理で確認してください。';
+      }
     }
-    if (!busyReason && deliveries.docs.some(s => ['pending','sending','unknown'].includes(s.data().status))) {
-      busyReason = 'この参加者に未解決の配送があります。既存の送信管理・復旧画面で確認してください。';
-    }
-    // The independent test-mail API writes completedAt only after transport has
-    // returned. Such an unknown result remains unknown and is never reclaimed.
-    // A stale sending record has no equivalent proof: continue to block it.
-    if (!busyReason && tests.docs.some(s => s.data().status === 'sending' ||
-        (s.data().status === 'unknown' && !s.data().completedAt?.toMillis?.()))) {
-      busyReason = '独立テストメールの処理終了を確認できません。配送結果を確認してください。';
-    }
+    const deliveryStates = [...deliveries.docs, ...notices.docs].map(x => ({
+      id: x.id, kind: x.ref.parent.id, status: x.data().status, to:x.data().to || person.email, startedAt:stamp(x.data().startedAt || x.data().createdAt),
+      reviewed: reviewed(x),
+      recoverable: x.data().status === 'unknown' && !x.data().claimId &&
+        !(x.data().leaseUntil?.toMillis?.() > Date.now()) &&
+        (x.ref.parent.id === 'mailDeliveries' ? x.data().claimId === null : !!x.data().completedAt),
+    }));
+    if ([...deliveries.docs, ...notices.docs].some(unresolved))
+      busyReason ||= '本人の未解決の配送があります。配送状態を確認してください。結果不明は再送しません。';
+    // Independent test mails use a captured message and cannot write qualifications.
+    const slots = Object.fromEntries(event.programs.map(p => {
+      const values = [...(p.qualificationSlots || []), programTimeText({}, p),
+        ...(mappingFor(d.eventId,event)?.talkProgramId === p.programId ? [event.confirmedMailSettings?.talkTimeText] : []),
+        ...inventory.docs.filter(x => x.data().programId === p.programId && x.data().entitlementStatus !== 'revoked' &&
+          (!x.data().importBatchId || batches.get(x.data().importBatchId)?.status === 'committed')).map(x => programTimeText(x.data(), p))];
+      return [p.programId, [...new Set(values.filter(v => typeof v === 'string' && parseTimeRange(v)))].sort()];
+    }));
     const busy = busyReason !== null;
     const activeQualificationCount = as.docs.filter(s => s.data().entitlementStatus !== 'revoked' &&
       (!s.data().identityVersion || batches.get(s.data().importBatchId)?.status === 'committed')).length;
     const fingerprint = digest([activeQualificationCount, person, event.qualificationRevision || 0, event.participationMapping || {}, event.programs, as.docs.map(s => [s.id, s.data()]).sort((a,b)=>a[0].localeCompare(b[0]))]);
-    return {e, event, person, as, batches, busy, busyReason, activeQualificationCount, fingerprint};
+    return {e, event, person, as, batches, busy, busyReason, activeQualificationCount, fingerprint, slots, deliveryStates};
   }
   async function get({data}) {
     parse(data); const db = getDb();
     return db.runTransaction(async tx => {
       const s = await state(db, tx, data);
-      return {participantId: data.participantId, name: s.person.name, email: s.person.email, sourceReference: s.person.sourceReference || null,
-        fingerprint: s.fingerprint, busy: s.busy, busyReason: s.busyReason, activeQualificationCount: s.activeQualificationCount, mapping: s.event.participationMapping || {},
-        programs: s.event.programs, qualifications: s.as.docs.map(a => view(a.data()))};
+      const history = await tx.get(db.collection('participants').doc(data.participantId).collection('qualificationChanges'));
+      const display = a => ({...a, timeText: programTimeText(a, {...s.event.programs.find(p => p.programId === a.programId), ...(mappingFor(data.eventId,s.event)?.talkProgramId === a.programId ? {role:'talk',talkTimeText:s.event.confirmedMailSettings?.talkTimeText} : {})}) || ''});
+      return {history: history.docs.map(x => ({...x.data(), before:x.data().before.map(display), after:x.data().after.map(display), changedAt: stamp(x.data().changedAt)})).sort((a,b) => String(b.changedAt).localeCompare(String(a.changedAt))), slots: s.slots, deliveries: s.deliveryStates, participantId: data.participantId, name: s.person.name, email: s.person.email, sourceReference: s.person.sourceReference || null,
+        fingerprint: s.fingerprint, busy: s.busy, busyReason: s.busyReason, activeQualificationCount: s.activeQualificationCount, mapping: mappingFor(data.eventId, s.event) || {},
+        programs: s.event.programs, qualifications: s.as.docs.map(a => display(view(a.data())))};
     }, {readOnly: true});
   }
   async function change({identity, data: d}) {
@@ -86,6 +99,9 @@ function createQualificationChangeApi({getDb, serverTimestamp}) {
       const s = await state(db, tx, d);
       if (s.busy) fail('operation-in-progress');
       if (s.fingerprint !== d.fingerprint) fail('state-changed');
+      const action = d.action || (d.targetProgramId ? 'swap' : 'cancel');
+      if (!['add','edit','swap','cancel'].includes(action) || (action === 'swap' && !d.targetProgramId) || (action === 'cancel' && d.targetProgramId)) fail('invalid-input');
+      if (['add','edit'].includes(action)) return updateDetails(tx, db, s, d, identity, op, requestHash, action);
       const source = s.as.docs.find(a => a.data().programId === d.programId);
       if (!source || source.data().entitlementStatus === 'revoked') fail('qualification-unavailable');
       const a = source.data();
@@ -94,9 +110,9 @@ function createQualificationChangeApi({getDb, serverTimestamp}) {
       const targetId = d.targetProgramId || null;
       let target = null, targetRef = null;
       if (targetId) {
-        const m = s.event.participationMapping || {};
+        const m = mappingFor(d.eventId, s.event) || {};
         if (!((d.programId === m.catProgramId && targetId === m.dogProgramId) || (d.programId === m.dogProgramId && targetId === m.catProgramId)) || !s.event.programs.some(p => p.programId === targetId)) fail('invalid-program-change');
-        if (!isValidPlannedCount(d.plannedCount) || typeof d.slotLabel !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/.test(d.slotLabel) || d.slotLabel.slice(0,5) >= d.slotLabel.slice(6)) fail('invalid-slot');
+        if (!isValidPlannedCount(d.plannedCount) || typeof d.slotLabel !== 'string' || !parseTimeRange(d.slotLabel)) fail('invalid-slot');
         const previous = s.as.docs.find(x => x.data().programId === targetId);
         if (previous && (previous.data().entitlementStatus !== 'revoked' || previous.data().checkedIn || previous.data().checkedInAt || previous.data().attendedCount != null)) fail('target-exists');
         targetRef = db.collection('programAttendances').doc(programAttendanceId(d.participantId, targetId));
@@ -121,6 +137,48 @@ function createQualificationChangeApi({getDb, serverTimestamp}) {
       return {changed: true, operationId: d.operationId, replay: false};
     });
   }
-  return {get, change};
+  function updateDetails(tx, db, s, d, identity, op, requestHash, action) {
+    if (d.targetProgramId || !s.event.programs.some(p => p.programId === d.programId)) fail('invalid-program-change');
+    const existing = s.as.docs.find(x => x.data().programId === d.programId);
+    const a = existing?.data();
+    if (action === 'add' ? a && a.entitlementStatus !== 'revoked' : !a || a.entitlementStatus === 'revoked') fail('qualification-unavailable');
+    if (a?.checkedIn || a?.checkedInAt || a?.attendedCount != null) fail('already-checked-in');
+    if (a?.identityVersion && s.batches.get(a.importBatchId)?.status !== 'committed') fail('batch-not-committed');
+    const program = s.event.programs.find(p => p.programId === d.programId);
+    const currentTime = a ? programTimeText(a, {...program, ...(mappingFor(d.eventId,s.event)?.talkProgramId === d.programId ? {role:'talk',talkTimeText:s.event.confirmedMailSettings?.talkTimeText} : {})}) || '' : '';
+    const sameTime = action === 'edit' && (d.slotLabel === (a.slotLabel || '') || d.slotLabel === currentTime);
+    if (!isValidPlannedCount(d.plannedCount) || typeof d.slotLabel !== 'string' ||
+        !(s.slots[d.programId].includes(d.slotLabel) || sameTime)) fail('invalid-slot');
+    if (action === 'edit' && a.plannedCount === d.plannedCount && sameTime) fail('no-change');
+    const ref = existing?.ref || db.collection('programAttendances').doc(programAttendanceId(d.participantId, d.programId));
+    const next = {...(a || {}), eventId:d.eventId, participantId:d.participantId, programId:d.programId,
+      plannedCount:d.plannedCount, slotLabel:sameTime ? a.slotLabel || '' : d.slotLabel, entitlementStatus:'active',
+      ...(action === 'add' ? {importBatchId:s.person.importBatchId || null, checkedIn:false, checkedInAt:null, attendedCount:null, qualificationSource:'admin-change'} : {}),
+      ...(!sameTime ? {startAt:null, endAt:null} : {}),
+      qualificationChangeId:d.operationId, updatedAt:serverTimestamp()};
+    const before = s.as.docs.map(x => view(x.data()));
+    const after = [...before.filter(x => x.programId !== d.programId), view(next)];
+    const audit = {eventId:d.eventId, participantId:d.participantId, operationId:d.operationId, requestHash, action,
+      reason:d.reason.trim(), changedBy:identity.uid, changedAt:serverTimestamp(), before, after};
+    tx.set(ref, next); tx.create(op, audit); tx.create(ref.collection('history').doc(`qualification-${d.operationId}`), audit);
+    tx.update(s.e, {qualificationRevision:(s.event.qualificationRevision || 0)+1});
+    return {changed:true, operationId:d.operationId, replay:false};
+  }
+  async function reviewDelivery({identity, data:d}) {
+    if (!d || !['mailDeliveries','qualificationNotices'].includes(d.kind) || !/^[A-Za-z0-9_-]{1,200}$/.test(d.deliveryId || '') ||
+        typeof d.reason !== 'string' || !d.reason.trim() || d.reason.length > 200) fail('invalid-input');
+    parse({eventId:d.eventId,participantId:d.participantId});
+    const db = getDb();
+    return db.runTransaction(async tx => {
+      const s = await state(db, tx, d);
+      const x = await tx.get(db.collection(d.kind).doc(d.deliveryId));
+      if (!x.exists || x.data().participantId !== d.participantId || x.data().eventId !== d.eventId ||
+          !s.deliveryStates.some(v => v.id === d.deliveryId && v.kind === d.kind && v.recoverable)) fail('delivery-still-active');
+      tx.set(db.collection('participants').doc(d.participantId).collection('deliveryReviews').doc(x.id),
+        {fingerprint:digest(x.data()), reason:d.reason.trim(), reviewedBy:identity.uid, reviewedAt:serverTimestamp()});
+      return {reviewed:true};
+    });
+  }
+  return {get, change, reviewDelivery, state};
 }
 module.exports = {createQualificationChangeApi};

@@ -127,7 +127,7 @@ void main() {
       );
       await tester.tap(find.text('開く'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.tap(find.byType(DropdownButtonFormField<String>).last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('猫').last);
       await tester.pumpAndSettle();
@@ -189,7 +189,7 @@ void main() {
       await tester.tap(find.text('開く'));
       await tester.pumpAndSettle();
       expect(find.text('架空田中 / tanaka@example.invalid'), findsOneWidget);
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.tap(find.byType(DropdownButtonFormField<String>).last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('猫').last);
       await tester.pumpAndSettle();

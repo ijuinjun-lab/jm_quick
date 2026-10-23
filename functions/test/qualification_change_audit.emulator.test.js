@@ -47,23 +47,22 @@ test('audit: stopped unrelated deliveries, existing recovery, and stale last-can
     // Reuse existing recovery, without sending or resolving any unknown record.
     const retry = await engine.retryFailed({db,jobId}); assert.equal(retry.retried,1);
     assert.equal((await api.get({data:input})).busy,false);
-    const beforeStart = await req();
     await worker.requestDelivery({db,identity,jobId});
-    await assert.rejects(api.change({identity,data:beforeStart}),e=>e.details.code==='operation-in-progress');
+    assert.equal((await api.get({data:input})).busy,false); // unrelated active worker
     await jobRef.update({dispatchActive:false}); // synthetic stopped worker fixture
-    await jobRef.update({dispatchWorkerLeaseUntil:Timestamp.fromMillis(Date.now()+60000)}); await blocked();
-    await jobRef.update({dispatchWorkerLeaseUntil:Timestamp.fromMillis(1),dispatchWorkerId:'stale-worker'}); await blocked();
+    await jobRef.update({dispatchWorkerLeaseUntil:Timestamp.fromMillis(Date.now()+60000)}); assert.equal((await api.get({data:input})).busy,false);
+    await jobRef.update({dispatchWorkerLeaseUntil:Timestamp.fromMillis(1),dispatchWorkerId:'stale-worker'}); assert.equal((await api.get({data:input})).busy,false);
     await jobRef.update({dispatchWorkerId:null});
-    await item.update({status:'sending',leaseUntil:Timestamp.fromMillis(1)}); await delivery.update({status:'sending'}); await blocked();
+    await item.update({status:'sending',leaseUntil:Timestamp.fromMillis(1)}); await delivery.update({status:'sending'}); assert.equal((await api.get({data:input})).busy,false);
     await item.update({status:'unknown'}); await delivery.update({status:'unknown'});
     await engine.refreshJob(db,jobId);
-    await jobRef.update({dispatchWorkerId:'stale-terminal-worker'}); await blocked();
+    await jobRef.update({dispatchWorkerId:'stale-terminal-worker'}); assert.equal((await api.get({data:input})).busy,false);
     await jobRef.update({dispatchWorkerId:null});
     assert.equal((await api.get({data:input})).busy,false);
     const stoppedBefore = (await jobRef.get()).data(), unknownBefore = (await delivery.get()).data();
-    await jobRef.update({targetCount:2}); await blocked(); await jobRef.update({targetCount:1});
+    await jobRef.update({targetCount:2}); assert.equal((await api.get({data:input})).busy,false); await jobRef.update({targetCount:1});
     await jobRef.update({status:'preparing'}); await blocked();
-    await jobRef.update({status:'failed'}); await blocked();
+    await jobRef.update({status:'failed'}); assert.equal((await api.get({data:input})).busy,false);
     await jobRef.update({status:'completed'});
     // Even with no active job, an unresolved delivery for THIS participant blocks.
     const unresolved = db.collection('mailDeliveries').doc('target-unknown');
@@ -71,11 +70,11 @@ test('audit: stopped unrelated deliveries, existing recovery, and stale last-can
     await unresolved.delete(); // remove synthetic fixture only
     // Test mail persists a terminal unknown result only after transport returns.
     const testMail = db.collection('testMailDeliveries').doc('audit-test-mail');
-    await testMail.set({eventId,status:'unknown'}); await blocked();
+    await testMail.set({eventId,status:'unknown'}); assert.equal((await api.get({data:input})).busy,false);
     await testMail.update({completedAt:stamp()});
     assert.equal((await api.get({data:input})).busy,false);
     const testMailBefore = (await testMail.get()).data();
-    await testMail.update({status:'sending'}); await blocked(); await testMail.update({status:'unknown'});
+    await testMail.update({status:'sending'}); assert.equal((await api.get({data:input})).busy,false); await testMail.update({status:'unknown'});
     // Failed imports remain unsafe until the EXISTING abandonment operation.
     const failedBatch = db.collection('importBatches').doc('failedAudit');
     await failedBatch.set({eventId,status:'failed',sequence:2,totalRecords:1,requestHash:'audit'});

@@ -184,7 +184,10 @@ abstract class AttendanceReportService {
 }
 
 class CallableAttendanceReportService
-    implements AttendanceReportService, QualificationChangeService {
+    implements
+        AttendanceReportService,
+        QualificationChangeService,
+        QualificationNoticeService {
   CallableAttendanceReportService({
     required this.authClient,
     http.Client? httpClient,
@@ -213,6 +216,17 @@ class CallableAttendanceReportService
     'eventId': eventId,
     'participantId': participantId,
   });
+
+  @override
+  Future<Map<String, dynamic>> previewNotice(Map<String, dynamic> request) =>
+      _call('previewConfirmedQualificationNotice', request);
+  @override
+  Future<Map<String, dynamic>> sendNotice(Map<String, dynamic> request) =>
+      _call('sendConfirmedQualificationNotice', request);
+  @override
+  Future<void> reviewDelivery(Map<String, dynamic> request) async {
+    await _call('reviewConfirmedQualificationDelivery', request);
+  }
 
   @override
   Future<void> changeQualification(Map<String, dynamic> request) async {

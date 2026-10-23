@@ -1023,6 +1023,15 @@ const {createQualificationChangeApi} = require("./confirmed/qualification_change
 const qualificationChangeApi = createQualificationChangeApi({getDb: getFirestore, serverTimestamp});
 exports.getConfirmedQualificationChange = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, qualificationChangeApi.get);
 exports.changeConfirmedQualification = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, qualificationChangeApi.change);
+exports.reviewConfirmedQualificationDelivery = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, qualificationChangeApi.reviewDelivery);
+const {createQualificationNoticeApi} = require("./confirmed/qualification_notice_api");
+const qualificationNoticeApi = createQualificationNoticeApi({
+  getDb:getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl:() => appBaseUrl.value(),
+  getTransport:() => createMailApiTransport({endpoint:mailApiUrl.value(), apiKey:mailApiKey.value()}),
+});
+exports.previewConfirmedQualificationNotice = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, qualificationNoticeApi.preview);
+exports.sendConfirmedQualificationNotice = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, qualificationNoticeApi.send, {secrets:[mailApiKey], timeoutSeconds:120});
+
 // 受付スタッフ用QR(アカウントを持たない受付スタッフの端末に、対象イベントの受付だけを許可する)。
 // - issueReceptionStaffKey: PCの「受付」画面(正式ログインした対象イベントのstaff以上)が、QRに載せる受付キーを取得する(有効期限24時間)
 // - *ByStaffKey: QRを読んだ端末(ログインなし・App Check必須)が、受付キーで呼ぶ。許可するのは受付画面の表示と初回受付だけ

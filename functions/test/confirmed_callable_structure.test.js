@@ -292,6 +292,9 @@ const AUTHORIZATION_MAP_PHASE_1B = {
   inviteEventRole: E_MANAGER,
   revokeEventInvitation: E_MANAGER,
   getConfirmedQualificationChange: E_MANAGER,
+  reviewConfirmedQualificationDelivery: E_MANAGER,
+  previewConfirmedQualificationNotice: E_MANAGER,
+  sendConfirmedQualificationNotice: E_MANAGER,
   changeConfirmedQualification: E_MANAGER,
   getEventInvitation: "publicCapabilityCallable",
   acceptEventInvitation: "confirmedCallable:authenticated",
@@ -314,8 +317,8 @@ const authorizationOf = (rhs) => {
 test("Phase 1B: 全exportの入口・認可レベル・対象イベントのresolverが正式マップと一致する(callableの追加・削除も無い)", () => {
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
-  // 60本 + イベント設定(getConfirmedEventSettings / updateConfirmedEventSettings。event_manager以上)の2本
-  assert.equal(exportsInIndex.length, 80);
+  // 既存80本 + 資格変更通知のpreview/sendと配送確認の3本
+  assert.equal(exportsInIndex.length, 83);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {
