@@ -27,19 +27,49 @@ function createQualificationChangeApi({getDb, serverTimestamp}) {
     const event = es.data(), person = ps.data(), batches = new Map(bs.docs.map(s => [s.id, s.data()]));
     if (person.importBatchId && batches.get(person.importBatchId)?.status !== 'committed') fail('batch-not-committed');
     if (as.docs.some(s => s.data().eventId !== d.eventId)) fail('event-mismatch');
-    const busy = event.activeImportBatch || bs.docs.some(s => ['committing','failed'].includes(s.data().status)) ||
-      jobs.docs.some(s => { const j = s.data(); return j.dispatchActive || j.dispatchWorkerId || (j.dispatchWorkerLeaseUntil?.toMillis?.() || 0) > Date.now() || j.status !== 'completed'; }) ||
-      deliveries.docs.some(s => ['pending','sending','unknown'].includes(s.data().status)) ||
-      tests.docs.some(s => ['sending','unknown'].includes(s.data().status));
-    const fingerprint = digest([person, event.qualificationRevision || 0, event.participationMapping || {}, event.programs, as.docs.map(s => [s.id, s.data()]).sort((a,b)=>a[0].localeCompare(b[0]))]);
-    return {e, event, person, as, batches, busy: !!busy, fingerprint};
+    // Failed/committing imports can still resume writing rows. Use existing
+    // import recovery (resume or abandon); age alone is not proof of quiescence.
+    let busyReason = event.activeImportBatch || bs.docs.some(s => ['committing','failed'].includes(s.data().status))
+      ? '未完了の取込があります。既存の取込復旧画面で再開・完了、または放棄してから再取得してください。' : null;
+    for (const job of jobs.docs) {
+      const j = job.data();
+      const items = await tx.get(job.ref.collection('items'));
+      // openJob never adds recipients to ready/completed jobs. retryFailed and
+      // recovery only reset existing items; neither retries sent/unknown items.
+      // Check the full frozen population inside this transaction, also locking
+      // against requestDelivery, claims and recovery. Partial preparation or
+      // malformed populations are not sufficient evidence to relax the guard.
+      const unsafe = j.dispatchActive || (j.dispatchWorkerLeaseUntil?.toMillis?.() || 0) > Date.now() ||
+        j.dispatchWorkerId || !['ready','completed'].includes(j.status) ||
+        !Number.isInteger(j.targetCount) || j.targetCount !== items.size ||
+        items.docs.some(i => (i.data().participantId && i.data().participantId !== i.id) ||
+          !['pending','sending','sent','failed','unknown'].includes(i.data().status) ||
+          i.data().status === 'sending' || (i.data().leaseUntil?.toMillis?.() || 0) > Date.now() ||
+          (i.id === d.participantId && ['pending','unknown'].includes(i.data().status)));
+      if (unsafe && !busyReason) busyReason = '配送中、または安全を確認できない送信ジョブがあります。既存の送信管理・復旧画面で確認してください。';
+    }
+    if (!busyReason && deliveries.docs.some(s => ['pending','sending','unknown'].includes(s.data().status))) {
+      busyReason = 'この参加者に未解決の配送があります。既存の送信管理・復旧画面で確認してください。';
+    }
+    // The independent test-mail API writes completedAt only after transport has
+    // returned. Such an unknown result remains unknown and is never reclaimed.
+    // A stale sending record has no equivalent proof: continue to block it.
+    if (!busyReason && tests.docs.some(s => s.data().status === 'sending' ||
+        (s.data().status === 'unknown' && !s.data().completedAt?.toMillis?.()))) {
+      busyReason = '独立テストメールの処理終了を確認できません。配送結果を確認してください。';
+    }
+    const busy = busyReason !== null;
+    const activeQualificationCount = as.docs.filter(s => s.data().entitlementStatus !== 'revoked' &&
+      (!s.data().identityVersion || batches.get(s.data().importBatchId)?.status === 'committed')).length;
+    const fingerprint = digest([activeQualificationCount, person, event.qualificationRevision || 0, event.participationMapping || {}, event.programs, as.docs.map(s => [s.id, s.data()]).sort((a,b)=>a[0].localeCompare(b[0]))]);
+    return {e, event, person, as, batches, busy, busyReason, activeQualificationCount, fingerprint};
   }
   async function get({data}) {
     parse(data); const db = getDb();
     return db.runTransaction(async tx => {
       const s = await state(db, tx, data);
       return {participantId: data.participantId, name: s.person.name, email: s.person.email, sourceReference: s.person.sourceReference || null,
-        fingerprint: s.fingerprint, busy: s.busy, mapping: s.event.participationMapping || {},
+        fingerprint: s.fingerprint, busy: s.busy, busyReason: s.busyReason, activeQualificationCount: s.activeQualificationCount, mapping: s.event.participationMapping || {},
         programs: s.event.programs, qualifications: s.as.docs.map(a => view(a.data()))};
     }, {readOnly: true});
   }

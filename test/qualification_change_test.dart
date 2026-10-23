@@ -13,6 +13,7 @@ import 'package:jm_quick/confirmed/xlsx_reader.dart';
 class Changes implements QualificationChangeService, AttendanceReportService {
   final requests = <Map<String, dynamic>>[];
   bool failOnce = true;
+  bool onlyOne = false;
   int reads = 0;
   @override
   Future<Map<String, dynamic>> getQualifications(
@@ -23,6 +24,7 @@ class Changes implements QualificationChangeService, AttendanceReportService {
     'email': 'tanaka@example.invalid',
     'fingerprint': 'a' * 64,
     'busy': false,
+    'activeQualificationCount': onlyOne ? 1 : 2,
     'mapping': {'catProgramId': 'cat', 'dogProgramId': 'dog'},
     'programs': [
       {'programId': 'cat', 'name': '猫'},
@@ -37,13 +39,14 @@ class Changes implements QualificationChangeService, AttendanceReportService {
         'slotLabel': '10:10-10:50',
         'checkedIn': false,
       },
-      {
-        'programId': 'talk',
-        'entitlementStatus': 'active',
-        'plannedCount': 2,
-        'slotLabel': '13:00-14:00',
-        'checkedIn': true,
-      },
+      if (!onlyOne)
+        {
+          'programId': 'talk',
+          'entitlementStatus': 'active',
+          'plannedCount': 2,
+          'slotLabel': '13:00-14:00',
+          'checkedIn': true,
+        },
     ],
   };
   @override
@@ -96,6 +99,67 @@ final report = AttendanceReport.fromJson({
   ],
 });
 void main() {
+  for (final onlyOne in [true, false]) {
+    testWidgets('last qualification warning: $onlyOne', (tester) async {
+      tester.view.physicalSize = const Size(1200, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final service = Changes()..onlyOne = onlyOne;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => showDialog<bool>(
+                  context: context,
+                  builder: (_) => QualificationChangeDialog(
+                    service: service,
+                    eventId: 'event1',
+                    participantId: 'batchA-000002',
+                  ),
+                ),
+                child: const Text('開く'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('開く'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(DropdownButtonFormField<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('猫').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextField, '変更理由（必須）'),
+        '本人希望',
+      );
+      await tester.tap(find.text('確認へ'));
+      await tester.pumpAndSettle();
+      const warning =
+          'この資格を取り消すと、有効な参加資格がなくなり、Web参加証は利用できなくなります。QRコード自体は変更されませんが、受付には使用できません。';
+      expect(find.text(warning), onlyOne ? findsOneWidget : findsNothing);
+      await tester.tap(find.text('戻る'));
+      await tester.pumpAndSettle();
+      expect(service.requests, isEmpty);
+      if (onlyOne) {
+        await tester.tap(find.byType(CheckboxListTile));
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.widgetWithText(TextField, '変更先時間（HH:mm-HH:mm）'),
+          '14:10-14:50',
+        );
+        await tester.tap(find.text('確認へ'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text(warning),
+          findsNothing,
+          reason: 'A swap retains an active qualification',
+        );
+      }
+    });
+  }
   testWidgets(
     'list selects participant; confirmed swap retries the exact operation without edits',
     (tester) async {

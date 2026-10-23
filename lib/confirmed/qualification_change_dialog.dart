@@ -99,12 +99,29 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
         busy = true;
         confirming = true;
       });
+      final removesLastQualification =
+          !swap && (data!['activeQualificationCount'] ?? active.length) == 1;
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (c) => AlertDialog(
           title: const Text('参加資格の変更を確定しますか？'),
-          content: Text(
-            '${data!['name']}\n${name(source)}を取消${swap ? ' → ${name(target)} ${slot.text} ${count.text}名を追加' : ''}\n他の資格とQRは維持します。通知メールは送信しません。\n理由：${reason.text.trim()}',
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${data!['name']}\n${name(source)}を取消${swap ? ' → ${name(target)} ${slot.text} ${count.text}名を追加' : ''}\n他の資格とQRは維持します。通知メールは送信しません。\n理由：${reason.text.trim()}',
+                ),
+                if (removesLastQualification) ...[
+                  const SizedBox(height: 12),
+                  const Text(
+                    'この資格を取り消すと、有効な参加資格がなくなり、Web参加証は利用できなくなります。QRコード自体は変更されませんが、受付には使用できません。',
+                    key: Key('last-qualification-warning'),
+                  ),
+                ],
+              ],
+            ),
           ),
           actions: [
             TextButton(
@@ -181,7 +198,10 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                       '${name(q['programId'] as String?)} ${q['slotLabel']} ${q['plannedCount']}名${q['checkedIn'] == true ? '（受付済み・変更不可）' : ''}',
                     ),
                   if (data!['busy'] == true)
-                    const Text('取込・配送処理が未完了のため変更できません。'),
+                    Text(
+                      data!['busyReason'] as String? ??
+                          '取込・配送処理が未完了のため変更できません。',
+                    ),
                   DropdownButtonFormField<String>(
                     initialValue: source,
                     decoration: const InputDecoration(labelText: '変更・取消する資格'),
