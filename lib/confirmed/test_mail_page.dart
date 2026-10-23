@@ -248,6 +248,25 @@ class _TestMailPageState extends State<TestMailPage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('テストメール（正式送信とは別）')),
+    // Scaffold reserves this area outside the scrolling body and native iframe.
+    bottomNavigationBar: preview == null
+        ? null
+        : Material(
+            elevation: 8,
+            color: Theme.of(context).colorScheme.surface,
+            child: SafeArea(
+              top: false,
+              minimum: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+                  onPressed: busy || confirmingSend ? null : send,
+                  child: const Text('テスト送信の最終確認へ'),
+                ),
+              ),
+            ),
+          ),
     body: Scrollbar(
       controller: scrollController,
       thumbVisibility: true,
@@ -427,10 +446,6 @@ class _TestMailPageState extends State<TestMailPage> {
                 ExpansionTile(
                   title: const Text('テキスト版'),
                   children: [SelectableText(preview!['text'] as String)],
-                ),
-                FilledButton(
-                  onPressed: busy ? null : send,
-                  child: const Text('テスト送信の最終確認へ'),
                 ),
               ],
               OutlinedButton(
