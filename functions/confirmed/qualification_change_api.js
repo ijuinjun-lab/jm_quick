@@ -7,10 +7,15 @@ const {ApiError} = require('./api_error');
 const {isConfirmedFlow} = require('../flow');
 const {isValidParticipantId, programAttendanceId, isValidPlannedCount} = require('../programs');
 const digest = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
+// Recovery can add a field before Firestore reorders map keys. Versioned,
+// canonical fingerprints keep prior reviews compatible and new reviews stable.
+const deliveryDigest = v => createHash('sha256').update(JSON.stringify(v, (_, value) =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).sort(([a],[b]) => a.localeCompare(b))) : value)).digest('hex');
 const fail = (code) => { throw new ApiError('failed-precondition', '資格の状態を再確認してください。受付・取込・配送中は変更できません。', {code}); };
 const stamp = (v) => v?.toDate?.().toISOString() || v || null;
 const view = (a) => ({programId: a.programId, plannedCount: a.plannedCount, slotLabel: a.slotLabel || '', startAt: stamp(a.startAt), endAt: stamp(a.endAt), entitlementStatus: a.entitlementStatus || 'active', checkedIn: a.checkedIn === true});
-function createQualificationChangeApi({getDb, serverTimestamp}) {
+function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) {
   function parse(d, changing = false) {
     const keys = ['eventId', 'participantId', ...(changing ? ['action', 'operationId', 'fingerprint', 'programId', 'targetProgramId', 'slotLabel', 'plannedCount', 'reason'] : [])];
     if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some(k => !keys.includes(k)) || !/^[A-Za-z0-9_-]{1,128}$/.test(d.eventId || '') || !isValidParticipantId(d.participantId)) fail('invalid-input');
@@ -36,29 +41,50 @@ function createQualificationChangeApi({getDb, serverTimestamp}) {
     // import recovery (resume or abandon); age alone is not proof of quiescence.
     let busyReason = event.activeImportBatch || bs.docs.some(s => ['committing','failed'].includes(s.data().status))
       ? '未完了の取込があります。既存の取込復旧画面で再開・完了、または放棄してから再取得してください。' : null;
-    const reviewed = x => recoveries.docs.some(r => r.id === x.id && r.data().fingerprint === digest(x.data()));
+    const reviewed = x => recoveries.docs.some(r => r.id === x.id && r.data().fingerprint === (r.data().fingerprintVersion === 2 ? deliveryDigest(x.data()) : digest(x.data())));
     const unresolved = x => ['pending', 'sending'].includes(x.data().status) ||
       (x.data().status === 'unknown' && !reviewed(x));
+    const jobItems = new Map();
     for (const job of jobs.docs) {
       const j = job.data();
       const own = await tx.get(job.ref.collection('items').doc(d.participantId));
+      jobItems.set(job.id,own.data());
       // Preparing jobs can still grow their population. Terminal/ready jobs only
       // retry existing items; another person's worker never locks this person.
       if (j.status === 'preparing' || (own.exists &&
           (['pending', 'sending'].includes(own.data().status) ||
            (own.data().status === 'unknown' && !deliveries.docs.some(x => x.data().jobId === job.id && x.data().status === 'unknown' && reviewed(x))) ||
            (own.data().participantId && own.data().participantId !== d.participantId) ||
-           (own.data().leaseUntil?.toMillis?.() || 0) > Date.now()))) {
+           (own.data().leaseUntil?.toMillis?.() || 0) > now()))) {
         busyReason ||= '本人の配送待ち・配送中、または送信対象の準備中です。送信管理で確認してください。';
       }
     }
-    const deliveryStates = [...deliveries.docs, ...notices.docs].map(x => ({
-      id: x.id, kind: x.ref.parent.id, status: x.data().status, to:x.data().to || person.email, startedAt:stamp(x.data().startedAt || x.data().createdAt),
-      reviewed: reviewed(x),
-      recoverable: x.data().status === 'unknown' && !x.data().claimId &&
-        !(x.data().leaseUntil?.toMillis?.() > Date.now()) &&
-        (x.ref.parent.id === 'mailDeliveries' ? x.data().claimId === null : !!x.data().completedAt),
-    }));
+    const millis = v => v?.toMillis?.() || 0;
+    const deliveryStates = [...deliveries.docs, ...notices.docs].map(x => {
+      const v = x.data(), notice = x.ref.parent.id === 'qualificationNotices';
+      const job = jobs.docs.find(j => j.id === v.jobId)?.data(), item = jobItems.get(v.jobId);
+      // An expired item lease alone is NOT completion evidence. The scheduler
+      // must have settled the job, and the original 300s invocation plus margin
+      // must have elapsed. Preserve its claimId and original unknown record.
+      const interruptedMailEnded = !notice && v.claimId && v.lastErrorCode === 'lease-expired-after-dispatch' &&
+        millis(v.dispatchStartedAt) > 0 && now() >= millis(v.dispatchStartedAt) + 360000 &&
+        millis(v.updatedAt) >= millis(v.dispatchStartedAt) && job?.status === 'completed' &&
+        job.dispatchActive === false && !job.dispatchWorkerId &&
+        !(millis(job.dispatchWorkerLeaseUntil) > now()) &&
+        job.pendingCount === 0 && job.sendingCount === 0 && item?.status === 'unknown' &&
+        millis(job.dispatchFinishedAt) >= millis(v.updatedAt);
+      // New notices hold a renewable lease and fence before dispatch and finish.
+      // Legacy notices have no fence: use their 120s invocation bound plus a
+      // full extra minute; there is no automatic retry in either implementation.
+      const interruptedNoticeEnded = notice && v.status === 'sending' &&
+        millis(v.startedAt) > 0 && now() >= millis(v.startedAt) + 180000 &&
+        (v.leaseUntil ? millis(v.leaseUntil) > 0 && millis(v.leaseUntil) <= now() : !v.claimId);
+      const recoverable = item?.status !== 'sending' && !(millis(item?.leaseUntil) > now()) && !(millis(v.leaseUntil) > now()) &&
+        ((v.status === 'unknown' && (notice ? !!v.completedAt : v.claimId === null || interruptedMailEnded)) || interruptedNoticeEnded);
+      return {id:x.id, kind:x.ref.parent.id, status:v.status, to:v.to || person.email,
+        startedAt:stamp(v.startedAt || v.createdAt), reviewed:reviewed(x), recoverable,
+        attemptCount:v.attemptCount || 1, operationId:v.operationId || null, fingerprint:digest(v)};
+    });
     if ([...deliveries.docs, ...notices.docs].some(unresolved))
       busyReason ||= '本人の未解決の配送があります。配送状態を確認してください。結果不明は再送しません。';
     // Independent test mails use a captured message and cannot write qualifications.
@@ -174,8 +200,24 @@ function createQualificationChangeApi({getDb, serverTimestamp}) {
       const x = await tx.get(db.collection(d.kind).doc(d.deliveryId));
       if (!x.exists || x.data().participantId !== d.participantId || x.data().eventId !== d.eventId ||
           !s.deliveryStates.some(v => v.id === d.deliveryId && v.kind === d.kind && v.recoverable)) fail('delivery-still-active');
-      tx.set(db.collection('participants').doc(d.participantId).collection('deliveryReviews').doc(x.id),
-        {fingerprint:digest(x.data()), reason:d.reason.trim(), reviewedBy:identity.uid, reviewedAt:serverTimestamp()});
+      if (d.fingerprint !== undefined && d.fingerprint !== digest(x.data())) fail('delivery-state-changed');
+      const attemptRef = x.ref.collection('attempts').doc(String(x.data().attemptCount || 1));
+      const attempt = d.kind === 'qualificationNotices' ? await tx.get(attemptRef) : null;
+      let reviewedData = x.data();
+      if (d.kind === 'qualificationNotices' && reviewedData.status === 'sending') {
+        // Fence the abandoned attempt; a delayed sender cannot dispatch or
+        // overwrite this unknown result. Unknown can never be retried.
+        reviewedData = {...reviewedData, status:'unknown', leaseUntil:null, recoveryReason:d.reason.trim()};
+        tx.update(x.ref, {status:'unknown', leaseUntil:null, recoveryReason:d.reason.trim()});
+        if (attempt.exists) tx.update(attemptRef,{status:'unknown',leaseUntil:null,recoveryReason:d.reason.trim(),recoveredBy:identity.uid,recoveredAt:serverTimestamp()});
+        else tx.create(attemptRef,{...reviewedData,recoveredBy:identity.uid,recoveredAt:serverTimestamp()});
+      }
+      const review = {fingerprint:deliveryDigest(reviewedData), fingerprintVersion:2, reason:d.reason.trim(), reviewedBy:identity.uid,
+        reviewedAt:serverTimestamp(), previousStatus:x.data().status, claimId:x.data().claimId || null,
+        attemptCount:x.data().attemptCount || 1};
+      const ref = db.collection('participants').doc(d.participantId).collection('deliveryReviews').doc(x.id);
+      tx.set(ref, review);
+      tx.create(ref.collection('history').doc(), review);
       return {reviewed:true};
     });
   }

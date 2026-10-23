@@ -1,6 +1,6 @@
 // Separate, manually invoked notification. Never creates a bulk send job or
-// mutates historical deliveries/templates. One durable claim per change.
-const {createHash} = require('node:crypto');
+// mutates historical deliveries/templates. One fenced claim per explicit attempt.
+const {createHash, randomUUID} = require('node:crypto');
 const {programTimeText} = require('./mail_view_model');
 const {mappingFor} = require('./participation_types');
 const {ApiError} = require('./api_error');
@@ -12,9 +12,16 @@ const escape = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;',
 const fail = code => {throw new ApiError('failed-precondition', '変更通知の内容・配送状態を再確認してください。', {code});};
 function createQualificationNoticeApi(deps) {
   const {getDb, serverTimestamp, getTransport, generateQrPng, getAppBaseUrl} = deps;
+  const now = deps.now || Date.now;
+  const leaseMs = 180000; // Longer than the 120s callable bound and 30s transport timeout.
+  const heartbeatMs = deps.heartbeatMs || 15000;
+  const countOf = v => v ? v.attemptCount || 1 : 0;
+  const attemptRef = (ref, n) => ref.collection('attempts').doc(String(n));
   const qualifications = createQualificationChangeApi(deps);
   function validate(d) {
-    if (!d || !/^[A-Za-z0-9_-]{20,100}$/.test(d.operationId || '') || Object.keys(d).some(k => !['eventId','participantId','operationId','fingerprint'].includes(k))) fail('invalid-input');
+    if (!d || !/^[A-Za-z0-9_-]{20,100}$/.test(d.operationId || '') || Object.keys(d).some(k => !['eventId','participantId','operationId','fingerprint','retry','expectedAttempt'].includes(k))) fail('invalid-input');
+    if (d.retry !== undefined && typeof d.retry !== 'boolean') fail('invalid-input');
+    if (d.expectedAttempt !== undefined && (!Number.isInteger(d.expectedAttempt) || d.expectedAttempt < 0)) fail('invalid-input');
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(d.eventId || '') || !/^[A-Za-z0-9-]{1,64}$/.test(d.participantId || '')) fail('invalid-input');
   }
   async function compose(db, tx, d) {
@@ -38,34 +45,83 @@ function createQualificationNoticeApi(deps) {
   }
   async function preview({data:d}) {
     validate(d); const db = getDb();
-    const c = await db.runTransaction(tx => compose(db,tx,d), {readOnly:true});
-    return {...c.message, fingerprint:c.fingerprint, qrPayload:c.qrPayload, webPassUrl:c.webPassUrl};
+    const {c, old} = await db.runTransaction(async tx => {
+      const c = await compose(db,tx,d);
+      const old = await tx.get(db.collection('qualificationNotices').doc(hash([d.eventId,d.participantId,d.operationId])));
+      return {c,old:old.data()};
+    }, {readOnly:true});
+    return {...c.message, fingerprint:c.fingerprint, qrPayload:c.qrPayload, webPassUrl:c.webPassUrl,
+      status:old?.status || null, expectedAttempt:countOf(old), canRetry:old?.status === 'failed'};
   }
   async function send({identity,data:d}) {
     validate(d); const db = getDb();
     const ref = db.collection('qualificationNotices').doc(hash([d.eventId,d.participantId,d.operationId]));
     const transport = getTransport();
     if (!(await transport.capabilities()).ok) fail('transport-not-ready');
+    const claimId = randomUUID();
     const c = await db.runTransaction(async tx => {
-      const old = await tx.get(ref);
-      if (old.exists) return {existing:true,status:old.data().status};
+      const old = await tx.get(ref), previous = old.data(), expected = d.expectedAttempt ?? 0;
+      const n = countOf(previous);
+      // A repeated request never creates a fresh attempt, even if the previous
+      // call failed quickly before the second click reached this transaction.
+      if (old.exists && !(previous.status === 'failed' && d.retry === true && expected === n))
+        return {existing:true,status:previous.status,attemptCount:n};
+      if (!old.exists && (d.retry === true || expected !== 0)) fail('attempt-changed');
       const c = await compose(db,tx,d);
       if (c.busy) fail('operation-in-progress');
       if (c.fingerprint !== d.fingerprint) fail('preview-changed');
-      tx.create(ref,{eventId:d.eventId,participantId:d.participantId,operationId:d.operationId,
-        ...c.message, fingerprint:c.fingerprint,status:'sending',startedAt:serverTimestamp(),createdBy:identity.uid});
-      return c;
+      if (previous && Object.entries(c.message).some(([k,v]) => previous[k] !== v)) fail('notice-content-changed');
+      const priorAttempt = old.exists ? await tx.get(attemptRef(ref,n)) : null;
+      if (priorAttempt && !priorAttempt.exists) tx.create(attemptRef(ref,n),previous); // legacy failed attempt
+      const record = {eventId:d.eventId,participantId:d.participantId,operationId:d.operationId,
+        ...c.message,fingerprint:c.fingerprint,status:'sending',startedAt:serverTimestamp(),createdBy:identity.uid,
+        attemptCount:n+1,claimId,leaseUntil:new Date(now()+leaseMs),completedAt:null,messageId:null,
+        retryOf:old.exists ? n : null};
+      tx.set(ref,record);
+      tx.create(attemptRef(ref,n+1),record);
+      return {...c,attemptCount:n+1};
     });
-    if (c.existing) return {status:c.status};
+    if (c.existing) return {status:c.status,attemptCount:c.attemptCount};
+    const owned = v => v?.status === 'sending' && v.claimId === claimId && v.leaseUntil?.toMillis?.() > now();
+    // Renew only a still-valid claim. Never revive a recovered or expired claim.
+    let heartbeatRunning = false;
+    const timer = setInterval(async () => {
+      if (heartbeatRunning) return;
+      heartbeatRunning = true;
+      try {
+        await db.runTransaction(async tx => {
+          const v = (await tx.get(ref)).data();
+          if (owned(v)) tx.update(ref,{leaseUntil:new Date(now()+leaseMs)});
+        });
+      } catch (_) { /* A lost lease is checked again before dispatch and finish. */ }
+      finally { heartbeatRunning = false; }
+    },heartbeatMs);
+    timer.unref?.();
     let result, dispatchStarted = false;
     try {
       const png = await generateQrPng(c.qrPayload);
-      dispatchStarted = true;
-      result = await transport.send({...c.message,attachments:[{filename:'reception-qr.png',contentType:'image/png',contentBase64:Buffer.isBuffer(png) ? png.toString('base64') : png,contentId:QR_CONTENT_ID,disposition:'inline'}],metadata:{app:'jm-quick',type:'qualification-change',jobId:ref.id}});
+      const dispatch = await db.runTransaction(async tx => {
+        const v = (await tx.get(ref)).data();
+        if (!owned(v)) return false;
+        const update = {dispatchStartedAt:serverTimestamp(),leaseUntil:new Date(now()+leaseMs)};
+        tx.update(ref,update);tx.update(attemptRef(ref,c.attemptCount),update);
+        return true;
+      });
+      if (!dispatch) result = {outcome:'unknown'};
+      else {
+        dispatchStarted = true;
+        result = await transport.send({...c.message,attachments:[{filename:'reception-qr.png',contentType:'image/png',contentBase64:Buffer.isBuffer(png) ? png.toString('base64') : png,contentId:QR_CONTENT_ID,disposition:'inline'}],metadata:{app:'jm-quick',type:'qualification-change',jobId:ref.id}});
+      }
     } catch (_) { result = {outcome:dispatchStarted ? 'unknown' : 'failed'}; }
-    const status = ['sent','failed','unknown'].includes(result?.outcome) ? result.outcome : 'unknown';
-    await ref.update({status,messageId:result?.messageId || null,completedAt:serverTimestamp()});
-    return {status};
+    finally { clearInterval(timer); }
+    return db.runTransaction(async tx => {
+      const v = (await tx.get(ref)).data();
+      if (v.status !== 'sending' || v.claimId !== claimId) return {status:v.status,attemptCount:countOf(v)};
+      const status = owned(v) && ['sent','failed','unknown'].includes(result?.outcome) ? result.outcome : 'unknown';
+      const update = {status,messageId:result?.messageId || null,completedAt:serverTimestamp(),leaseUntil:null};
+      tx.update(ref,update);tx.update(attemptRef(ref,c.attemptCount),update);
+      return {status,attemptCount:c.attemptCount};
+    });
   }
   return {preview,send};
 }

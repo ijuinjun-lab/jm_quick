@@ -131,7 +131,9 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
       final ok = await showDialog<bool>(
         context: context,
         builder: (c) => AlertDialog(
-          title: const Text('本人への変更通知を確認'),
+          title: Text(
+            preview['canRetry'] == true ? '失敗した変更通知の再送を確認' : '本人への変更通知を確認',
+          ),
           content: SingleChildScrollView(
             child: SelectableText(
               '宛先：${preview['to']}\n${preview['subject']}\n\n${preview['text']}',
@@ -143,8 +145,13 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
               child: const Text('戻る'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(c, true),
-              child: const Text('この本人に送信'),
+              onPressed:
+                  preview['status'] != null && preview['canRetry'] != true
+                  ? null
+                  : () => Navigator.pop(c, true),
+              child: Text(
+                preview['canRetry'] == true ? '未送信を確認して手動再送' : 'この本人に送信',
+              ),
             ),
           ],
         ),
@@ -154,12 +161,14 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
         final result = await service.sendNotice({
           ...request,
           'fingerprint': preview['fingerprint'],
+          'expectedAttempt': preview['expectedAttempt'] ?? 0,
+          if (preview['canRetry'] == true) 'retry': true,
         });
         await load();
         if (mounted) {
           setState(
             () => error =
-                '変更通知：${result['status']}（sent:送信済み / failed:失敗 / unknown:結果不明 / sending:処理中）。再送は行いません。',
+                '変更通知：${deliveryLabel(result['status'])}。${result['status'] == 'failed' ? '履歴から内容を再確認し、手動再送できます。' : '送信済み・結果不明は再送できません。'}',
           );
         }
       }
@@ -182,7 +191,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              '処理終了を確認済みの配送です。結果不明の記録は保持し、再送せず参加内容の変更を許可します。確認内容・理由を入力してください。',
+              '配送処理の終了記録または実行期限を確認しました。送信中のまま停止した通知は結果不明として保持し、再送せず参加内容の変更を許可します。確認内容・理由を入力してください。',
             ),
             TextField(
               onChanged: (value) => reviewReason = value.trim(),
@@ -212,6 +221,8 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
         'eventId': widget.eventId,
         'participantId': widget.participantId,
         'kind': delivery['kind'],
+        if (delivery['fingerprint'] != null)
+          'fingerprint': delivery['fingerprint'],
         'deliveryId': delivery['id'],
         'reason': reason,
       });
@@ -474,7 +485,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                   ListTile(
                     title: Text('配送：${deliveryLabel(delivery['status'])}'),
                     subtitle: Text(
-                      '${delivery['to'] ?? ''} ${delivery['startedAt'] ?? ''}\n${delivery['kind']} / ${delivery['id']}${delivery['reviewed'] == true ? '（確認済み・再送禁止）' : ''}',
+                      '${delivery['to'] ?? ''} ${delivery['startedAt'] ?? ''}（試行${delivery['attemptCount'] ?? 1}回）\n${delivery['kind']} / ${delivery['id']}${delivery['reviewed'] == true ? '（確認済み・再送禁止）' : ''}',
                     ),
                     trailing:
                         delivery['recoverable'] == true &&
