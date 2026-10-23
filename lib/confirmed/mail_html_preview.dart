@@ -11,11 +11,13 @@ class MailHtmlPreview extends StatelessWidget {
     required this.html,
     required this.qrPngBase64,
     this.allowWithoutQr = false,
+    this.height = 700,
   });
 
   final bool allowWithoutQr;
   final String html;
   final String qrPngBase64;
+  final double height;
 
   @override
   Widget build(BuildContext context) {
@@ -27,7 +29,7 @@ class MailHtmlPreview extends StatelessWidget {
       );
       return SizedBox(
         width: double.infinity,
-        height: 700,
+        height: height,
         child: platform.emailFrame(document),
       );
     } on FormatException catch (error) {

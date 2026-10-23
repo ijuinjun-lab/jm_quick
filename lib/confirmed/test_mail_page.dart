@@ -69,6 +69,7 @@ class _TestMailPageState extends State<TestMailPage> {
   final subject = TextEditingController(text: 'テスト送信・正式文面ではありません リマインド');
   final intro = TextEditingController(text: 'テスト送信・正式文面ではありません。ご参加内容をご確認ください。');
   final closing = TextEditingController(text: '社内確認用の仮文面です。');
+  final scrollController = ScrollController();
   @override
   void initState() {
     super.initState();
@@ -85,6 +86,7 @@ class _TestMailPageState extends State<TestMailPage> {
     subject.dispose();
     intro.dispose();
     closing.dispose();
+    scrollController.dispose();
     super.dispose();
   }
 
@@ -238,179 +240,193 @@ class _TestMailPageState extends State<TestMailPage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('テストメール（正式送信とは別）')),
-    body: SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            '正式な参加者・設定・配送履歴は変更しません。実参加者のQRは有効です。テスト受信者は受付に使用しないでください。\n同じ内容・同じ宛先は再送しません。結果不明は自動再送しません。1時間10通まで。',
-          ),
-          if (message != null) SelectableText(message!),
-          if (settings != null) ...[
-            DropdownButtonFormField<String>(
-              initialValue: kind,
-              decoration: const InputDecoration(labelText: 'メール種類'),
-              items: [
-                if (widget.broadcastDraft != null)
-                  const DropdownMenuItem(
-                    value: 'broadcast',
-                    child: Text('一斉メール送信'),
-                  ),
-                const DropdownMenuItem(value: 'normal', child: Text('通常当選')),
-                DropdownMenuItem(
-                  value: 'waitlistPromotion',
-                  child: Text('繰り上げ当選'),
-                ),
-                DropdownMenuItem(value: 'reminder1', child: Text('第1回リマインド')),
-                DropdownMenuItem(value: 'reminder2', child: Text('第2回リマインド')),
-              ],
-              onChanged: busy
-                  ? null
-                  : (v) => changed(() {
-                      kind = v!;
-                      draft = false;
-                      batchId = null;
-                    }),
+    body: Scrollbar(
+      controller: scrollController,
+      thumbVisibility: true,
+      interactive: true,
+      child: SingleChildScrollView(
+        controller: scrollController,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              '正式な参加者・設定・配送履歴は変更しません。実参加者のQRは有効です。テスト受信者は受付に使用しないでください。\n同じ内容・同じ宛先は再送しません。結果不明は自動再送しません。1時間10通まで。',
             ),
-            DropdownButtonFormField<String>(
-              initialValue: person ?? '',
-              isExpanded: true,
-              decoration: const InputDecoration(labelText: 'プレビュー対象'),
-              items: [
-                if (kind != 'broadcast')
-                  const DropdownMenuItem(
-                    value: '',
-                    child: Text('架空申込（QRは受付不可）'),
-                  ),
-                for (final p in settings!['participants'] as List)
-                  DropdownMenuItem(
-                    value: p['participantId'] as String,
-                    child: Text(p['name'] as String),
-                  ),
-              ],
-              onChanged: busy
-                  ? null
-                  : (v) => changed(() => person = v == '' ? null : v),
-            ),
-            if (person != null &&
-                !kind.startsWith('reminder') &&
-                kind != 'broadcast')
+            if (message != null) SelectableText(message!),
+            if (settings != null) ...[
               DropdownButtonFormField<String>(
-                initialValue: batchId ?? '',
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: '通知する取込回（資格追加時は該当回を選択）',
-                ),
+                initialValue: kind,
+                decoration: const InputDecoration(labelText: 'メール種類'),
                 items: [
-                  const DropdownMenuItem(value: '', child: Text('初回の取込')),
-                  for (final b in (settings!['batches'] as List).where(
-                    (b) => b['notificationType'] == kind,
-                  ))
+                  if (widget.broadcastDraft != null)
+                    const DropdownMenuItem(
+                      value: 'broadcast',
+                      child: Text('一斉メール送信'),
+                    ),
+                  const DropdownMenuItem(value: 'normal', child: Text('通常当選')),
+                  DropdownMenuItem(
+                    value: 'waitlistPromotion',
+                    child: Text('繰り上げ当選'),
+                  ),
+                  DropdownMenuItem(value: 'reminder1', child: Text('第1回リマインド')),
+                  DropdownMenuItem(value: 'reminder2', child: Text('第2回リマインド')),
+                ],
+                onChanged: busy
+                    ? null
+                    : (v) => changed(() {
+                        kind = v!;
+                        draft = false;
+                        batchId = null;
+                      }),
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: person ?? '',
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'プレビュー対象'),
+                items: [
+                  if (kind != 'broadcast')
+                    const DropdownMenuItem(
+                      value: '',
+                      child: Text('架空申込（QRは受付不可）'),
+                    ),
+                  for (final p in settings!['participants'] as List)
                     DropdownMenuItem(
-                      value: b['batchId'] as String,
-                      child: Text(
-                        '第${b['sequence']}回 / ${b['notificationType']}',
-                      ),
+                      value: p['participantId'] as String,
+                      child: Text(p['name'] as String),
                     ),
                 ],
                 onChanged: busy
                     ? null
-                    : (v) => changed(() => batchId = v == '' ? null : v),
+                    : (v) => changed(() => person = v == '' ? null : v),
               ),
-            if (person == null) ...[
-              const Text('架空の申込日時・時間・人数を使用します。正式参加資格ではありません。'),
-              for (final p in settings!['programs'] as List)
-                CheckboxListTile(
-                  title: Text(p['name'] as String),
-                  value: synthetic.contains(p['programId']),
+              if (person != null &&
+                  !kind.startsWith('reminder') &&
+                  kind != 'broadcast')
+                DropdownButtonFormField<String>(
+                  initialValue: batchId ?? '',
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: '通知する取込回（資格追加時は該当回を選択）',
+                  ),
+                  items: [
+                    const DropdownMenuItem(value: '', child: Text('初回の取込')),
+                    for (final b in (settings!['batches'] as List).where(
+                      (b) => b['notificationType'] == kind,
+                    ))
+                      DropdownMenuItem(
+                        value: b['batchId'] as String,
+                        child: Text(
+                          '第${b['sequence']}回 / ${b['notificationType']}',
+                        ),
+                      ),
+                  ],
                   onChanged: busy
                       ? null
-                      : (v) => changed(() {
-                          v!
-                              ? synthetic.add(p['programId'] as String)
-                              : synthetic.remove(p['programId']);
-                        }),
+                      : (v) => changed(() => batchId = v == '' ? null : v),
                 ),
-            ],
-            DropdownButtonFormField<String>(
-              initialValue: to,
-              isExpanded: true,
-              decoration: const InputDecoration(labelText: '承認済みテスト送信先'),
-              items: [
-                for (final a in settings!['addresses'] as List)
-                  DropdownMenuItem(value: a as String, child: Text(a)),
+              if (person == null) ...[
+                const Text('架空の申込日時・時間・人数を使用します。正式参加資格ではありません。'),
+                for (final p in settings!['programs'] as List)
+                  CheckboxListTile(
+                    title: Text(p['name'] as String),
+                    value: synthetic.contains(p['programId']),
+                    onChanged: busy
+                        ? null
+                        : (v) => changed(() {
+                            v!
+                                ? synthetic.add(p['programId'] as String)
+                                : synthetic.remove(p['programId']);
+                          }),
+                  ),
               ],
-              onChanged: busy ? null : (v) => changed(() => to = v),
-            ),
-            if (settings!['canManagePolicy'] == true)
+              DropdownButtonFormField<String>(
+                initialValue: to,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: '承認済みテスト送信先'),
+                items: [
+                  for (final a in settings!['addresses'] as List)
+                    DropdownMenuItem(value: a as String, child: Text(a)),
+                ],
+                onChanged: busy ? null : (v) => changed(() => to = v),
+              ),
+              if (settings!['canManagePolicy'] == true)
+                OutlinedButton(
+                  onPressed: busy ? null : managePolicy,
+                  child: const Text('承認済み社内宛先を管理'),
+                ),
+              if ((settings!['addresses'] as List).isEmpty)
+                const Text('送信先が未承認です。システム管理者による許可リストの登録が必要です。'),
+              if (kind.startsWith('reminder')) ...[
+                CheckboxListTile(
+                  title: const Text('正式文面未設定の場合、保存しない仮文面を使う'),
+                  value: draft,
+                  onChanged: busy ? null : (v) => changed(() => draft = v!),
+                ),
+                if (draft) ...[
+                  TextField(
+                    controller: subject,
+                    enabled: !busy,
+                    decoration: const InputDecoration(labelText: 'テスト仮件名'),
+                    onChanged: (_) => changed(() {}),
+                  ),
+                  TextField(
+                    controller: intro,
+                    enabled: !busy,
+                    maxLines: 4,
+                    decoration: const InputDecoration(labelText: 'テスト仮本文'),
+                    onChanged: (_) => changed(() {}),
+                  ),
+                  TextField(
+                    controller: closing,
+                    enabled: !busy,
+                    maxLines: 2,
+                    decoration: const InputDecoration(labelText: 'テスト仮締め文'),
+                    onChanged: (_) => changed(() {}),
+                  ),
+                ],
+              ],
               OutlinedButton(
-                onPressed: busy ? null : managePolicy,
-                child: const Text('承認済み社内宛先を管理'),
+                onPressed:
+                    busy || to == null || (person == null && synthetic.isEmpty)
+                    ? null
+                    : showPreview,
+                child: const Text('テスト送信内容を確認（送信しません）'),
               ),
-            if ((settings!['addresses'] as List).isEmpty)
-              const Text('送信先が未承認です。システム管理者による許可リストの登録が必要です。'),
-            if (kind.startsWith('reminder')) ...[
-              CheckboxListTile(
-                title: const Text('正式文面未設定の場合、保存しない仮文面を使う'),
-                value: draft,
-                onChanged: busy ? null : (v) => changed(() => draft = v!),
-              ),
-              if (draft) ...[
-                TextField(
-                  controller: subject,
-                  enabled: !busy,
-                  decoration: const InputDecoration(labelText: 'テスト仮件名'),
-                  onChanged: (_) => changed(() {}),
+              if (preview != null) ...[
+                SelectableText(
+                  '宛先：${preview!['to']}\n件名：${preview!['subject']}',
                 ),
-                TextField(
-                  controller: intro,
-                  enabled: !busy,
-                  maxLines: 4,
-                  decoration: const InputDecoration(labelText: 'テスト仮本文'),
-                  onChanged: (_) => changed(() {}),
+                MailHtmlPreview(
+                  // Leave room outside the iframe: its wheel/touch events do not
+                  // reach Flutter's enclosing scroll view on the web.
+                  height: (MediaQuery.sizeOf(context).height * 0.5).clamp(
+                    120,
+                    700,
+                  ),
+                  allowWithoutQr: kind == 'broadcast',
+                  html: preview!['html'] as String,
+                  qrPngBase64: preview!['qrPngBase64'] as String,
                 ),
-                TextField(
-                  controller: closing,
-                  enabled: !busy,
-                  maxLines: 2,
-                  decoration: const InputDecoration(labelText: 'テスト仮締め文'),
-                  onChanged: (_) => changed(() {}),
+                ExpansionTile(
+                  title: const Text('テキスト版'),
+                  children: [SelectableText(preview!['text'] as String)],
+                ),
+                FilledButton(
+                  onPressed: busy ? null : send,
+                  child: const Text('テスト送信の最終確認へ'),
                 ),
               ],
+              OutlinedButton(
+                onPressed: busy ? null : load,
+                child: const Text('テスト配送履歴を更新'),
+              ),
+              for (final h in settings!['history'] as List)
+                Text('${h['kind']} / ${h['to']} / ${h['status']}'),
             ],
-            OutlinedButton(
-              onPressed:
-                  busy || to == null || (person == null && synthetic.isEmpty)
-                  ? null
-                  : showPreview,
-              child: const Text('テスト送信内容を確認（送信しません）'),
-            ),
-            if (preview != null) ...[
-              SelectableText('宛先：${preview!['to']}\n件名：${preview!['subject']}'),
-              MailHtmlPreview(
-                allowWithoutQr: kind == 'broadcast',
-                html: preview!['html'] as String,
-                qrPngBase64: preview!['qrPngBase64'] as String,
-              ),
-              ExpansionTile(
-                title: const Text('テキスト版'),
-                children: [SelectableText(preview!['text'] as String)],
-              ),
-              FilledButton(
-                onPressed: busy ? null : send,
-                child: const Text('テスト送信の最終確認へ'),
-              ),
-            ],
-            OutlinedButton(
-              onPressed: busy ? null : load,
-              child: const Text('テスト配送履歴を更新'),
-            ),
-            for (final h in settings!['history'] as List)
-              Text('${h['kind']} / ${h['to']} / ${h['status']}'),
+            if (busy) const LinearProgressIndicator(),
           ],
-          if (busy) const LinearProgressIndicator(),
-        ],
+        ),
       ),
     ),
   );
