@@ -267,24 +267,6 @@ class _BroadcastPageState extends State<BroadcastPage> {
                         },
                 ),
                 if (settings != null) ...[
-                  DropdownButtonFormField<String>(
-                    initialValue: person,
-                    isExpanded: true,
-                    decoration: const InputDecoration(labelText: 'プレビュー対象者'),
-                    items: [
-                      for (final r in settings!['recipients'] as List)
-                        DropdownMenuItem(
-                          value: r['participantId'] as String,
-                          child: Text('${r['name']} / ${r['email']}'),
-                        ),
-                    ],
-                    onChanged: busy || attempted
-                        ? null
-                        : (v) {
-                            person = v;
-                            changed();
-                          },
-                  ),
                   OutlinedButton(
                     onPressed: busy || attempted || person == null
                         ? null

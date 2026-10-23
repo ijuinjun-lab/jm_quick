@@ -86,6 +86,7 @@ void main() {
       await tester.ensureVisible(find.text('社内へテスト送信'));
       await tester.tap(find.text('社内へテスト送信'));
       await tester.pumpAndSettle();
+      expect(find.byType(DropdownButtonFormField<String>), findsWidgets);
       await tester.tap(find.byType(DropdownButtonFormField<String>).last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('internal@example.invalid').last);
@@ -187,6 +188,8 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        expect(find.text('プレビュー対象者'), findsNothing);
+        expect(find.byType(DropdownButtonFormField<String>), findsNothing);
         expect(find.text('第1回'), findsNothing);
         expect(find.text('送信予定日時'), findsNothing);
         expect(find.text('① 送信内容・宛先を確認'), findsNothing);
