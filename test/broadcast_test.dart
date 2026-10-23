@@ -176,11 +176,11 @@ void main() {
         expect(find.text('送信予定日時'), findsNothing);
         await tester.enterText(find.byType(TextField).at(0), '案内');
         await tester.enterText(find.byType(TextField).at(1), '本文');
-        await tester.ensureVisible(find.text('宛先一覧・HTMLプレビューを確認'));
-        await tester.tap(find.text('宛先一覧・HTMLプレビューを確認'));
+        await tester.ensureVisible(find.text('① 送信内容・宛先を確認'));
+        await tester.tap(find.text('① 送信内容・宛先を確認'));
         await tester.pumpAndSettle();
         expect(calls.any((c) => c.contains('startConfirmed')), false);
-        final start = find.widgetWithText(FilledButton, '正式送信開始');
+        final start = find.widgetWithText(FilledButton, '③ 一斉送信へ進む');
         expect(tester.widget<FilledButton>(start).onPressed, isNull);
         await tester.ensureVisible(find.text('宛先全員・件数・件名・本文を確認しました'));
         await tester.tap(find.text('宛先全員・件数・件名・本文を確認しました'));

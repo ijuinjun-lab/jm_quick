@@ -285,7 +285,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
                             });
                           }
                         }),
-                  child: const Text('宛先一覧・HTMLプレビューを確認'),
+                  child: const Text('① 送信内容・宛先を確認'),
                 ),
                 OutlinedButton(
                   onPressed: busy || attempted || person == null
@@ -301,7 +301,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
                             ),
                           ),
                         ),
-                  child: const Text('社内へテストメール送信（正式送信とは別）'),
+                  child: const Text('② 社内へテスト送信'),
                 ),
               ],
               if (preview != null) ...[
@@ -336,7 +336,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
                 ),
                 FilledButton(
                   onPressed: busy || !reviewed || attempted ? null : start,
-                  child: const Text('正式送信開始'),
+                  child: const Text('③ 一斉送信へ進む'),
                 ),
               ],
               if (attempted) ...[
