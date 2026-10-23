@@ -27,7 +27,18 @@ void main() {
           calls.add(req.url.path);
           final data = jsonDecode(req.body)['data'] as Map;
           Map<String, dynamic> result;
-          if (req.url.path == '/getConfirmedTestMailSettings') {
+          if (req.url.path == '/getConfirmedBroadcastSettings') {
+            result = {
+              'recipients': [
+                {
+                  'participantId': 'person',
+                  'name': '架空参加者',
+                  'email': 'internal@example.invalid',
+                },
+              ],
+              'history': [],
+            };
+          } else if (req.url.path == '/getConfirmedTestMailSettings') {
             result = {
               'addresses': ['internal@example.invalid'],
               'participants': [
@@ -63,14 +74,17 @@ void main() {
       );
       await tester.pumpWidget(
         MaterialApp(
-          home: TestMailPage(
-            eventId: 'synthetic',
-            service: service,
-            broadcastDraft: draft,
-            initialParticipantId: 'person',
-          ),
+          home: BroadcastPage(eventId: 'synthetic', service: service),
         ),
       );
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).at(0), '案内');
+      await tester.enterText(find.byType(TextField).at(1), '本文');
+      await tester.tap(find.byType(CheckboxListTile).at(0));
+      await tester.tap(find.byType(CheckboxListTile).at(1));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('社内へテスト送信'));
+      await tester.tap(find.text('社内へテスト送信'));
       await tester.pumpAndSettle();
       await tester.tap(find.byType(DropdownButtonFormField<String>).last);
       await tester.pumpAndSettle();
@@ -80,6 +94,7 @@ void main() {
       await tester.tap(find.text('テスト送信内容を確認（送信しません）'));
       await tester.pumpAndSettle();
       expect(calls, [
+        '/getConfirmedBroadcastSettings',
         '/getConfirmedTestMailSettings',
         '/previewConfirmedTestMail',
       ]);
@@ -174,13 +189,42 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('第1回'), findsNothing);
         expect(find.text('送信予定日時'), findsNothing);
+        expect(find.text('① 送信内容・宛先を確認'), findsNothing);
+        expect(find.text('新しい一斉メールを作成'), findsNothing);
+        final proceed = find.widgetWithText(FilledButton, '一斉送信へ進む');
+        expect(tester.widget<FilledButton>(proceed).onPressed, isNull);
         await tester.enterText(find.byType(TextField).at(0), '案内');
+        await tester.pumpAndSettle();
+        expect(tester.widget<FilledButton>(proceed).onPressed, isNull);
         await tester.enterText(find.byType(TextField).at(1), '本文');
-        await tester.ensureVisible(find.text('① 送信内容・宛先を確認'));
-        await tester.tap(find.text('① 送信内容・宛先を確認'));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('一斉送信へ進む'));
+        await tester.tap(find.text('一斉送信へ進む'));
         await tester.pumpAndSettle();
         expect(calls.any((c) => c.contains('startConfirmed')), false);
-        final start = find.widgetWithText(FilledButton, '③ 一斉送信へ進む');
+        expect(find.text('送信対象 1申込'), findsOneWidget);
+        expect(find.text('件名：案内\n本文：本文'), findsOneWidget);
+        expect(find.text('架空参加者 / internal@example.invalid'), findsOneWidget);
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<TextField>(find.byType(TextField).at(0))
+              .controller!
+              .text,
+          '案内',
+        );
+        expect(
+          tester
+              .widget<TextField>(find.byType(TextField).at(1))
+              .controller!
+              .text,
+          '本文',
+        );
+        await tester.ensureVisible(proceed);
+        await tester.tap(proceed);
+        await tester.pumpAndSettle();
+        final start = find.widgetWithText(FilledButton, '最終確認へ');
         expect(tester.widget<FilledButton>(start).onPressed, isNull);
         await tester.ensureVisible(find.text('宛先全員・件数・件名・本文を確認しました'));
         await tester.tap(find.text('宛先全員・件数・件名・本文を確認しました'));

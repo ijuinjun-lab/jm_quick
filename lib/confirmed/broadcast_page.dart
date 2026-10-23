@@ -31,7 +31,8 @@ class _BroadcastPageState extends State<BroadcastPage> {
       reviewed = false,
       details = true,
       qr = true,
-      attempted = false;
+      attempted = false,
+      confirming = false;
   String operationId = _newId();
   static String _newId() => List.generate(
     32,
@@ -90,25 +91,32 @@ class _BroadcastPageState extends State<BroadcastPage> {
     preview = null;
     reviewed = false;
   });
-  Future<bool> confirm(String title, String text) async =>
-      await showDialog<bool>(
-        context: context,
-        builder: (c) => AlertDialog(
-          title: Text(title),
-          content: Text(text),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(c, false),
-              child: const Text('取消'),
+  Future<bool> confirm(String title, String text) async {
+    setState(() => confirming = true);
+    try {
+      return await showDialog<bool>(
+            context: context,
+            builder: (c) => AlertDialog(
+              title: Text(title),
+              content: Text(text),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(c, false),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(c, true),
+                  child: const Text('確認して続行'),
+                ),
+              ],
             ),
-            FilledButton(
-              onPressed: () => Navigator.pop(c, true),
-              child: const Text('確認して続行'),
-            ),
-          ],
-        ),
-      ) ??
-      false;
+          ) ??
+          false;
+    } finally {
+      if (mounted) setState(() => confirming = false);
+    }
+  }
+
   Future<void> start() async {
     if (!await confirm(
       '正式な一斉メールを送信',
@@ -205,8 +213,14 @@ class _BroadcastPageState extends State<BroadcastPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('一斉メール送信')),
+    appBar: AppBar(
+      title: Text(preview != null && !attempted ? '送信内容・宛先の確認' : '一斉メール送信'),
+      leading: preview != null && !attempted
+          ? BackButton(onPressed: busy ? null : changed)
+          : null,
+    ),
     body: SingleChildScrollView(
+      key: ValueKey(preview != null && !attempted),
       padding: const EdgeInsets.all(16),
       child: Center(
         child: ConstrainedBox(
@@ -217,95 +231,103 @@ class _BroadcastPageState extends State<BroadcastPage> {
               const Text('有効な参加資格を持つ全申込へ1通ずつ送信します。日時の登録は不要です。自動送信はありません。'),
               if (error != null) SelectableText(error!),
               if (busy) const LinearProgressIndicator(),
-              TextField(
-                controller: subject,
-                enabled: !busy && !attempted,
-                decoration: const InputDecoration(labelText: '件名'),
-                onChanged: (_) => changed(),
-              ),
-              TextField(
-                controller: body,
-                enabled: !busy && !attempted,
-                minLines: 5,
-                maxLines: 12,
-                decoration: const InputDecoration(labelText: '本文'),
-                onChanged: (_) => changed(),
-              ),
-              CheckboxListTile(
-                value: details,
-                title: const Text('開催情報・参加内容・問い合わせ先を表示'),
-                onChanged: busy || attempted
-                    ? null
-                    : (v) {
-                        details = v!;
-                        changed();
-                      },
-              ),
-              CheckboxListTile(
-                value: qr,
-                title: const Text('既存QR・Web参加証リンクを表示'),
-                onChanged: busy || attempted
-                    ? null
-                    : (v) {
-                        qr = v!;
-                        changed();
-                      },
-              ),
-              if (settings != null) ...[
-                DropdownButtonFormField<String>(
-                  initialValue: person,
-                  isExpanded: true,
-                  decoration: const InputDecoration(labelText: 'プレビュー対象者'),
-                  items: [
-                    for (final r in settings!['recipients'] as List)
-                      DropdownMenuItem(
-                        value: r['participantId'] as String,
-                        child: Text('${r['name']} / ${r['email']}'),
-                      ),
-                  ],
+              if (preview == null || attempted) ...[
+                TextField(
+                  controller: subject,
+                  enabled: !busy && !attempted,
+                  decoration: const InputDecoration(labelText: '件名'),
+                  onChanged: (_) => changed(),
+                ),
+                TextField(
+                  controller: body,
+                  enabled: !busy && !attempted,
+                  minLines: 5,
+                  maxLines: 12,
+                  decoration: const InputDecoration(labelText: '本文'),
+                  onChanged: (_) => changed(),
+                ),
+                CheckboxListTile(
+                  value: details,
+                  title: const Text('開催情報・参加内容・問い合わせ先を表示'),
                   onChanged: busy || attempted
                       ? null
                       : (v) {
-                          person = v;
+                          details = v!;
                           changed();
                         },
                 ),
-                OutlinedButton(
-                  onPressed: busy || attempted || person == null
+                CheckboxListTile(
+                  value: qr,
+                  title: const Text('既存QR・Web参加証リンクを表示'),
+                  onChanged: busy || attempted
                       ? null
-                      : () => run(() async {
-                          final p = await call(
-                            'previewConfirmedBroadcastMail',
-                            {'draft': draft, 'participantId': person},
-                          );
-                          if (mounted) {
-                            setState(() {
-                              preview = p;
-                              reviewed = false;
-                            });
-                          }
-                        }),
-                  child: const Text('① 送信内容・宛先を確認'),
+                      : (v) {
+                          qr = v!;
+                          changed();
+                        },
                 ),
-                OutlinedButton(
-                  onPressed: busy || attempted || person == null
-                      ? null
-                      : () => Navigator.push(
-                          context,
-                          MaterialPageRoute<void>(
-                            builder: (_) => TestMailPage(
-                              eventId: widget.eventId,
-                              service: service,
-                              broadcastDraft: draft,
-                              initialParticipantId: person,
+                if (settings != null) ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: person,
+                    isExpanded: true,
+                    decoration: const InputDecoration(labelText: 'プレビュー対象者'),
+                    items: [
+                      for (final r in settings!['recipients'] as List)
+                        DropdownMenuItem(
+                          value: r['participantId'] as String,
+                          child: Text('${r['name']} / ${r['email']}'),
+                        ),
+                    ],
+                    onChanged: busy || attempted
+                        ? null
+                        : (v) {
+                            person = v;
+                            changed();
+                          },
+                  ),
+                  OutlinedButton(
+                    onPressed: busy || attempted || person == null
+                        ? null
+                        : () => Navigator.push(
+                            context,
+                            MaterialPageRoute<void>(
+                              builder: (_) => TestMailPage(
+                                eventId: widget.eventId,
+                                service: service,
+                                broadcastDraft: draft,
+                                initialParticipantId: person,
+                              ),
                             ),
                           ),
-                        ),
-                  child: const Text('② 社内へテスト送信'),
-                ),
+                    child: const Text('社内へテスト送信'),
+                  ),
+                  FilledButton(
+                    onPressed:
+                        busy ||
+                            attempted ||
+                            person == null ||
+                            subject.text.trim().isEmpty ||
+                            body.text.trim().isEmpty
+                        ? null
+                        : () => run(() async {
+                            final p = await call(
+                              'previewConfirmedBroadcastMail',
+                              {'draft': draft, 'participantId': person},
+                            );
+                            if (mounted) {
+                              setState(() {
+                                preview = p;
+                                reviewed = false;
+                              });
+                            }
+                          }),
+                    child: const Text('一斉送信へ進む'),
+                  ),
+                ],
               ],
               if (preview != null) ...[
                 Text('送信対象 ${preview!['targetCount']}申込'),
+                SelectableText('件名：${subject.text}\n本文：${body.text}'),
                 for (final r in preview!['recipients'] as List)
                   ListTile(
                     title: Text('${r['name']} / ${r['email']}'),
@@ -318,11 +340,14 @@ class _BroadcastPageState extends State<BroadcastPage> {
                           .join('\n'),
                     ),
                   ),
-                MailHtmlPreview(
-                  allowWithoutQr: true,
-                  html: preview!['html'] as String,
-                  qrPngBase64: preview!['qrPngBase64'] as String,
-                ),
+                if (confirming)
+                  const SizedBox(height: 700)
+                else
+                  MailHtmlPreview(
+                    allowWithoutQr: true,
+                    html: preview!['html'] as String,
+                    qrPngBase64: preview!['qrPngBase64'] as String,
+                  ),
                 ExpansionTile(
                   title: const Text('テキスト版'),
                   children: [SelectableText(preview!['text'] as String)],
@@ -336,7 +361,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
                 ),
                 FilledButton(
                   onPressed: busy || !reviewed || attempted ? null : start,
-                  child: const Text('③ 一斉送信へ進む'),
+                  child: const Text('最終確認へ'),
                 ),
               ],
               if (attempted) ...[
@@ -348,29 +373,6 @@ class _BroadcastPageState extends State<BroadcastPage> {
                   child: const Text('同じ送信要求の状態を確認・再開'),
                 ),
               ],
-              OutlinedButton(
-                onPressed: busy
-                    ? null
-                    : () async {
-                        if (!await confirm(
-                          '新しい一斉メールを作成',
-                          '過去の受信者にも改めて送信する別のメールを作成します。通信失敗の再開には使用しないでください。',
-                        )) {
-                          return;
-                        }
-                        if (mounted) {
-                          setState(() {
-                            operationId = _newId();
-                            attempted = false;
-                            preview = null;
-                            reviewed = false;
-                            subject.clear();
-                            body.clear();
-                          });
-                        }
-                      },
-                child: const Text('新しい一斉メールを作成'),
-              ),
               const Divider(),
               const Text('送信履歴・配送結果（旧リマインドを含む）'),
               TextButton(
