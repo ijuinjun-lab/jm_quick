@@ -1018,7 +1018,11 @@ exports.checkInConfirmedProgram = confirmedEventCallable("eventStaff", EVENT_SCO
 // 受付後の訂正・取消(Phase 1B: 対象イベントのstaff以上に開放。他イベントは不可)。受付状態の正本はprogramAttendancesのまま。実変更ごとにhistoryを1件追記する。
 exports.correctConfirmedProgramAttendance = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.correct);
 exports.cancelConfirmedProgramCheckIn = confirmedEventCallable("eventStaff", EVENT_SCOPES.dataEventId, passApi.cancel);
-// 資格取消は内部状態の互換処理のみ。新しい取消 callable は公開しない。
+// Qualification changes use the existing event-manager authorization boundary.
+const {createQualificationChangeApi} = require("./confirmed/qualification_change_api");
+const qualificationChangeApi = createQualificationChangeApi({getDb: getFirestore, serverTimestamp});
+exports.getConfirmedQualificationChange = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, qualificationChangeApi.get);
+exports.changeConfirmedQualification = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, qualificationChangeApi.change);
 // 受付スタッフ用QR(アカウントを持たない受付スタッフの端末に、対象イベントの受付だけを許可する)。
 // - issueReceptionStaffKey: PCの「受付」画面(正式ログインした対象イベントのstaff以上)が、QRに載せる受付キーを取得する(有効期限24時間)
 // - *ByStaffKey: QRを読んだ端末(ログインなし・App Check必須)が、受付キーで呼ぶ。許可するのは受付画面の表示と初回受付だけ

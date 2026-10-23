@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../services/download_service.dart' as download;
 import 'attendance_report_service.dart';
+import 'qualification_change_dialog.dart';
+import 'qualification_change_service.dart';
 import 'reception_status_csv.dart';
 import 'reception_status_summary.dart';
 import 'winner_send_service.dart';
@@ -26,11 +28,11 @@ enum ReceptionStatusView {
   final String label;
 }
 
-/// 主催者用「受付状況一覧」(`/console?eventId=…` のイベント管理画面から開く。閲覧のみ)。
+/// 主催者用「受付状況一覧」(`/console?eventId=…` のイベント管理画面から開く。氏名選択で資格管理)。
 /// システム管理者・このイベントのイベント管理者だけ(サーバー getConfirmedAttendanceReport が同じ権限で拒否する)。
 ///
 /// ■ 取得は最終実績Excelと同じ getConfirmedAttendanceReport(受付状態の正本 programAttendances の現在の値)。
-///   新しいAPI・Firestoreの直接読取・購読は使わない。データは一切変更しない。
+///   一覧は読取専用。資格変更は管理者専用APIと確認ダイアログを使用する。
 /// ■ 更新は手動のみ: 画面を開いたときに1回、以降は「最新の状態に更新」を押したときだけ取得する(タイマー・自動更新なし)。
 ///   取得中は二重に取得しない。失敗しても前回取得した内容は残し、エラーを表示する。
 /// ■ 表示する個人情報は氏名と、HEBEL属性の3分類(この画面だけの表示・集計上の分類。保存データ・原文は表示も変更もしない)。
@@ -108,6 +110,19 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
 
   /// 表示中のモード(切り替えても通信しない。絞り込み等の状態はそのまま)。
   ReceptionStatusView view = ReceptionStatusView.list;
+
+  Future<void> _change(String participantId) async {
+    final changed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => QualificationChangeDialog(
+        service: widget.service as QualificationChangeService,
+        eventId: widget.eventId,
+        participantId: participantId,
+      ),
+    );
+    if (changed == true && mounted) await _load();
+  }
 
   /// CSV出力中(連続クリックで二重に保存させない)。
   bool exporting = false;
@@ -240,7 +255,10 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
   Widget build(BuildContext context) {
     final s = status;
     return Scaffold(
-      appBar: AppBar(title: const Text('受付状況一覧'), backgroundColor: Colors.white),
+      appBar: AppBar(
+        title: const Text('受付状況一覧'),
+        backgroundColor: Colors.white,
+      ),
       body: Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
@@ -292,8 +310,14 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
                       // 表示中の行だけを作る(参加者が多くても重くならない)
                       : SliverList.builder(
                           itemCount: visible.length,
-                          itemBuilder: (context, i) =>
-                              _StatusRowTile(row: visible[i], striped: i.isOdd),
+                          itemBuilder: (context, i) => _StatusRowTile(
+                            row: visible[i],
+                            striped: i.isOdd,
+                            onSelect:
+                                widget.service is QualificationChangeService
+                                ? () => _change(visible[i].participantId)
+                                : null,
+                          ),
                         ),
                 ),
             ],
@@ -378,9 +402,7 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
     margin: const EdgeInsets.only(bottom: 14),
     padding: const EdgeInsets.all(12),
     color: const Color(0xffffe8e8),
-    child: Text(
-      status == null ? message : '$message(表示中の内容は前回取得したものです)',
-    ),
+    child: Text(status == null ? message : '$message(表示中の内容は前回取得したものです)'),
   );
 
   Widget _listControls(ReceptionStatus s) => Card(
@@ -425,7 +447,9 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
                 key: const Key('reception-status-state'),
                 label: '受付状態',
                 value: stateFilter,
-                items: [for (final f in ReceptionStateFilter.values) (f, f.label)],
+                items: [
+                  for (final f in ReceptionStateFilter.values) (f, f.label),
+                ],
                 onChanged: (v) => _update(() => stateFilter = v!),
               ),
               _dropdown<ReceptionHebelGroup?>(
@@ -857,13 +881,19 @@ class _RowHeader extends StatelessWidget {
 }
 
 class _StatusRowTile extends StatelessWidget {
-  const _StatusRowTile({required this.row, required this.striped});
+  const _StatusRowTile({
+    required this.row,
+    required this.striped,
+    this.onSelect,
+  });
+  final VoidCallback? onSelect;
   final ReceptionStatusRow row;
   final bool striped;
 
   @override
   Widget build(BuildContext context) {
-    Widget cell(int i, Widget child) => Expanded(flex: _rowFlexes[i], child: child);
+    Widget cell(int i, Widget child) =>
+        Expanded(flex: _rowFlexes[i], child: child);
     Widget text(String value, {int maxLines = 1}) =>
         Text(value, maxLines: maxLines, overflow: TextOverflow.ellipsis);
     return Container(
@@ -872,12 +902,32 @@ class _StatusRowTile extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
       child: Row(
         children: [
-          cell(0, text(row.name)),
+          cell(
+            0,
+            onSelect == null
+                ? text(row.name)
+                : TextButton(onPressed: onSelect, child: Text(row.name)),
+          ),
           cell(1, text(row.hebel.label, maxLines: 2)),
-          cell(2, text('${row.programName}${row.revoked ? '（資格取消）' : ''}${row.notificationType == null ? '' : row.notificationType == 'waitlistPromotion' ? '［繰り上げ］' : '［通常］'}')),
+          cell(
+            2,
+            text(
+              '${row.programName}${row.revoked ? '（資格取消）' : ''}${row.notificationType == null
+                  ? ''
+                  : row.notificationType == 'waitlistPromotion'
+                  ? '［繰り上げ］'
+                  : '［通常］'}',
+            ),
+          ),
           cell(3, text(row.timeText ?? '—')),
-          cell(4, text(row.plannedCount == null ? '—' : '${row.plannedCount}名')),
-          cell(5, text(row.attendedCount == null ? '—' : '${row.attendedCount}名')),
+          cell(
+            4,
+            text(row.plannedCount == null ? '—' : '${row.plannedCount}名'),
+          ),
+          cell(
+            5,
+            text(row.attendedCount == null ? '—' : '${row.attendedCount}名'),
+          ),
           cell(
             6,
             Align(
@@ -910,7 +960,12 @@ class _StatusRowTile extends StatelessWidget {
               ),
             ),
           ),
-          cell(7, text(row.checkedInAt == null ? '—' : formatJstShort(row.checkedInAt!))),
+          cell(
+            7,
+            text(
+              row.checkedInAt == null ? '—' : formatJstShort(row.checkedInAt!),
+            ),
+          ),
         ],
       ),
     );

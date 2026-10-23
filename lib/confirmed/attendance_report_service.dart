@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'auth_client.dart';
+import 'qualification_change_service.dart';
 import 'winner_send_service.dart';
 
 /// 最終実績(getConfirmedAttendanceReport)の応答。サーバーがFirestoreの正本(participants・programAttendances・
@@ -182,7 +183,8 @@ abstract class AttendanceReportService {
   Future<AttendanceReport> getReport(String eventId);
 }
 
-class CallableAttendanceReportService implements AttendanceReportService {
+class CallableAttendanceReportService
+    implements AttendanceReportService, QualificationChangeService {
   CallableAttendanceReportService({
     required this.authClient,
     http.Client? httpClient,
@@ -202,6 +204,20 @@ class CallableAttendanceReportService implements AttendanceReportService {
       AttendanceReport.fromJson(
         await _call('getConfirmedAttendanceReport', {'eventId': eventId}),
       );
+
+  @override
+  Future<Map<String, dynamic>> getQualifications(
+    String eventId,
+    String participantId,
+  ) => _call('getConfirmedQualificationChange', {
+    'eventId': eventId,
+    'participantId': participantId,
+  });
+
+  @override
+  Future<void> changeQualification(Map<String, dynamic> request) async {
+    await _call('changeConfirmedQualification', request);
+  }
 
   Future<Map<String, dynamic>> _call(
     String name,

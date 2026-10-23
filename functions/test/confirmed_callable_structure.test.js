@@ -291,6 +291,8 @@ const AUTHORIZATION_MAP_PHASE_1B = {
   // Phase 4: 招待(未登録の人)。招待・取消は対象イベントのevent_manager以上、リンクを開く1本は公開(招待token)、受諾はログイン必須
   inviteEventRole: E_MANAGER,
   revokeEventInvitation: E_MANAGER,
+  getConfirmedQualificationChange: E_MANAGER,
+  changeConfirmedQualification: E_MANAGER,
   getEventInvitation: "publicCapabilityCallable",
   acceptEventInvitation: "confirmedCallable:authenticated",
   // 受付スタッフ用QR: キーの発行は対象イベントのstaff以上(正式ログイン)。受付端末は受付キー必須の3本だけ
@@ -313,7 +315,7 @@ test("Phase 1B: 全exportの入口・認可レベル・対象イベントのreso
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
   // 60本 + イベント設定(getConfirmedEventSettings / updateConfirmedEventSettings。event_manager以上)の2本
-  assert.equal(exportsInIndex.length, 78);
+  assert.equal(exportsInIndex.length, 80);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {
