@@ -95,6 +95,15 @@ String formatJstShort(DateTime at) {
 String formatRate(double? rate) =>
     rate == null ? '—' : '${rate.toStringAsFixed(1)}%';
 
+enum _QualificationDisplay {
+  active('有効な資格のみ'),
+  all('取消済みを含む'),
+  revoked('取消済みのみ');
+
+  const _QualificationDisplay(this.label);
+  final String label;
+}
+
 class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
   ReceptionStatus? status;
   DateTime? updatedAt;
@@ -106,6 +115,7 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
   ReceptionStateFilter stateFilter = ReceptionStateFilter.all;
   ReceptionHebelGroup? hebelFilter;
   ReceptionSort sort = ReceptionSort.standard;
+  _QualificationDisplay qualificationDisplay = _QualificationDisplay.active;
   List<ReceptionStatusRow> visible = const [];
 
   /// 表示中のモード(切り替えても通信しない。絞り込み等の状態はそのまま)。
@@ -237,7 +247,15 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
     visible = s == null
         ? const []
         : filterReceptionRows(
-            s.rows,
+            s.rows
+                .where(
+                  (row) => switch (qualificationDisplay) {
+                    _QualificationDisplay.active => !row.revoked,
+                    _QualificationDisplay.all => true,
+                    _QualificationDisplay.revoked => row.revoked,
+                  },
+                )
+                .toList(),
             query: query.text,
             programId: programFilter,
             state: stateFilter,
@@ -442,6 +460,16 @@ class _ReceptionStatusPageState extends State<ReceptionStatusPage> {
                   for (final p in s.programs) (p.programId, p.name),
                 ],
                 onChanged: (v) => _update(() => programFilter = v),
+              ),
+              _dropdown<_QualificationDisplay>(
+                key: const Key('reception-status-qualification'),
+                label: '資格表示',
+                value: qualificationDisplay,
+                items: [
+                  for (final mode in _QualificationDisplay.values)
+                    (mode, mode.label),
+                ],
+                onChanged: (v) => _update(() => qualificationDisplay = v!),
               ),
               _dropdown<ReceptionStateFilter>(
                 key: const Key('reception-status-state'),
