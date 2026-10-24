@@ -1,4 +1,4 @@
-// Administrative changes preserve participant capabilities and all delivery records.
+// Administrative changes preserve participant capabilities and delivery outcomes.
 const {createHash} = require('node:crypto');
 const {mappingFor} = require('./participation_types');
 const {programTimeText} = require('./mail_view_model');
@@ -44,11 +44,19 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
     const reviewed = x => recoveries.docs.some(r => r.id === x.id && r.data().fingerprint === (r.data().fingerprintVersion === 2 ? deliveryDigest(x.data()) : digest(x.data())));
     const unresolved = x => ['pending', 'sending'].includes(x.data().status) ||
       (x.data().status === 'unknown' && !reviewed(x));
-    const jobItems = new Map();
+    const jobItems = new Map(), settledJobs = new Set();
     for (const job of jobs.docs) {
       const j = job.data();
       const own = await tx.get(job.ref.collection('items').doc(d.participantId));
       jobItems.set(job.id,own.data());
+      // refreshJob does not persist pending/sending counts. Read the actual
+      // items in this transaction so retries/worker updates conflict with recovery.
+      if (deliveries.docs.some(x => x.data().jobId === job.id && x.data().status === 'unknown' && x.data().claimId)) {
+        const items = await tx.get(job.ref.collection('items'));
+        if (Number.isInteger(j.targetCount) && j.targetCount > 0 && items.size === j.targetCount &&
+            items.docs.every(x => ['sent','failed','unknown'].includes(x.data().status) &&
+              x.data().participantId === x.id && !(x.data().leaseUntil?.toMillis?.() > now()))) settledJobs.add(job.id);
+      }
       // Preparing jobs can still grow their population. Terminal/ready jobs only
       // retry existing items; another person's worker never locks this person.
       if (j.status === 'preparing' || (own.exists &&
@@ -65,13 +73,13 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
       const job = jobs.docs.find(j => j.id === v.jobId)?.data(), item = jobItems.get(v.jobId);
       // An expired item lease alone is NOT completion evidence. The scheduler
       // must have settled the job, and the original 300s invocation plus margin
-      // must have elapsed. Preserve its claimId and original unknown record.
+      // must have elapsed. Recovery then fences the old claim, retaining it in the audit.
       const interruptedMailEnded = !notice && v.claimId && v.lastErrorCode === 'lease-expired-after-dispatch' &&
         millis(v.dispatchStartedAt) > 0 && now() >= millis(v.dispatchStartedAt) + 360000 &&
         millis(v.updatedAt) >= millis(v.dispatchStartedAt) && job?.status === 'completed' &&
         job.dispatchActive === false && !job.dispatchWorkerId &&
         !(millis(job.dispatchWorkerLeaseUntil) > now()) &&
-        job.pendingCount === 0 && job.sendingCount === 0 && item?.status === 'unknown' &&
+        settledJobs.has(v.jobId) && item?.status === 'unknown' &&
         millis(job.dispatchFinishedAt) >= millis(v.updatedAt);
       // New notices hold a renewable lease and fence before dispatch and finish.
       // Legacy notices have no fence: use their 120s invocation bound plus a
@@ -79,7 +87,7 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
       const interruptedNoticeEnded = notice && v.status === 'sending' &&
         millis(v.startedAt) > 0 && now() >= millis(v.startedAt) + 180000 &&
         (v.leaseUntil ? millis(v.leaseUntil) > 0 && millis(v.leaseUntil) <= now() : !v.claimId);
-      const recoverable = item?.status !== 'sending' && !(millis(item?.leaseUntil) > now()) && !(millis(v.leaseUntil) > now()) &&
+      const recoverable = !['pending','sending'].includes(item?.status) && !(millis(item?.leaseUntil) > now()) && !(millis(v.leaseUntil) > now()) &&
         ((v.status === 'unknown' && (notice ? !!v.completedAt : v.claimId === null || interruptedMailEnded)) || interruptedNoticeEnded);
       return {id:x.id, kind:x.ref.parent.id, status:v.status, to:v.to || person.email,
         startedAt:stamp(v.startedAt || v.createdAt), reviewed:reviewed(x), recoverable,
@@ -204,6 +212,13 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
       const attemptRef = x.ref.collection('attempts').doc(String(x.data().attemptCount || 1));
       const attempt = d.kind === 'qualificationNotices' ? await tx.get(attemptRef) : null;
       let reviewedData = x.data();
+      if (d.kind === 'mailDeliveries' && reviewedData.claimId) {
+        // finishItem accepts a late result for this unknown status only while
+        // its claim matches. Fence it atomically with the review, without
+        // changing the unknown outcome, error, timestamps or attempt count.
+        reviewedData = {...reviewedData, claimId:null};
+        tx.update(x.ref, {claimId:null});
+      }
       if (d.kind === 'qualificationNotices' && reviewedData.status === 'sending') {
         // Fence the abandoned attempt; a delayed sender cannot dispatch or
         // overwrite this unknown result. Unknown can never be retried.
