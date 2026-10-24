@@ -156,6 +156,78 @@ class InterruptedNoticeFake extends ManagementFake {
 }
 
 void main() {
+  for (final size in [const Size(1280, 900), const Size(390, 400)]) {
+    for (final count in [1, 2, 3]) {
+      testWidgets('資格$count件: 一覧・ラベルの間隔と内部スクロール $size', (tester) async {
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final service = ManagementFake();
+        service.rows
+          ..clear()
+          ..addAll([
+            for (final id in ['cat', 'dog', 'talk'].take(count))
+              {
+                'programId': id,
+                'slotLabel': '11:50-12:30',
+                'plannedCount': 1,
+                'entitlementStatus': 'active',
+                'checkedIn': false,
+              },
+          ]);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: ThemeData(
+              useMaterial3: true,
+              inputDecorationTheme: const InputDecorationTheme(
+                border: OutlineInputBorder(),
+                filled: true,
+                fillColor: Colors.white,
+              ),
+            ),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (_) => QualificationChangeDialog(
+                      service: service,
+                      eventId: 'event',
+                      participantId: 'person',
+                    ),
+                  ),
+                  child: const Text('開く'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('開く'));
+        await tester.pumpAndSettle();
+        final last = find.text(
+          '${['猫', '犬', 'トーク'][count - 1]} 11:50-12:30 1名',
+        );
+        expect(
+          tester.getTopLeft(find.text('操作')).dy - tester.getBottomLeft(last).dy,
+          greaterThanOrEqualTo(8),
+        );
+        final fields = find.byType(InputDecorator);
+        expect(
+          tester.getTopLeft(fields.at(1)).dy -
+              tester.getBottomLeft(fields.first).dy,
+          greaterThanOrEqualTo(12),
+        );
+        final reason = find.widgetWithText(TextField, '変更理由（必須）');
+        await tester.ensureVisible(reason);
+        await tester.pumpAndSettle();
+        await tester.enterText(reason, 'レイアウト確認（送信しない）');
+        expect(find.text('レイアウト確認（送信しない）'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        expect(service.requests, isEmpty);
+        expect(service.sends, 0);
+      });
+    }
+  }
   testWidgets('失敗通知のみ、試行番号を確認して手動再送。結果不明・成功済みは送信できない', (tester) async {
     tester.view.physicalSize = const Size(1400, 1400);
     tester.view.devicePixelRatio = 1;

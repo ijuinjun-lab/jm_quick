@@ -362,7 +362,9 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                       data!['busyReason'] as String? ??
                           '取込・配送処理が未完了のため変更できません。',
                     ),
+                  const SizedBox(height: 16),
                   DropdownButtonFormField<String>(
+                    isExpanded: true,
                     initialValue: action,
                     decoration: const InputDecoration(labelText: '操作'),
                     items: const [
@@ -381,7 +383,9 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                             selectSource(null);
                           }),
                   ),
+                  const SizedBox(height: 16),
                   DropdownButtonFormField<String>(
+                    isExpanded: true,
                     key: ValueKey('source-$action-${data!['fingerprint']}'),
                     initialValue: source,
                     decoration: const InputDecoration(labelText: '変更・取消する資格'),
@@ -427,8 +431,10 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                             }),
                     ),
                   if (details) ...[
+                    const SizedBox(height: 16),
                     if (slots.isNotEmpty)
                       DropdownButtonFormField<String>(
+                        isExpanded: true,
                         key: ValueKey('slot-$source-$swap-$action'),
                         initialValue: slots.contains(slot.text)
                             ? slot.text
@@ -450,6 +456,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                           labelText: '変更先時間（HH:mm-HH:mm）',
                         ),
                       ),
+                    const SizedBox(height: 16),
                     TextField(
                       controller: count,
                       enabled: !frozen,
@@ -457,6 +464,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                       decoration: const InputDecoration(labelText: '変更先の予定人数'),
                     ),
                   ],
+                  const SizedBox(height: 16),
                   TextField(
                     controller: reason,
                     enabled: !frozen,
