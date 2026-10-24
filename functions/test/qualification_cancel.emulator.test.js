@@ -70,7 +70,36 @@ test('single and atomic all cancellation: real transactions, slots, notice, immu
       assert.equal(preview.qrPayload,f.oldPass.qrPayload);assert.equal(preview.webPassUrl,f.oldPass.webPassUrl);assert.equal(preview.text.includes(d.reason),false);
       await Promise.all([notice.send({identity,data:{...r,fingerprint:preview.fingerprint}}),notice.send({identity,data:{...r,fingerprint:preview.fingerprint}})]);
       assert.equal(sends,sentBefore+1);assert.equal(messages.at(-1).to,f.person.email);
+      assert.equal(messages.at(-1).attachments.length,target ? 1 : 0);
+      if (!target) {
+        assert.match(preview.text,/参加資格はすべて取り消されました/);
+        assert.equal(preview.text.includes(preview.webPassUrl),false);
+        assert.equal(preview.html.includes('cid:'),false);
+        assert.equal(preview.text.includes('ご利用ください'),false);
+      } else {
+        assert.ok(preview.text.includes(preview.webPassUrl));
+        assert.ok(preview.html.includes('cid:'));
+      }
       assert.equal((await f.audit.get()).size,2);await f.preserved();
+    });
+    await t.test('obsolete history is blocked and failed mail preserves saved qualifications',async()=>{
+      const f=await fixture();
+      const first=await f.request('program-1');await api.change({identity,data:first});
+      const request={...f.input,operationId:first.operationId};
+      const oldPreview=await notice.preview({data:request});
+      const second=await f.request('program-2');await api.change({identity,data:second});
+      const before=await Promise.all(f.refs.map(async ref=>(await ref.get()).data()));
+      const sendsBefore=sends;
+      await assert.rejects(notice.preview({data:request}),e=>e.details.code==='change-superseded');
+      await assert.rejects(notice.send({identity,data:{...request,fingerprint:oldPreview.fingerprint}}),e=>e.details.code==='change-superseded');
+      assert.equal(sends,sendsBefore);
+      const failingNotice=createQualificationNoticeApi({...deps,getTransport:()=>({capabilities:async()=>({ok:true}),send:async()=>({outcome:'failed'})})});
+      const latest={...f.input,operationId:second.operationId};
+      const preview=await failingNotice.preview({data:latest});
+      assert.equal((await failingNotice.send({identity,data:{...latest,fingerprint:preview.fingerprint}})).status,'failed');
+      assert.deepEqual(await Promise.all(f.refs.map(async ref=>(await ref.get()).data())),before);
+      assert.equal((await db.collection('sendJobs').get()).size,0);
+      await f.preserved();
     });
     await t.test('all cancellation skips prior revocations and respects import/delivery locks',async()=>{
       const f=await fixture(),eventRef=db.collection('events').doc(f.input.eventId);

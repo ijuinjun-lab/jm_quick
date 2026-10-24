@@ -233,6 +233,8 @@ void main() {
         await tap(find.text('確認へ'));
         expect(find.textContaining('理由：$value'), findsOneWidget);
         await tap(find.text('確定'));
+        expect(find.text('本人へ変更内容をメールで通知しますか？'), findsOneWidget);
+        await tap(find.text('送信しない'));
         expect(service.requests.last['reason'], value);
         expect(service.history.first['reason'], value);
         expect(service.history.last['reason'], '従来の自由記述');
@@ -249,6 +251,8 @@ void main() {
       await tap(find.text('確認へ'));
       expect(find.textContaining('理由：その他：内部確認による修正'), findsOneWidget);
       await tap(find.text('確定'));
+      expect(find.text('本人へ変更内容をメールで通知しますか？'), findsOneWidget);
+      await tap(find.text('送信しない'));
       expect(service.requests.last['reason'], 'その他：内部確認による修正');
       expect(service.history.first['reason'], 'その他：内部確認による修正');
       expect(service.history.last['reason'], '従来の自由記述');
@@ -444,6 +448,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('変更前：'), findsOneWidget);
       await tester.tap(find.text('確定'));
+      await tester.pumpAndSettle();
+      expect(find.text('参加資格の変更が完了しました'), findsOneWidget);
+      expect(service.sends, 0);
+      await tester.tap(find.text('送信しない'));
       await tester.pumpAndSettle();
     }
 

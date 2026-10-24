@@ -339,9 +339,18 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
       error = null;
     });
     try {
+      final operationId = pendingRequest!['operationId'];
       await widget.service.changeQualification(pendingRequest!);
       changed = true;
       await load();
+      if (!mounted || error != null) return;
+      final history = (data?['history'] as List? ?? []).whereType<Map>();
+      final saved = history
+          .where((h) => h['operationId'] == operationId)
+          .firstOrNull;
+      if (saved != null && widget.service is QualificationNoticeService) {
+        await offerNotice(saved);
+      }
     } on WinnerSendException catch (e) {
       if (mounted) setState(() => error = '${e.message} 再試行は同じ操作として照合されます。');
     } catch (_) {
@@ -349,6 +358,51 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
     } finally {
       if (mounted) setState(() => busy = false);
     }
+  }
+
+  Future<void> offerNotice(Map saved) async {
+    final after = (saved['after'] as List).whereType<Map>().toList();
+    final cancelled = !after.any((q) => q['entitlementStatus'] != 'revoked');
+    setState(() {
+      busy = true;
+      confirming = true;
+    });
+    final send = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        title: Text(cancelled ? '参加キャンセルが完了しました' : '参加資格の変更が完了しました'),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('変更後の参加内容\n${describe(after)}'),
+                if (cancelled)
+                  const Text('参加資格はすべて取り消されました。既存QR・Web参加証では受付できません。'),
+                const SizedBox(height: 16),
+                const Text('本人へ変更内容をメールで通知しますか？'),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('送信しない'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('メール内容を確認して送信'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    setState(() => confirming = false);
+    if (send == true) await notify(saved);
   }
 
   Future<void> cancelQualifications(

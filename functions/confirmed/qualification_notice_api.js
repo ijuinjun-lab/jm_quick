@@ -37,11 +37,13 @@ function createQualificationNoticeApi(deps) {
     const ids = {appBaseUrl:getAppBaseUrl(), eventId:d.eventId, participantId:d.participantId, publicId:s.person.publicId};
     const qrPayload = receptionQrPayload(ids), pass = webPassUrl(ids);
     const summary = rows => rows.map(a => `${s.event.programs.find(p => p.programId === a.programId)?.name || a.programId}：${programTimeText(a, {...s.event.programs.find(p => p.programId === a.programId), ...(mappingFor(d.eventId,s.event)?.talkProgramId === a.programId ? {role:'talk',talkTimeText:s.event.confirmedMailSettings?.talkTimeText} : {})}) || '時間指定なし'} / ${a.plannedCount}名${a.entitlementStatus === 'revoked' ? '（取消）' : ''}`).join('\n');
-    const text = `${s.person.name} 様\n\n参加内容を変更しました。\n\n【変更前】\n${summary(audit.before)}\n\n【変更後】\n${summary(audit.after)}\n\n既存のQRコード・Web参加証をご利用ください。取消済みの資格では受付できません。\n${pass}`;
+    const hasActive = audit.after.some(a => a.entitlementStatus !== 'revoked');
+    const guidance = hasActive ? `既存のQRコード・Web参加証をご利用ください。取消済みの資格では受付できません。\n${pass}` : '参加資格はすべて取り消されました。既存のQRコード・Web参加証では受付できません。';
+    const text = `${s.person.name} 様\n\n参加内容を変更しました。\n\n【変更前】\n${summary(audit.before)}\n\n【変更後】\n${summary(audit.after)}\n\n${guidance}`;
     if (typeof s.person.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.person.email)) fail('invalid-email');
     const message = {to:s.person.email, senderName:s.event.senderName || s.event.eventName || 'JM Quick', subject:`【参加内容の変更】${s.event.eventName || ''}`, text,
-      html:`<html><body><p>${escape(text).replace(/\n/g,'<br>')}</p><img src="cid:${QR_CONTENT_ID}" alt="受付QR"></body></html>`};
-    return {message, qrPayload, webPassUrl:pass, fingerprint:hash([s.fingerprint, audit, message]), busy:s.busy};
+      html:`<html><body><p>${escape(text).replace(/\n/g,'<br>')}</p>${hasActive ? `<img src="cid:${QR_CONTENT_ID}" alt="受付QR">` : ''}</body></html>`};
+    return {message, hasActive, qrPayload, webPassUrl:pass, fingerprint:hash([s.fingerprint, audit, message]), busy:s.busy};
   }
   async function preview({data:d}) {
     validate(d); const db = getDb();
@@ -99,7 +101,7 @@ function createQualificationNoticeApi(deps) {
     timer.unref?.();
     let result, dispatchStarted = false;
     try {
-      const png = await generateQrPng(c.qrPayload);
+      const png = c.hasActive ? await generateQrPng(c.qrPayload) : null;
       const dispatch = await db.runTransaction(async tx => {
         const v = (await tx.get(ref)).data();
         if (!owned(v)) return false;
@@ -110,7 +112,7 @@ function createQualificationNoticeApi(deps) {
       if (!dispatch) result = {outcome:'unknown'};
       else {
         dispatchStarted = true;
-        result = await transport.send({...c.message,attachments:[{filename:'reception-qr.png',contentType:'image/png',contentBase64:Buffer.isBuffer(png) ? png.toString('base64') : png,contentId:QR_CONTENT_ID,disposition:'inline'}],metadata:{app:'jm-quick',type:'qualification-change',jobId:ref.id}});
+        result = await transport.send({...c.message,attachments:c.hasActive ? [{filename:'reception-qr.png',contentType:'image/png',contentBase64:Buffer.isBuffer(png) ? png.toString('base64') : png,contentId:QR_CONTENT_ID,disposition:'inline'}] : [],metadata:{app:'jm-quick',type:'qualification-change',jobId:ref.id}});
       }
     } catch (_) { result = {outcome:dispatchStarted ? 'unknown' : 'failed'}; }
     finally { clearInterval(timer); }

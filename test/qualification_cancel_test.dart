@@ -61,7 +61,11 @@ class CancelFake extends ManagementFake {
   }
 }
 
-Future<void> mount(WidgetTester tester, CancelFake service, Size size) async {
+Future<void> mount(
+  WidgetTester tester,
+  ManagementFake service,
+  Size size,
+) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -148,6 +152,12 @@ void main() {
             );
           }
           expect(service.sends, 0);
+          expect(
+            find.text(target == 'all' ? '参加キャンセルが完了しました' : '参加資格の変更が完了しました'),
+            findsOneWidget,
+          );
+          expect(find.text('本人へ変更内容をメールで通知しますか？'), findsOneWidget);
+          await tap(tester, find.text('送信しない'));
           expect(service.history.length, 1);
           await tap(tester, find.byType(ExpansionTile).first);
           await tap(tester, find.text('変更通知を確認・手動送信'));
@@ -185,6 +195,7 @@ void main() {
         await tester.ensureVisible(detail);
         await tester.enterText(detail, '事務局の判断');
         await tap(tester, find.text('確定'));
+        expect(find.text('本人へ変更内容をメールで通知しますか？'), findsNothing);
         expect(service.requests.single['reason'], 'その他：事務局の判断');
         expect(
           tester
