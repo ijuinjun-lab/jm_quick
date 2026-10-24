@@ -26,6 +26,12 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
   bool changed = false;
   bool swap = false, busy = false, confirming = false;
   String? error;
+  static const reasonOptions = ['本人からの変更依頼', '本人からのキャンセル', '事務局による訂正', 'その他'];
+  String? selectedReason;
+  String get reasonChoice =>
+      selectedReason ?? (details ? reasonOptions[0] : reasonOptions[1]);
+  String get changeReason =>
+      reasonChoice == 'その他' ? 'その他：${reason.text.trim()}' : reasonChoice;
   final reason = TextEditingController();
   final slot = TextEditingController();
   final count = TextEditingController(text: '1');
@@ -59,6 +65,8 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
           source = null;
           swap = false;
           pendingRequest = null;
+          selectedReason = null;
+          reason.clear();
         });
       }
     } catch (_) {
@@ -239,7 +247,11 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
   Future<void> submit() async {
     if (busy || source == null) return;
     if (pendingRequest == null) {
-      if (reason.text.trim().isEmpty ||
+      if (reasonChoice == 'その他' && reason.text.trim().isEmpty) {
+        setState(() => error = '「その他」の詳細理由を入力してください。');
+        return;
+      }
+      if (changeReason.length > 200 ||
           (details &&
               ((swap && target == null) ||
                   int.tryParse(count.text) == null ||
@@ -269,7 +281,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                       ? '追加'
                       : action == 'edit'
                       ? '時間・人数変更'
-                      : '取消'}${details ? ' → ${name(swap ? target : source)} ${slot.text} ${count.text}名' : ''}\n他の資格とQRは維持します。通知メールは送信しません。\n理由：${reason.text.trim()}',
+                      : '取消'}${details ? ' → ${name(swap ? target : source)} ${slot.text} ${count.text}名' : ''}\n他の資格とQRは維持します。通知メールは送信しません。\n理由：$changeReason',
                 ),
                 if (removesLastQualification) ...[
                   const SizedBox(height: 12),
@@ -310,7 +322,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
         'fingerprint': data!['fingerprint'],
         'programId': source,
         if (action != 'cancel') 'action': action,
-        'reason': reason.text.trim(),
+        'reason': changeReason,
         if (details) ...{
           if (swap) 'targetProgramId': target,
           'slotLabel': slot.text,
@@ -379,6 +391,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                         ? null
                         : (v) => setState(() {
                             action = v!;
+                            selectedReason = null;
                             swap = false;
                             selectSource(null);
                           }),
@@ -423,6 +436,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                           ? null
                           : (v) => setState(() {
                               swap = v!;
+                              selectedReason = null;
                               if (swap) {
                                 slot.text = slots.firstOrNull ?? '';
                               } else {
@@ -465,12 +479,28 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                     ),
                   ],
                   const SizedBox(height: 16),
-                  TextField(
-                    controller: reason,
-                    enabled: !frozen,
-                    maxLength: 200,
+                  DropdownButtonFormField<String>(
+                    key: ValueKey('reason-$reasonChoice'),
+                    initialValue: reasonChoice,
+                    isExpanded: true,
                     decoration: const InputDecoration(labelText: '変更理由（必須）'),
+                    items: [
+                      for (final value in reasonOptions)
+                        DropdownMenuItem(value: value, child: Text(value)),
+                    ],
+                    onChanged: frozen
+                        ? null
+                        : (v) => setState(() => selectedReason = v),
                   ),
+                  if (reasonChoice == 'その他') ...[
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: reason,
+                      enabled: !frozen,
+                      maxLength: 196,
+                      decoration: const InputDecoration(labelText: '詳細理由（必須）'),
+                    ),
+                  ],
                 ],
                 for (final h
                     in (data?['history'] as List? ?? []).whereType<Map>())

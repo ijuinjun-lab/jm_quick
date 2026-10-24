@@ -156,6 +156,107 @@ class InterruptedNoticeFake extends ManagementFake {
 }
 
 void main() {
+  for (final size in [const Size(1280, 900), const Size(390, 500)]) {
+    testWidgets('理由の選択・操作別初期値・その他の必須入力・確認と履歴 $size', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final service = ManagementFake();
+      service.history.add({
+        'changedAt': '過去',
+        'reason': '従来の自由記述',
+        'changedBy': 'manager',
+        'before': [],
+        'after': [],
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(
+            useMaterial3: true,
+            inputDecorationTheme: const InputDecorationTheme(
+              border: OutlineInputBorder(),
+            ),
+          ),
+          home: Scaffold(
+            body: QualificationChangeDialog(
+              service: service,
+              eventId: 'event',
+              participantId: 'person',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Future<void> tap(Finder finder) async {
+        await tester.ensureVisible(finder);
+        await tester.pumpAndSettle();
+        await tester.tap(finder);
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> choose(String label, String value) async {
+        await tap(find.widgetWithText(DropdownButtonFormField<String>, label));
+        await tap(find.text(value).last);
+      }
+
+      void selected(String value) {
+        expect(
+          tester
+              .widget<DropdownButtonFormField<String>>(
+                find.widgetWithText(
+                  DropdownButtonFormField<String>,
+                  '変更理由（必須）',
+                ),
+              )
+              .initialValue,
+          value,
+        );
+      }
+
+      selected('本人からのキャンセル');
+      expect(find.widgetWithText(TextField, '詳細理由（必須）'), findsNothing);
+      await choose('変更・取消する資格', '猫');
+      await tap(find.byType(CheckboxListTile));
+      selected('本人からの変更依頼');
+      await tap(find.byType(CheckboxListTile));
+      selected('本人からのキャンセル');
+      await choose('操作', '資格追加');
+      selected('本人からの変更依頼');
+      await choose('操作', '時間・人数の変更');
+      selected('本人からの変更依頼');
+      await choose('変更・取消する資格', '猫');
+      await tester.ensureVisible(find.widgetWithText(TextField, '変更先の予定人数'));
+      await tester.enterText(find.widgetWithText(TextField, '変更先の予定人数'), '3');
+      for (final value in ['本人からの変更依頼', '本人からのキャンセル', '事務局による訂正']) {
+        await choose('変更理由（必須）', value);
+        expect(find.widgetWithText(TextField, '詳細理由（必須）'), findsNothing);
+        await tap(find.text('確認へ'));
+        expect(find.textContaining('理由：$value'), findsOneWidget);
+        await tap(find.text('確定'));
+        expect(service.requests.last['reason'], value);
+        expect(service.history.first['reason'], value);
+        expect(service.history.last['reason'], '従来の自由記述');
+        await choose('変更・取消する資格', '猫');
+      }
+      await choose('変更理由（必須）', 'その他');
+      final detail = find.widgetWithText(TextField, '詳細理由（必須）');
+      expect(detail, findsOneWidget);
+      await tap(find.text('確認へ'));
+      expect(find.text('参加資格の変更を確定しますか？'), findsNothing);
+      expect(service.requests.length, 3);
+      await tester.ensureVisible(detail);
+      await tester.enterText(detail, '  内部確認による修正  ');
+      await tap(find.text('確認へ'));
+      expect(find.textContaining('理由：その他：内部確認による修正'), findsOneWidget);
+      await tap(find.text('確定'));
+      expect(service.requests.last['reason'], 'その他：内部確認による修正');
+      expect(service.history.first['reason'], 'その他：内部確認による修正');
+      expect(service.history.last['reason'], '従来の自由記述');
+      expect(service.sends, 0);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   for (final size in [const Size(1280, 900), const Size(390, 400)]) {
     for (final count in [1, 2, 3]) {
       testWidgets('資格$count件: 一覧・ラベルの間隔と内部スクロール $size', (tester) async {
@@ -217,7 +318,16 @@ void main() {
               tester.getBottomLeft(fields.first).dy,
           greaterThanOrEqualTo(12),
         );
-        final reason = find.widgetWithText(TextField, '変更理由（必須）');
+        final reasonSelect = find.widgetWithText(
+          DropdownButtonFormField<String>,
+          '変更理由（必須）',
+        );
+        await tester.ensureVisible(reasonSelect);
+        await tester.tap(reasonSelect);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('その他').last);
+        await tester.pumpAndSettle();
+        final reason = find.widgetWithText(TextField, '詳細理由（必須）');
         await tester.ensureVisible(reason);
         await tester.pumpAndSettle();
         await tester.enterText(reason, 'レイアウト確認（送信しない）');
@@ -330,10 +440,6 @@ void main() {
     }
 
     Future<void> save() async {
-      await tester.enterText(
-        find.widgetWithText(TextField, '変更理由（必須）'),
-        '本人希望',
-      );
       await tester.tap(find.text('確認へ'));
       await tester.pumpAndSettle();
       expect(find.textContaining('変更前：'), findsOneWidget);

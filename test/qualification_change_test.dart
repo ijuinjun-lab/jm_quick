@@ -127,14 +127,12 @@ void main() {
       );
       await tester.tap(find.text('開く'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+      await tester.tap(
+        find.widgetWithText(DropdownButtonFormField<String>, '変更・取消する資格'),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.text('猫').last);
       await tester.pumpAndSettle();
-      await tester.enterText(
-        find.widgetWithText(TextField, '変更理由（必須）'),
-        '本人希望',
-      );
       await tester.tap(find.text('確認へ'));
       await tester.pumpAndSettle();
       const warning =
@@ -189,7 +187,9 @@ void main() {
       await tester.tap(find.text('開く'));
       await tester.pumpAndSettle();
       expect(find.text('架空田中 / tanaka@example.invalid'), findsOneWidget);
-      await tester.tap(find.byType(DropdownButtonFormField<String>).last);
+      await tester.tap(
+        find.widgetWithText(DropdownButtonFormField<String>, '変更・取消する資格'),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.text('猫').last);
       await tester.pumpAndSettle();
@@ -200,10 +200,6 @@ void main() {
         '14:10-14:50',
       );
       await tester.enterText(find.widgetWithText(TextField, '変更先の予定人数'), '2');
-      await tester.enterText(
-        find.widgetWithText(TextField, '変更理由（必須）'),
-        '本人希望',
-      );
       await tester.tap(find.text('確認へ'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('確定'));

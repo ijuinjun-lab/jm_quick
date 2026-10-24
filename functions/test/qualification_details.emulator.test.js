@@ -34,6 +34,23 @@ test('details/addition and manual change notice: atomicity, current values, reco
     const history=db.collection('mailDeliveries').doc(`${participantId}_winner`);
     await history.set({...input,status:'sent',messageId:'first-delivery',sentAt:FieldValue.serverTimestamp()});
     const oldHistory=(await history.get()).data(), oldPass=await pass.getPass({data:{participantId,publicId:person.publicId}});
+    // UI reasons remain ordinary strings: no server/schema migration, and
+    // previously stored free text must stay intact. Notice bodies omit all reasons.
+    const auditRef=db.collection('participants').doc(participantId).collection('qualificationChanges');
+    const legacy=await change('edit','program-1',{slotLabel:'10:00-11:00',plannedCount:2,reason:'旧形式の自由記述'});
+    const legacyAudit=(await auditRef.doc(legacy.operationId).get()).data();
+    const reasonAudits=[];
+    for (const [i,reason] of ['本人からの変更依頼','本人からのキャンセル','事務局による訂正','その他：内部管理専用の詳細理由'].entries()) {
+      const d=await change('edit','program-1',{slotLabel:'10:00-11:00',plannedCount:i+3,reason});
+      const stored=(await auditRef.doc(d.operationId).get()).data();assert.equal(stored.reason,reason);
+      reasonAudits.push([d.operationId,stored]);
+      assert.equal((await api.get({data:input})).history.find(h=>h.operationId===d.operationId).reason,reason);
+      const p=await notice.preview({data:{...input,operationId:d.operationId}});
+      for (const body of [p.text,p.html]) {assert.equal(body.includes(reason),false);assert.equal(body.includes('内部管理専用の詳細理由'),false);}
+      assert.deepEqual((await auditRef.doc(legacy.operationId).get()).data(),legacyAudit);
+    }
+    for(const [id,stored] of reasonAudits) assert.deepEqual((await auditRef.doc(id).get()).data(),stored);
+    assert.equal(calls,0);
     let last=await change('edit','program-1',{slotLabel:'11:00-12:00',plannedCount:1}); // time only
     last=await change('edit','program-1',{slotLabel:'11:00-12:00',plannedCount:4}); // count only
     last=await change('edit','program-1',{slotLabel:'10:00-11:00',plannedCount:2}); // both
@@ -46,7 +63,7 @@ test('details/addition and manual change notice: atomicity, current values, reco
     assert.equal((await a('program-2').get()).exists,false);
     last=await change('add','program-2',{slotLabel:'10:00-11:00',plannedCount:3});
     await change('cancel','program-1'); // dog+cat -> dog
-    last=await change('add','program-3',{slotLabel:'11:00-12:00',plannedCount:2});
+    last=await change('add','program-3',{slotLabel:'11:00-12:00',plannedCount:2,reason:'その他：内部管理専用の詳細理由'});
     assert.deepEqual((await pass.getPass({data:{participantId,publicId:person.publicId}})).programs.map(p=>p.programId).sort(),['program-2','program-3']);
     const request={...input,operationId:last.operationId};
     const preview=await notice.preview({data:request});
@@ -61,6 +78,7 @@ test('details/addition and manual change notice: atomicity, current values, reco
     assert.equal((await notice.send({identity,data:sendRequest})).status,'sending');
     done();await sending;release=null;
     assert.equal((await notice.send({identity,data:sendRequest})).status,'sent');assert.equal(calls,1);
+    assert.equal(sent[0].text.includes('内部管理専用の詳細理由'),false);assert.equal(sent[0].html.includes('内部管理専用の詳細理由'),false);
     assert.equal(sent[0].to,person.email);assert.equal(Buffer.from(sent[0].attachments[0].contentBase64,'base64').toString(),oldPass.qrPayload);
     // unknown remains unknown and cannot be automatically or manually resent.
     last=await change('edit','program-2',{slotLabel:'11:00-12:00',plannedCount:5});outcome='unknown';
