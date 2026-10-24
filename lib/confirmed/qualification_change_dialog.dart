@@ -245,7 +245,7 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
   }
 
   Future<void> submit() async {
-    if (busy || source == null) return;
+    if (busy || (source == null && pendingRequest == null)) return;
     if (pendingRequest == null) {
       if (reasonChoice == 'その他' && reason.text.trim().isEmpty) {
         setState(() => error = '「その他」の詳細理由を入力してください。');
@@ -330,6 +330,10 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
         },
       };
     }
+    await sendPending();
+  }
+
+  Future<void> sendPending() async {
     setState(() {
       busy = true;
       error = null;
@@ -345,6 +349,148 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
     } finally {
       if (mounted) setState(() => busy = false);
     }
+  }
+
+  Future<void> cancelQualifications(
+    List<Map> targets, {
+    bool all = false,
+  }) async {
+    if (busy ||
+        pendingRequest != null ||
+        targets.isEmpty ||
+        data?['busy'] == true) {
+      return;
+    }
+    setState(() {
+      busy = true;
+      confirming = true;
+    });
+    var choice = '本人からのキャンセル';
+    var detail = '';
+    var editingReason = false;
+    var closing = false;
+    String? reasonError;
+    String finalReason() => choice == 'その他' ? 'その他：${detail.trim()}' : choice;
+    final ids = targets.map((q) => q['programId']).toSet();
+    final remaining = active
+        .where((q) => !ids.contains(q['programId']))
+        .toList();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, update) => AlertDialog(
+          title: Text(all ? '参加をすべてキャンセルしますか？' : 'この参加資格を取り消しますか？'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('${data!['name']}'),
+                  Text('取消対象\n${describe(targets)}'),
+                  const SizedBox(height: 12),
+                  Text('変更前\n${describe(active)}'),
+                  Text(
+                    '変更後\n${remaining.isEmpty ? '有効な参加資格なし' : describe(remaining)}',
+                  ),
+                  const SizedBox(height: 12),
+                  Text('空く参加枠（プログラム・時間枠ごと）\n${describe(targets)}'),
+                  const Text('空いた枠の自動割当・通知メールの自動送信は行いません。'),
+                  if (remaining.isEmpty)
+                    const Text(
+                      'すべての資格が取消済みになるため、既存QR・Web参加証では受付できなくなります。ID・QR・URL自体は維持されます。',
+                    ),
+                  const SizedBox(height: 16),
+                  if (!editingReason)
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text('理由：$choice'),
+                        TextButton(
+                          onPressed: () => update(() => editingReason = true),
+                          child: const Text('理由を変更'),
+                        ),
+                      ],
+                    )
+                  else ...[
+                    DropdownButtonFormField<String>(
+                      initialValue: choice,
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: '変更理由（必須）'),
+                      items: [
+                        for (final r in reasonOptions)
+                          DropdownMenuItem(value: r, child: Text(r)),
+                      ],
+                      onChanged: (v) => update(() => choice = v!),
+                    ),
+                    if (choice == 'その他') ...[
+                      const SizedBox(height: 16),
+                      TextFormField(
+                        initialValue: detail,
+                        maxLength: 196,
+                        decoration: const InputDecoration(
+                          labelText: '詳細理由（必須）',
+                        ),
+                        onChanged: (v) => detail = v,
+                      ),
+                    ],
+                    if (reasonError != null)
+                      Text(
+                        reasonError!,
+                        style: const TextStyle(color: Colors.red),
+                      ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                if (closing) return;
+                closing = true;
+                Navigator.pop(c, false);
+              },
+              child: const Text('戻る'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if ((choice == 'その他' && detail.trim().isEmpty) ||
+                    finalReason().length > 200) {
+                  update(() => reasonError = '詳細理由を入力してください（保存する理由は200文字以内）。');
+                  return;
+                }
+                if (closing) return;
+                closing = true;
+                Navigator.pop(c, true);
+              },
+              child: const Text('確定'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    setState(() => confirming = false);
+    if (confirmed != true) {
+      setState(() => busy = false);
+      return;
+    }
+    final random = Random.secure();
+    pendingRequest = {
+      'eventId': widget.eventId,
+      'participantId': widget.participantId,
+      'operationId': List.generate(
+        24,
+        (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+      ).join(),
+      'fingerprint': data!['fingerprint'],
+      'action': all ? 'cancelAll' : 'cancel',
+      if (!all) 'programId': targets.single['programId'],
+      'reason': finalReason(),
+    };
+    await sendPending();
   }
 
   @override
@@ -366,8 +512,34 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
                   Text('申込ID：${data!['sourceReference'] ?? 'なし'}'),
                   const Text('現在の有効資格'),
                   for (final q in active)
-                    Text(
-                      '${name(q['programId'] as String?)} ${q['timeText'] ?? q['slotLabel']} ${q['plannedCount']}名${q['checkedIn'] == true ? '（受付済み・変更不可）' : ''}',
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${name(q['programId'] as String?)} ${q['timeText'] ?? q['slotLabel']} ${q['plannedCount']}名${q['checkedIn'] == true ? '（受付済み・変更不可）' : ''}',
+                          ),
+                        ),
+                        TextButton(
+                          key: ValueKey('cancel-${q['programId']}'),
+                          onPressed:
+                              frozen ||
+                                  data!['busy'] == true ||
+                                  q['checkedIn'] == true
+                              ? null
+                              : () => cancelQualifications([q]),
+                          child: const Text('取消'),
+                        ),
+                      ],
+                    ),
+                  if (active.length > 1)
+                    OutlinedButton(
+                      onPressed:
+                          frozen ||
+                              data!['busy'] == true ||
+                              active.any((q) => q['checkedIn'] == true)
+                          ? null
+                          : () => cancelQualifications(active, all: true),
+                      child: const Text('参加をすべてキャンセル'),
                     ),
                   if (data!['busy'] == true)
                     Text(
@@ -549,7 +721,10 @@ class _QualificationChangeDialogState extends State<QualificationChangeDialog> {
           ),
           TextButton(onPressed: busy ? null : load, child: const Text('再取得')),
           FilledButton(
-            onPressed: busy || source == null || data?['busy'] == true
+            onPressed:
+                busy ||
+                    (source == null && pendingRequest == null) ||
+                    data?['busy'] == true
                 ? null
                 : submit,
             child: Text(pendingRequest == null ? '確認へ' : '同じ操作を再試行'),

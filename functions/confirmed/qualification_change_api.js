@@ -20,7 +20,7 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
     const keys = ['eventId', 'participantId', ...(changing ? ['action', 'operationId', 'fingerprint', 'programId', 'targetProgramId', 'slotLabel', 'plannedCount', 'reason'] : [])];
     if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).some(k => !keys.includes(k)) || !/^[A-Za-z0-9_-]{1,128}$/.test(d.eventId || '') || !isValidParticipantId(d.participantId)) fail('invalid-input');
     if (changing && d.targetProgramId !== undefined && (typeof d.targetProgramId !== 'string' || !d.targetProgramId)) fail('invalid-input');
-    if (changing && (!/^[A-Za-z0-9_-]{20,100}$/.test(d.operationId || '') || !/^[a-f0-9]{64}$/.test(d.fingerprint || '') || typeof d.reason !== 'string' || !d.reason.trim() || d.reason.length > 200 || typeof d.programId !== 'string')) fail('invalid-input');
+    if (changing && (!/^[A-Za-z0-9_-]{20,100}$/.test(d.operationId || '') || !/^[a-f0-9]{64}$/.test(d.fingerprint || '') || typeof d.reason !== 'string' || !d.reason.trim() || d.reason.length > 200 || (d.action === 'cancelAll' ? d.programId !== undefined : typeof d.programId !== 'string'))) fail('invalid-input');
   }
   async function state(db, tx, d) {
     const e = db.collection('events').doc(d.eventId), p = db.collection('participants').doc(d.participantId);
@@ -134,13 +134,19 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
       if (s.busy) fail('operation-in-progress');
       if (s.fingerprint !== d.fingerprint) fail('state-changed');
       const action = d.action || (d.targetProgramId ? 'swap' : 'cancel');
-      if (!['add','edit','swap','cancel'].includes(action) || (action === 'swap' && !d.targetProgramId) || (action === 'cancel' && d.targetProgramId)) fail('invalid-input');
+      if (!['add','edit','swap','cancel','cancelAll'].includes(action) || (action === 'swap' && !d.targetProgramId) || (['cancel','cancelAll'].includes(action) && d.targetProgramId)) fail('invalid-input');
       if (['add','edit'].includes(action)) return updateDetails(tx, db, s, d, identity, op, requestHash, action);
-      const source = s.as.docs.find(a => a.data().programId === d.programId);
-      if (!source || source.data().entitlementStatus === 'revoked') fail('qualification-unavailable');
-      const a = source.data();
-      if (a.identityVersion && s.batches.get(a.importBatchId)?.status !== 'committed') fail('batch-not-committed');
-      if (a.checkedIn || a.checkedInAt || a.attendedCount != null) fail('already-checked-in');
+      // Both single and all cancellation use the same validation, transaction,
+      // operation replay and audit writes. Validate every target before any write.
+      const sources = action === 'cancelAll'
+        ? s.as.docs.filter(a => a.data().entitlementStatus !== 'revoked')
+        : s.as.docs.filter(a => a.data().programId === d.programId);
+      if (!sources.length || sources.some(a => a.data().entitlementStatus === 'revoked')) fail('qualification-unavailable');
+      for (const source of sources) {
+        const a = source.data();
+        if (a.identityVersion && s.batches.get(a.importBatchId)?.status !== 'committed') fail('batch-not-committed');
+        if (a.checkedIn || a.checkedInAt || a.attendedCount != null) fail('already-checked-in');
+      }
       const targetId = d.targetProgramId || null;
       let target = null, targetRef = null;
       if (targetId) {
@@ -157,14 +163,15 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
           qualificationSource: 'admin-change', qualificationChangeId: d.operationId, updatedAt: serverTimestamp()};
       } else if (d.plannedCount !== undefined || d.slotLabel !== undefined) fail('invalid-input');
       const before = s.as.docs.map(x => view(x.data()));
-      const cancelled = {...a, entitlementStatus: 'revoked'};
-      const after = before.filter(x => x.programId !== d.programId && (!target || x.programId !== targetId));
-      after.push(view(cancelled)); if (target) after.push(view(target));
-      tx.update(source.ref, {entitlementStatus: 'revoked', qualificationChangeId: d.operationId, updatedAt: serverTimestamp()});
+      const cancelledIds = new Set(sources.map(a => a.data().programId));
+      const after = before.filter(x => !cancelledIds.has(x.programId) && (!target || x.programId !== targetId));
+      after.push(...sources.map(a => view({...a.data(), entitlementStatus:'revoked'})));
+      if (target) after.push(view(target));
+      for (const source of sources) tx.update(source.ref, {entitlementStatus: 'revoked', qualificationChangeId: d.operationId, updatedAt: serverTimestamp()});
       if (target) tx.set(targetRef, target);
       const audit = {eventId: d.eventId, participantId: d.participantId, operationId: d.operationId, requestHash, reason: d.reason.trim(), changedBy: identity.uid, changedAt: serverTimestamp(), before, after};
       tx.create(op, audit);
-      tx.create(source.ref.collection('history').doc(`qualification-${d.operationId}`), audit);
+      for (const source of sources) tx.create(source.ref.collection('history').doc(`qualification-${d.operationId}`), audit);
       if (target) tx.create(targetRef.collection('history').doc(`qualification-${d.operationId}`), audit);
       // Existing import validation reads this document in its transaction.
       tx.update(s.e, {qualificationRevision: (s.event.qualificationRevision || 0) + 1});
