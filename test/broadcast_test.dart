@@ -80,7 +80,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField).at(0), '案内');
       await tester.enterText(find.byType(TextField).at(1), '本文');
+      await tester.ensureVisible(find.byType(CheckboxListTile).at(0));
       await tester.tap(find.byType(CheckboxListTile).at(0));
+      await tester.ensureVisible(find.byType(CheckboxListTile).at(1));
       await tester.tap(find.byType(CheckboxListTile).at(1));
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('社内へテスト送信'));
@@ -124,6 +126,93 @@ void main() {
   );
   for (final width in [390.0, 1280.0]) {
     testWidgets(
+      'initial recipients and import totals refresh without sending at $width',
+      (tester) async {
+        tester.view.physicalSize = Size(width, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        var reads = 0;
+        final service = TestMailService(
+          auth: FakeAuthClient(signedIn: true),
+          appCheck: FakeAppCheck(),
+          client: MockClient((req) async {
+            expect(req.url.path, '/getConfirmedBroadcastSettings');
+            reads++;
+            final recipients = List.generate(
+              reads == 1 ? 8 : 7,
+              (i) => {
+                'participantId': 'p$i',
+                'name': '架空$i',
+                'email': 'p$i@example.invalid',
+                'programs': [
+                  {
+                    'name': reads == 1 ? '犬' : '猫',
+                    'timeText': '10:00–11:00',
+                    'plannedCount': reads == 1 ? 2 : 3,
+                  },
+                ],
+              },
+            );
+            return http.Response(
+              jsonEncode({
+                'result': {
+                  'recipients': recipients,
+                  'batchCounts': [
+                    {'sequence': 1, 'count': 3},
+                    {'sequence': 3, 'count': recipients.length - 3},
+                  ],
+                  'history': [],
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: BroadcastPage(eventId: 'synthetic', service: service),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(reads, 1);
+        expect(find.text('現在の送信対象総数：8申込'), findsOneWidget);
+        expect(find.text('第1回：3申込'), findsOneWidget);
+        expect(find.text('第3回：5申込'), findsOneWidget);
+        expect(find.text('架空0\np0@example.invalid'), findsOneWidget);
+        expect(find.text('犬 10:00–11:00 2名'), findsWidgets);
+        for (final field in tester.widgetList<TextField>(
+          find.byType(TextField),
+        )) {
+          expect(field.controller!.text, isEmpty);
+        }
+        await tester.drag(
+          find.byKey(const Key('broadcastRecipients')),
+          const Offset(0, -600),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('架空7\np7@example.invalid'), findsOneWidget);
+        await tester.enterText(find.byType(TextField).first, '保持する件名');
+        await tester.ensureVisible(find.text('送信対象を更新'));
+        await tester.tap(find.text('送信対象を更新'));
+        await tester.pumpAndSettle();
+        expect(reads, 2);
+        expect(find.text('現在の送信対象総数：7申込'), findsOneWidget);
+        expect(find.text('第3回：4申込'), findsOneWidget);
+        expect(find.text('架空7\np7@example.invalid'), findsNothing);
+        expect(find.text('猫 10:00–11:00 3名'), findsWidgets);
+        expect(
+          tester
+              .widget<TextField>(find.byType(TextField).first)
+              .controller!
+              .text,
+          '保持する件名',
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+    testWidgets(
       'broadcast requires preview, all recipients and final approval at width $width',
       (tester) async {
         tester.view.physicalSize = Size(width, 900);
@@ -152,7 +241,10 @@ void main() {
             }
             final result = switch (req.url.path) {
               '/getConfirmedBroadcastSettings' => {
-                'recipients': [recipient],
+                'recipients': [
+                  recipient,
+                  {...recipient, 'participantId': 'removed'},
+                ],
                 'history': [],
               },
               '/previewConfirmedBroadcastMail' => {
@@ -206,6 +298,10 @@ void main() {
         await tester.pumpAndSettle();
         expect(calls.any((c) => c.contains('startConfirmed')), false);
         expect(find.text('送信対象 1申込'), findsOneWidget);
+        expect(
+          find.text('初期表示から対象人数が変わりました。以下の最新の宛先一覧・人数をご確認ください。'),
+          findsOneWidget,
+        );
         expect(find.text('件名：案内\n本文：本文'), findsOneWidget);
         expect(find.text('架空参加者 / internal@example.invalid'), findsOneWidget);
         await tester.tap(find.byType(BackButton));

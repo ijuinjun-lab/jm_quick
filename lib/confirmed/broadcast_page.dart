@@ -25,6 +25,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
       .join(' / ');
   late final service = widget.service ?? TestMailService();
   final subject = TextEditingController(), body = TextEditingController();
+  final recipientsScroll = ScrollController();
   Map<String, dynamic>? settings, preview, detail;
   String? person, error, selectedJob;
   bool busy = false,
@@ -58,6 +59,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
   void dispose() {
     subject.dispose();
     body.dispose();
+    recipientsScroll.dispose();
     super.dispose();
   }
 
@@ -91,6 +93,66 @@ class _BroadcastPageState extends State<BroadcastPage> {
     preview = null;
     reviewed = false;
   });
+
+  Widget recipientPanel() {
+    final recipients = settings?['recipients'] as List? ?? [];
+    final batches = settings?['batchCounts'] as List?;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('一斉メール送信対象', style: Theme.of(context).textTheme.titleLarge),
+        if (settings == null)
+          const Text('送信対象を取得しています。')
+        else ...[
+          Text('現在の送信対象総数：${recipients.length}申込'),
+          const Text('取込回別件数（参加者の初回取込を基準に集計）'),
+          if (batches == null)
+            const Text('取込回情報を取得できません。対象総数・宛先一覧をご確認ください。')
+          else
+            for (final batch in batches)
+              Text(
+                '${batch['sequence'] == null ? '取込回不明' : '第${batch['sequence']}回'}：${batch['count']}申込',
+              ),
+          if (recipients.isEmpty)
+            const Text('現在の送信対象者はいません。')
+          else
+            SizedBox(
+              height: 280,
+              child: Scrollbar(
+                controller: recipientsScroll,
+                thumbVisibility: true,
+                child: ListView.builder(
+                  key: const Key('broadcastRecipients'),
+                  controller: recipientsScroll,
+                  itemCount: recipients.length,
+                  itemBuilder: (context, index) {
+                    final r = recipients[index];
+                    return ListTile(
+                      title: Text('${r['name']}\n${r['email']}'),
+                      subtitle: Text(
+                        (r['programs'] as List? ?? [])
+                            .map(
+                              (p) =>
+                                  '${p['name']} ${p['timeText'] ?? ''} ${p['plannedCount']}名',
+                            )
+                            .join('\n'),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+        ],
+        OutlinedButton(
+          onPressed: busy ? null : () => run(load),
+          child: const Text('送信対象を更新'),
+        ),
+        const Text('資格変更・キャンセル後は「送信対象を更新」で再取得してください。正式送信前にも最新の対象を確認します。'),
+        const Divider(),
+      ],
+    );
+  }
+
   Future<bool> confirm(String title, String text) async {
     setState(() => confirming = true);
     try {
@@ -232,6 +294,8 @@ class _BroadcastPageState extends State<BroadcastPage> {
               if (error != null) SelectableText(error!),
               if (busy) const LinearProgressIndicator(),
               if (preview == null || attempted) ...[
+                recipientPanel(),
+                Text('メール作成', style: Theme.of(context).textTheme.titleLarge),
                 TextField(
                   controller: subject,
                   enabled: !busy && !attempted,
@@ -267,6 +331,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
                         },
                 ),
                 if (settings != null) ...[
+                  Text('送信操作', style: Theme.of(context).textTheme.titleLarge),
                   OutlinedButton(
                     onPressed: busy || attempted || person == null
                         ? null
@@ -309,6 +374,9 @@ class _BroadcastPageState extends State<BroadcastPage> {
               ],
               if (preview != null) ...[
                 Text('送信対象 ${preview!['targetCount']}申込'),
+                if (preview!['targetCount'] !=
+                    (settings?['recipients'] as List?)?.length)
+                  const Text('初期表示から対象人数が変わりました。以下の最新の宛先一覧・人数をご確認ください。'),
                 SelectableText('件名：${subject.text}\n本文：${body.text}'),
                 for (final r in preview!['recipients'] as List)
                   ListTile(

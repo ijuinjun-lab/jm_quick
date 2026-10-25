@@ -19,6 +19,22 @@ function createBroadcastApi({getDb, serverTimestamp, generateQrPng, getAppBaseUr
   async function settings({data}) {
     parse(data); const db = getDb(); const {event} = await loadConfirmedEvent(db, data.eventId);
     const targets = await collectBroadcastRecipients(db, data.eventId, event);
+    // Display metadata only: count the exact collected recipients by their original import.
+    // Do not add fields to recipients or change the delivery fingerprint.
+    const [participants, batches] = await Promise.all([
+      db.collection('participants').where('eventId', '==', data.eventId).get(),
+      db.collection('importBatches').where('eventId', '==', data.eventId).get(),
+    ]);
+    const originalBatch = new Map(participants.docs.map((d) => [d.id, d.data().importBatchId]));
+    const sequences = new Map(batches.docs.map((d) => [d.id, d.data().sequence]));
+    const counts = new Map();
+    for (const recipient of targets.recipients) {
+      const sequence = sequences.get(originalBatch.get(recipient.participantId));
+      const key = Number.isInteger(sequence) && sequence > 0 ? sequence : null;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const batchCounts = [...counts].map(([sequence, count]) => ({sequence, count}))
+      .sort((a, b) => (a.sequence ?? Infinity) - (b.sequence ?? Infinity));
     const jobs = await db.collection('sendJobs').where('eventId', '==', data.eventId).get();
     const history = jobs.docs.filter((d) => ['broadcast', 'reminder'].includes(d.data().type)).map((d) => {
       const j = d.data();
@@ -26,7 +42,7 @@ function createBroadcastApi({getDb, serverTimestamp, generateQrPng, getAppBaseUr
         createdBy: j.createdBy, createdAt: iso(j.createdAt), startedAt: iso(j.broadcastStartedAt || j.dispatchRequestedAt),
         targetCount: j.targetCount, sentCount: j.sentCount, failedCount: j.failedCount, unknownCount: j.unknownCount, status: j.status};
     }).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-    return {...targets, history};
+    return {...targets, batchCounts, history};
   }
   async function prepare(db, data) {
     const {event} = await loadConfirmedEvent(db, data.eventId);

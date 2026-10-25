@@ -62,6 +62,12 @@ test('broadcast: real imports, unlimited jobs, preservation, safety and server d
     const before = await protectedData();
     const initial = await api.settings({data: {eventId}});
     assert.equal(initial.targets.length, 7, 'unsent winner applications are broadcast targets');
+    assert.deepEqual(initial.batchCounts, people.map((_, i) => ({sequence: i + 1, count: 1})));
+    assert.deepEqual(await protectedData(), before, 'opening settings does not write participant data');
+    assert.equal((await db.collection('sendJobs').get()).size, 1, 'opening settings creates no job');
+    assert.equal((await db.collection('mailDeliveries').get()).size, 0);
+    const canonical = await require('../confirmed/broadcast_message').collectBroadcastRecipients(db, eventId, (await db.doc(`events/${eventId}`).get()).data());
+    for (const key of Object.keys(canonical)) assert.deepEqual(initial[key], canonical[key]);
     for (const p of people) {
       const v = await preview(p.pid, 1); assert.equal(v.targetCount, 7); assert.ok(v.html.includes('&lt;script&gt;'));
       const original = await require('../confirmed/winner_mail_api').createWinnerMailApi(deps).preview({data: {eventId, participantId: p.pid}});
@@ -108,11 +114,19 @@ test('broadcast: real imports, unlimited jobs, preservation, safety and server d
     const oldQR = (await preview(people[3].pid, 4)).qrPayload;
     const addition = await importPerson('dog', 3, true); assert.equal(addition.pid, people[3].pid);
     const newcomer = await importPerson('cat', 7, true);
+    const updatedSettings = await api.settings({data: {eventId}});
+    assert.equal(updatedSettings.batchCounts.reduce((sum, b) => sum + b.count, 0), 8);
+    assert.equal(updatedSettings.batchCounts.find(b => b.sequence === 4).count, 1, 'added qualification stays with original import');
+    assert.ok(!updatedSettings.batchCounts.some(b => b.sequence === 8), 'qualification addition is not a second recipient');
     const p4 = await preview(people[3].pid, 4); assert.equal(p4.qrPayload, oldQR); assert.equal(p4.targetCount, 8);
     // Cancel the newcomer's sole qualification: no invitation, no automatic re-registration.
     const attendance = (await db.collection('programAttendances').where('participantId','==',newcomer.pid).get()).docs[0];
     await attendance.ref.update({entitlementStatus: 'revoked'});
     await assert.rejects(start(p4, 4), e => e.details.code === 'targets-changed');
+    const cancelledSettings = await api.settings({data: {eventId}});
+    assert.equal(cancelledSettings.recipients.length, 7);
+    assert.equal(cancelledSettings.batchCounts.reduce((sum, b) => sum + b.count, 0), 7);
+    assert.ok(!cancelledSettings.recipients.some(r => r.participantId === newcomer.pid));
     const p5 = await preview(people[3].pid, 5); assert.equal(p5.targetCount, 7);
     const j5 = await start(p5, 5);
     await db.doc(`participants/${people[0].pid}`).update({email: 'changed@example.invalid'});
