@@ -177,22 +177,46 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(reads, 1);
+        expect(find.byType(DataTable), findsOneWidget);
+        for (final heading in ['氏名', 'メールアドレス', '参加プログラム', '参加時間', '参加人数']) {
+          expect(find.text(heading), findsOneWidget);
+        }
+        expect(
+          tester.getSize(find.byKey(const Key('broadcastRecipients'))).height,
+          lessThanOrEqualTo(320),
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('broadcastRecipients')),
+            matching: find.text('送信対象を更新'),
+          ),
+          findsNothing,
+        );
         expect(find.text('現在の送信対象総数：8申込'), findsOneWidget);
         expect(find.text('第1回：3申込'), findsOneWidget);
         expect(find.text('第3回：5申込'), findsOneWidget);
-        expect(find.text('架空0\np0@example.invalid'), findsOneWidget);
-        expect(find.text('犬 10:00–11:00 2名'), findsWidgets);
+        expect(find.text('p0@example.invalid'), findsOneWidget);
+        expect(find.text('2名'), findsWidgets);
         for (final field in tester.widgetList<TextField>(
           find.byType(TextField),
         )) {
           expect(field.controller!.text, isEmpty);
         }
-        await tester.drag(
-          find.byKey(const Key('broadcastRecipients')),
+        await tester.dragFrom(
+          tester.getTopLeft(find.byKey(const Key('broadcastRecipients'))) +
+              const Offset(100, 160),
           const Offset(0, -600),
         );
         await tester.pumpAndSettle();
-        expect(find.text('架空7\np7@example.invalid'), findsOneWidget);
+        expect(find.text('p7@example.invalid'), findsOneWidget);
+        if (width < 900) {
+          await tester.drag(
+            find.byKey(const Key('broadcastRecipientsHorizontal')),
+            const Offset(-600, 0),
+          );
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+        }
         await tester.enterText(find.byType(TextField).first, '保持する件名');
         await tester.ensureVisible(find.text('送信対象を更新'));
         await tester.tap(find.text('送信対象を更新'));
@@ -200,8 +224,8 @@ void main() {
         expect(reads, 2);
         expect(find.text('現在の送信対象総数：7申込'), findsOneWidget);
         expect(find.text('第3回：4申込'), findsOneWidget);
-        expect(find.text('架空7\np7@example.invalid'), findsNothing);
-        expect(find.text('猫 10:00–11:00 3名'), findsWidgets);
+        expect(find.text('p7@example.invalid'), findsNothing);
+        expect(find.text('3名'), findsWidgets);
         expect(
           tester
               .widget<TextField>(find.byType(TextField).first)

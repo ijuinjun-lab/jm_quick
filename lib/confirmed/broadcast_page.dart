@@ -26,6 +26,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
   late final service = widget.service ?? TestMailService();
   final subject = TextEditingController(), body = TextEditingController();
   final recipientsScroll = ScrollController();
+  final recipientsHorizontalScroll = ScrollController();
   Map<String, dynamic>? settings, preview, detail;
   String? person, error, selectedJob;
   bool busy = false,
@@ -60,6 +61,7 @@ class _BroadcastPageState extends State<BroadcastPage> {
     subject.dispose();
     body.dispose();
     recipientsScroll.dispose();
+    recipientsHorizontalScroll.dispose();
     super.dispose();
   }
 
@@ -116,39 +118,154 @@ class _BroadcastPageState extends State<BroadcastPage> {
           if (recipients.isEmpty)
             const Text('現在の送信対象者はいません。')
           else
-            SizedBox(
-              height: 280,
-              child: Scrollbar(
-                controller: recipientsScroll,
-                thumbVisibility: true,
-                child: ListView.builder(
-                  key: const Key('broadcastRecipients'),
-                  controller: recipientsScroll,
-                  itemCount: recipients.length,
-                  itemBuilder: (context, index) {
-                    final r = recipients[index];
-                    return ListTile(
-                      title: Text('${r['name']}\n${r['email']}'),
-                      subtitle: Text(
-                        (r['programs'] as List? ?? [])
-                            .map(
-                              (p) =>
-                                  '${p['name']} ${p['timeText'] ?? ''} ${p['plannedCount']}名',
-                            )
-                            .join('\n'),
+            LayoutBuilder(
+              builder: (context, constraints) => Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (constraints.maxWidth < 900) const Text('表は左右にスクロールできます。'),
+                  Container(
+                    height: 320,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Theme.of(context).dividerColor),
+                    ),
+                    child: Scrollbar(
+                      controller: recipientsHorizontalScroll,
+                      thumbVisibility: true,
+                      notificationPredicate: (notification) =>
+                          notification.metrics.axis == Axis.horizontal,
+                      child: SingleChildScrollView(
+                        key: const Key('broadcastRecipientsHorizontal'),
+                        controller: recipientsHorizontalScroll,
+                        scrollDirection: Axis.horizontal,
+                        child: SizedBox(
+                          width: 900,
+                          child: Scrollbar(
+                            controller: recipientsScroll,
+                            thumbVisibility: true,
+                            child: SingleChildScrollView(
+                              key: const Key('broadcastRecipients'),
+                              controller: recipientsScroll,
+                              child: DataTable(
+                                horizontalMargin: 12,
+                                columnSpacing: 16,
+                                dataRowMinHeight: 48,
+                                dataRowMaxHeight: double.infinity,
+                                headingRowColor: WidgetStatePropertyAll(
+                                  Theme.of(
+                                    context,
+                                  ).colorScheme.surfaceContainerHighest,
+                                ),
+                                columns: const [
+                                  DataColumn(
+                                    label: SizedBox(
+                                      width: 120,
+                                      child: Text('氏名'),
+                                    ),
+                                  ),
+                                  DataColumn(
+                                    label: SizedBox(
+                                      width: 250,
+                                      child: Text('メールアドレス'),
+                                    ),
+                                  ),
+                                  DataColumn(
+                                    label: SizedBox(
+                                      width: 170,
+                                      child: Text('参加プログラム'),
+                                    ),
+                                  ),
+                                  DataColumn(
+                                    label: SizedBox(
+                                      width: 140,
+                                      child: Text('参加時間'),
+                                    ),
+                                  ),
+                                  DataColumn(
+                                    label: SizedBox(
+                                      width: 70,
+                                      child: Text('参加人数'),
+                                    ),
+                                  ),
+                                ],
+                                rows: [
+                                  for (final r in recipients)
+                                    for (final entry
+                                        in ((r['programs'] as List? ?? [])
+                                                    .isEmpty
+                                                ? <dynamic>[{}]
+                                                : r['programs'] as List)
+                                            .asMap()
+                                            .entries)
+                                      DataRow(
+                                        cells: [
+                                          DataCell(
+                                            SizedBox(
+                                              width: 120,
+                                              child: Text(
+                                                entry.key == 0
+                                                    ? '${r['name']}'
+                                                    : '',
+                                              ),
+                                            ),
+                                          ),
+                                          DataCell(
+                                            SizedBox(
+                                              width: 250,
+                                              child: Text(
+                                                entry.key == 0
+                                                    ? '${r['email']}'
+                                                    : '',
+                                              ),
+                                            ),
+                                          ),
+                                          DataCell(
+                                            SizedBox(
+                                              width: 170,
+                                              child: Text(
+                                                '${entry.value['name'] ?? ''}',
+                                              ),
+                                            ),
+                                          ),
+                                          DataCell(
+                                            SizedBox(
+                                              width: 140,
+                                              child: Text(
+                                                '${entry.value['timeText'] ?? ''}',
+                                              ),
+                                            ),
+                                          ),
+                                          DataCell(
+                                            SizedBox(
+                                              width: 70,
+                                              child: Text(
+                                                entry.value['plannedCount'] ==
+                                                        null
+                                                    ? ''
+                                                    : '${entry.value['plannedCount']}名',
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                    );
-                  },
-                ),
+                    ),
+                  ),
+                ],
               ),
             ),
         ],
+        const SizedBox(height: 12),
         OutlinedButton(
           onPressed: busy ? null : () => run(load),
           child: const Text('送信対象を更新'),
         ),
         const Text('資格変更・キャンセル後は「送信対象を更新」で再取得してください。正式送信前にも最新の対象を確認します。'),
-        const Divider(),
+        const Divider(height: 40, thickness: 2),
       ],
     );
   }
