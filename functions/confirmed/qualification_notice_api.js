@@ -112,7 +112,7 @@ function createQualificationNoticeApi(deps) {
       if (!dispatch) result = {outcome:'unknown'};
       else {
         dispatchStarted = true;
-        result = await transport.send({...c.message,attachments:c.hasActive ? [{filename:'reception-qr.png',contentType:'image/png',contentBase64:Buffer.isBuffer(png) ? png.toString('base64') : png,contentId:QR_CONTENT_ID,disposition:'inline'}] : [],metadata:{app:'jm-quick',type:'qualification-change',jobId:ref.id}});
+        result = await transport.send({...c.message,...(c.hasActive ? {attachments:[{filename:'reception-qr.png',contentType:'image/png',contentBase64:Buffer.isBuffer(png) ? png.toString('base64') : png,contentId:QR_CONTENT_ID,disposition:'inline'}]} : {}),metadata:{app:'jm-quick',type:'qualification-change',jobId:ref.id}});
       }
     } catch (_) { result = {outcome:dispatchStarted ? 'unknown' : 'failed'}; }
     finally { clearInterval(timer); }

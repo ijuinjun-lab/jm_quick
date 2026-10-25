@@ -70,7 +70,8 @@ test('single and atomic all cancellation: real transactions, slots, notice, immu
       assert.equal(preview.qrPayload,f.oldPass.qrPayload);assert.equal(preview.webPassUrl,f.oldPass.webPassUrl);assert.equal(preview.text.includes(d.reason),false);
       await Promise.all([notice.send({identity,data:{...r,fingerprint:preview.fingerprint}}),notice.send({identity,data:{...r,fingerprint:preview.fingerprint}})]);
       assert.equal(sends,sentBefore+1);assert.equal(messages.at(-1).to,f.person.email);
-      assert.equal(messages.at(-1).attachments.length,target ? 1 : 0);
+      assert.equal(Object.hasOwn(messages.at(-1), 'attachments'), Boolean(target));
+      if (target) assert.equal(messages.at(-1).attachments.length, 1);
       if (!target) {
         assert.match(preview.text,/参加資格はすべて取り消されました/);
         assert.equal(preview.text.includes(preview.webPassUrl),false);
