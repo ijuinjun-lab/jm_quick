@@ -64,7 +64,6 @@ void main() {
                 },
             ];
             result = {
-              'to': '$id@example.invalid',
               'subject': '案内',
               'html':
                   '<html><head></head><body style="margin:0">$id 最新 $latestCount名</body></html>',
@@ -74,7 +73,13 @@ void main() {
               'confirmation': 'fresh',
               'recipients': [
                 for (final p in people)
-                  {...p, if (p['participantId'] == id) 'programs': programs},
+                  {
+                    ...p,
+                    if (p['participantId'] == id) ...{
+                      'programs': programs,
+                      'email': 'latest-$id@example.invalid',
+                    },
+                  },
               ],
             };
           } else {
@@ -105,7 +110,7 @@ void main() {
       await tester.ensureVisible(button);
       await tester.tap(button);
       await tester.pumpAndSettle();
-      expect(find.text('宛先：dog@example.invalid'), findsOneWidget);
+      expect(find.text('宛先：latest-dog@example.invalid'), findsOneWidget);
       for (final id in ['cat', 'talk', 'mixed']) {
         await tester.ensureVisible(
           find.byType(DropdownButtonFormField<String>),
@@ -114,11 +119,16 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('$id / $id@example.invalid').last);
         await tester.pumpAndSettle();
-        expect(find.text('宛先：$id@example.invalid'), findsOneWidget);
+        expect(find.text('宛先：latest-$id@example.invalid'), findsOneWidget);
         final html = tester.widget<MailHtmlPreview>(
           find.byType(MailHtmlPreview),
         );
-        expect(html.html, contains('$id 最新 3名'));
+        expect(
+          html.html,
+          '<html><head></head><body style="margin:0">$id 最新 3名</body></html>',
+        );
+        expect(find.textContaining('null'), findsNothing);
+        expect(find.textContaining('undefined'), findsNothing);
         expect(find.text('最終確認へ'), findsNothing);
       }
       expect(find.text('犬 14:00 3名'), findsOneWidget);

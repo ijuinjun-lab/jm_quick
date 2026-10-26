@@ -680,6 +680,18 @@ class _BroadcastPreviewDialogState extends State<_BroadcastPreviewDialog> {
     }
   }
 
+  String get recipientEmail {
+    // The broadcast preview returns recipients, not a top-level `to` field.
+    // Use the fresh response rather than the list loaded when opening the page.
+    for (final recipient in result?['recipients'] as List? ?? []) {
+      if (recipient['participantId'] == selected) {
+        final email = recipient['email'];
+        if (email is String && email.trim().isNotEmpty) return email;
+      }
+    }
+    return 'メールアドレスを取得できません';
+  }
+
   @override
   Widget build(BuildContext context) => AlertDialog(
     insetPadding: const EdgeInsets.all(16),
@@ -720,7 +732,7 @@ class _BroadcastPreviewDialogState extends State<_BroadcastPreviewDialog> {
             ] else if (result == null)
               const LinearProgressIndicator()
             else ...[
-              SelectableText('宛先：${result!['to']}'),
+              SelectableText('宛先：$recipientEmail'),
               SelectableText('件名：${result!['subject']}'),
               for (final r in result!['recipients'] as List)
                 if (r['participantId'] == selected)
