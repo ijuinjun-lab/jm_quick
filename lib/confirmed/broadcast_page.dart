@@ -450,6 +450,26 @@ class _BroadcastPageState extends State<BroadcastPage> {
                 if (settings != null) ...[
                   Text('送信操作', style: Theme.of(context).textTheme.titleLarge),
                   OutlinedButton(
+                    onPressed:
+                        busy ||
+                            attempted ||
+                            person == null ||
+                            subject.text.trim().isEmpty ||
+                            body.text.trim().isEmpty
+                        ? null
+                        : () => showDialog<void>(
+                            context: context,
+                            builder: (_) => _BroadcastPreviewDialog(
+                              recipients: settings!['recipients'] as List,
+                              render: (id) => call(
+                                'previewConfirmedBroadcastMail',
+                                {'draft': draft, 'participantId': id},
+                              ),
+                            ),
+                          ),
+                    child: const Text('メール内容をプレビュー'),
+                  ),
+                  OutlinedButton(
                     onPressed: busy || attempted || person == null
                         ? null
                         : () => Navigator.push(
@@ -619,5 +639,112 @@ class _BroadcastPageState extends State<BroadcastPage> {
         ),
       ),
     ),
+  );
+}
+
+/// Preview selection and responses never become delivery confirmation state.
+class _BroadcastPreviewDialog extends StatefulWidget {
+  const _BroadcastPreviewDialog({
+    required this.recipients,
+    required this.render,
+  });
+  final List recipients;
+  final Future<Map<String, dynamic>> Function(String) render;
+  @override
+  State<_BroadcastPreviewDialog> createState() =>
+      _BroadcastPreviewDialogState();
+}
+
+class _BroadcastPreviewDialogState extends State<_BroadcastPreviewDialog> {
+  late String selected = widget.recipients.first['participantId'] as String;
+  Map<String, dynamic>? result;
+  String? error;
+  int request = 0;
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    final current = ++request;
+    setState(() {
+      result = null;
+      error = null;
+    });
+    try {
+      final value = await widget.render(selected);
+      if (mounted && current == request) setState(() => result = value);
+    } catch (e) {
+      if (mounted && current == request) setState(() => error = '$e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    insetPadding: const EdgeInsets.all(16),
+    title: const Text('メール内容をプレビュー'),
+    content: SizedBox(
+      width: 900,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('表示のみです。メールは送信されず、正式な送信対象も変わりません。'),
+            DropdownButtonFormField<String>(
+              initialValue: selected,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'プレビュー対象者'),
+              items: [
+                for (final r in widget.recipients)
+                  DropdownMenuItem(
+                    value: r['participantId'] as String,
+                    child: Text(
+                      '${r['name']} / ${r['email']}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: (id) {
+                if (id != null) {
+                  selected = id;
+                  load();
+                }
+              },
+            ),
+            const SizedBox(height: 12),
+            if (error != null) ...[
+              SelectableText(error!),
+              TextButton(onPressed: load, child: const Text('再取得')),
+            ] else if (result == null)
+              const LinearProgressIndicator()
+            else ...[
+              SelectableText('宛先：${result!['to']}'),
+              SelectableText('件名：${result!['subject']}'),
+              for (final r in result!['recipients'] as List)
+                if (r['participantId'] == selected)
+                  for (final p in r['programs'] as List)
+                    Text(
+                      '${p['name']} ${p['timeText'] ?? ''} ${p['plannedCount']}名',
+                    ),
+              const SizedBox(height: 12),
+              MailHtmlPreview(
+                html: result!['html'] as String,
+                qrPngBase64: result!['qrPngBase64'] as String,
+                allowWithoutQr: true,
+                height: 520,
+              ),
+            ],
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('閉じる'),
+      ),
+    ],
   );
 }

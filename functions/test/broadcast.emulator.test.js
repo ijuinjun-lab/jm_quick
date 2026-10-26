@@ -79,6 +79,26 @@ test('broadcast: real imports, unlimited jobs, preservation, safety and server d
       }
       assert.equal(v.viewModel.programs.length, v.recipients.find(r => r.participantId === p.pid).programs.length);
     }
+    // Re-read changed per-program counts/times and omit a partially cancelled qualification.
+    const mixed = people[6].pid;
+    const mixedDocs = (await db.collection('programAttendances').where('participantId', '==', mixed).get()).docs;
+    for (const [i, d] of mixedDocs.entries()) await d.ref.update({plannedCount: i + 3, slotLabel: '15:10-15:50'});
+    const changed = await preview(mixed, 1);
+    for (const p of changed.recipients.find(r => r.participantId === mixed).programs) {
+      assert.ok(changed.html.includes(`${p.plannedCount}名`));
+      assert.ok(changed.html.includes(p.timeText));
+      assert.equal(p.timeText, '15:10-15:50');
+    }
+    assert.deepEqual(changed.viewModel.programs.map(p => p.plannedCount).sort(), [3, 4, 5]);
+    await mixedDocs[0].ref.update({entitlementStatus: 'revoked'});
+    const partial = await preview(mixed, 1);
+    assert.equal(partial.viewModel.programs.length, 2);
+    assert.ok(!partial.viewModel.programs.some(p => p.programId === mixedDocs[0].data().programId));
+    for (const d of mixedDocs) await d.ref.set(d.data());
+    assert.deepEqual(await protectedData(), before, 'participant previews do not write protected data');
+    assert.equal((await db.collection('sendJobs').get()).size, 1, 'previews create no jobs');
+    assert.deepEqual(await get(`sendJobs/reminder-${eventId}`), legacy, 'previews preserve existing history');
+    assert.equal((await db.collection('mailDeliveries').get()).size, 0, 'previews create no deliveries');
     const p1 = await preview(people[0].pid, 1);
     await assert.rejects(api.start({identity, data: {eventId, draft: draft(1), operationId: 'broadcast-operation-1', confirmation: p1.confirmation}}));
     const jobs = await Promise.all(Array.from({length: 4}, () => start(p1, 1)));
