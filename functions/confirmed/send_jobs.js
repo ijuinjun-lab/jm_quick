@@ -1,3 +1,4 @@
+const {evidenceFor} = require('./delivery_confirmation_render');
 // 当選メールの送信ジョブ(batch単位)のエンジン。Firestoreへ書く場所。dbは呼び出し側から渡される(Firebaseは読み込まない)。
 // 実メールは送らない: 送信は注入されたtransport(テストでは偽物)へ渡すだけ。
 //
@@ -260,7 +261,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
 
   // 結果の書込み。claimIdが一致する場合だけ(他のworkerの結果を上書きしない)。
   // 「lease期限切れでunknownにされた後に、同じworkerの結果が遅れて届いた」場合は、その結果で確定できる。
-  async function finishItem({db, jobId, participantId, claimId, outcome, messageId, errorCode}) {
+  async function finishItem({db, jobId, participantId, claimId, outcome, messageId, errorCode, confirmationEvidence}) {
     const dRef = await deliveryForJob(db, jobId, participantId);
     const iRef = itemRef(db, jobId, participantId);
     return db.runTransaction(async (tx) => {
@@ -276,7 +277,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       };
       tx.update(dRef, update);
       const {claimId: _claimId, ...itemUpdate} = update;
-      tx.update(iRef, itemUpdate);
+      tx.update(iRef, {...itemUpdate, ...(confirmationEvidence ? {confirmationEvidence} : {})});
       return {applied: true};
     });
   }
@@ -290,6 +291,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       return {outcome: DELIVERY.FAILED, reason: errorCode};
     };
     let message;
+    let confirmationEvidence;
     try {
       // 生成(送信前)。ここで失敗しても、まだdispatchしていないので確実に未送信 = failed。
       const participantSnap = await db.collection("participants").doc(participantId).get();
@@ -301,6 +303,8 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       const kind = kindFor(typeOfJobId(jobId));
       const rendered = await kind.composeMail({db, snapshot: job.snapshot, participantId, participant, appBaseUrl: getAppBaseUrl(), generateQrPng});
       if (!rendered.ok) return await fail(`render-${rendered.problems[0] || "error"}`);
+      // Optional diagnostic metadata must never prevent the participant delivery.
+      try { confirmationEvidence = typeOfJobId(jobId) === TYPES.REMINDER ? null : evidenceFor(rendered); } catch (_) { confirmationEvidence = null; }
       message = kind.buildMessage({rendered, to, snapshot: job.snapshot, participantId, jobId});
     } catch (error) {
       return fail("render-error");
@@ -315,7 +319,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       result = {outcome: DELIVERY.UNKNOWN, errorCode: "transport-exception"};
     }
     const outcome = [DELIVERY.SENT, DELIVERY.FAILED, DELIVERY.UNKNOWN].includes(result && result.outcome) ? result.outcome : DELIVERY.UNKNOWN;
-    await finishItem({db, jobId, participantId, claimId, outcome, messageId: result && result.messageId, errorCode: result && result.errorCode});
+    await finishItem({db, jobId, participantId, claimId, outcome, messageId: result && result.messageId, errorCode: result && result.errorCode, confirmationEvidence});
     return {outcome};
   }
 

@@ -1,3 +1,4 @@
+import 'delivery_confirmation_page.dart';
 import 'package:flutter/material.dart';
 
 import '../widgets/common.dart';
@@ -38,6 +39,7 @@ const List<String> eventConsoleFeatureLabels = [
   '当選メール設定',
   '当選メール送信',
   '一斉メール送信',
+  '配信確認先',
   'スタッフ管理',
   '受付',
   '受付状況一覧',
@@ -500,6 +502,11 @@ class _EventConsoleState extends State<_EventConsole> {
                     ),
                   ),
                 ),
+                '配信確認先': () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => DeliveryConfirmationPage(eventId: id),
+                  ),
+                ),
                 '一斉メール送信': () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => BroadcastPage(
@@ -558,6 +565,7 @@ class _EventConsoleState extends State<_EventConsole> {
                 '参加者ファイル取込': 'Excel／CSVの参加者ファイルを検証して取り込みます(メールは送信されません)',
                 '当選メール送信': '取込回ごとの送信・進行状況・失敗分の再送',
                 '当選メール設定': '件名・本文の設定とプレビュー',
+                '配信確認先': '確認先の設定・確認メールの配送履歴',
                 '一斉メール送信': '件名・本文・宛先確認・送信履歴',
                 'スタッフ管理': 'このイベントの受付スタッフを追加・解除する',
                 '受付': '受付スタッフ用QRを表示する(受付スタッフがスマホで読み取って受付する)',

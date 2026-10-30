@@ -47,6 +47,10 @@ const exportsInIndex = [...index.matchAll(/^exports\.(\w+)\s*=\s*(.*)$/gm)].map(
 test("index.jsのexportは、Scheduler・公開入口(固定一覧)・confirmedCallable(アクセスレベル, ...) のいずれかだけ", () => {
   assert.ok(exportsInIndex.length >= 46);
   for (const {name, rhs} of exportsInIndex) {
+    if (name === "notifyDeliveryConfirmationCompleted") {
+      assert.match(rhs, /^onDocumentUpdated\(/);
+      continue;
+    }
     if (INTERNAL_SCHEDULED_EXPORTS.includes(name)) {
       assert.match(rhs, /^onSchedule\(/, name);
       continue;
@@ -76,7 +80,7 @@ test("index.jsのexportは、Scheduler・公開入口(固定一覧)・confirmedC
 });
 
 test("Phase 10C: 認証なしで呼べるcallableは固定一覧だけ(従来の管理・メール・削除は認証なしでは呼べない)", () => {
-  const unauthenticated = exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !INTERNAL_SCHEDULED_EXPORTS.includes(e.name)).map((e) => e.name).sort();
+  const unauthenticated = exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !INTERNAL_SCHEDULED_EXPORTS.includes(e.name) && e.name !== "notifyDeliveryConfirmationCompleted").map((e) => e.name).sort();
   assert.deepEqual(unauthenticated, [...PUBLIC_PASS_EXPORTS, ...PUBLIC_CAPABILITY_EXPORTS, ...Object.keys(RECEPTION_KEY_EXPORTS)].sort());
   assert.doesNotMatch(index, /\bonCall\(/, "index.jsにonCall直書き(認可なしの入口)が無い");
 });
@@ -214,6 +218,12 @@ const E_MANAGER = "confirmedEventCallable:eventManager:dataEventId";
 const E_MANAGER_JOB = "confirmedEventCallable:eventManager:sendJobEventId";
 const E_STAFF = "confirmedEventCallable:eventStaff:dataEventId";
 const AUTHORIZATION_MAP_PHASE_1B = {
+  getDeliveryConfirmationSettings: E_MANAGER,
+  updateDeliveryConfirmationPolicy: "confirmedCallable:systemAdmin",
+  getDeliveryConfirmationReport: E_MANAGER,
+  retryDeliveryConfirmation: E_MANAGER,
+  resumeDeliveryConfirmation: E_MANAGER,
+  notifyDeliveryConfirmationCompleted: "onDocumentUpdated",
   getConfirmedBroadcastSettings: E_MANAGER,
   previewConfirmedBroadcastMail: E_MANAGER,
   startConfirmedBroadcastDelivery: E_MANAGER,
@@ -317,8 +327,8 @@ const authorizationOf = (rhs) => {
 test("Phase 1B: 全exportの入口・認可レベル・対象イベントのresolverが正式マップと一致する(callableの追加・削除も無い)", () => {
   const current = Object.fromEntries(exportsInIndex.map(({name, rhs}) => [name, authorizationOf(rhs)]));
   assert.deepEqual(current, AUTHORIZATION_MAP_PHASE_1B);
-  // 既存80本 + 資格変更通知のpreview/sendと配送確認の3本
-  assert.equal(exportsInIndex.length, 83);
+  // 既存83本 + 配信確認の認可つき5本・内部Firestoreトリガー1本
+  assert.equal(exportsInIndex.length, 89);
 });
 
 test("Phase 1B: confirmed業務に従来のadmin/staffOrAdminが残っていない(残すのはlegacyの明示allowlistだけ)", () => {
@@ -414,7 +424,7 @@ test("Phase 10D/4: ログイン不要のcallableは意図した6本だけ(従来
   const publicOnes = exportsInIndex.filter((e) => /^(confirmedPublicPassCallable|publicCapabilityCallable)\(/.test(e.rhs)).map((e) => e.name);
   assert.deepEqual(publicOnes.sort(), [...FIXED_PUBLIC].sort());
   // ログイン不要の残りは、受付スタッフ用QRの受付キーが必須の3本だけ(受付キーなしでは呼べない)
-  assert.deepEqual(exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !/^onSchedule\(/.test(e.rhs)).map((e) => e.name).sort(),
+  assert.deepEqual(exportsInIndex.filter((e) => !/^confirmed(Event)?Callable\(/.test(e.rhs) && !/^onSchedule\(/.test(e.rhs) && e.name !== "notifyDeliveryConfirmationCompleted").map((e) => e.name).sort(),
     [...FIXED_PUBLIC, ...Object.keys(RECEPTION_KEY_EXPORTS)].sort());
 });
 

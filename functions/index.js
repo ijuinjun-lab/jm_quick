@@ -948,6 +948,22 @@ exports.getConfirmedTestMailSettings = confirmedEventCallable("eventManager", EV
 exports.updateConfirmedTestMailPolicy = confirmedCallable("systemAdmin", testMailApi.setPolicy, {enforceAppCheck: true});
 exports.previewConfirmedTestMail = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, testMailApi.preview, {enforceAppCheck: true, timeoutSeconds: 60});
 exports.sendConfirmedTestMail = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, testMailApi.send, {enforceAppCheck: true, secrets: [mailApiKey], timeoutSeconds: 120});
+// Independent completion notices. No participant worker awaits this trigger.
+const {onDocumentUpdated} = require("firebase-functions/v2/firestore");
+const {createDeliveryConfirmationApi} = require("./confirmed/delivery_confirmation");
+const deliveryConfirmationApi = createDeliveryConfirmationApi({
+  getDb: getFirestore, serverTimestamp, generateQrPng,
+  getTransport: () => createMailApiTransport({endpoint: mailApiUrl.value(), apiKey: mailApiKey.value()}),
+});
+exports.getDeliveryConfirmationSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.settings, {enforceAppCheck: true});
+exports.updateDeliveryConfirmationPolicy = confirmedCallable("systemAdmin", deliveryConfirmationApi.setPolicy, {enforceAppCheck: true});
+exports.getDeliveryConfirmationReport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.getReport, {enforceAppCheck: true});
+exports.retryDeliveryConfirmation = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.retry, {enforceAppCheck: true, secrets: [mailApiKey], timeoutSeconds: 120});
+exports.resumeDeliveryConfirmation = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.resume, {enforceAppCheck: true, secrets: [mailApiKey], timeoutSeconds: 540});
+exports.notifyDeliveryConfirmationCompleted = onDocumentUpdated({document: "sendJobs/{jobId}", region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 540, maxInstances: 2, retry: true}, async event => {
+  if (!event.data) return;
+  await deliveryConfirmationApi.onCompleted({jobId: event.params.jobId, before: event.data.before.data(), after: event.data.after.data()});
+});
 const winnerSendApi = createWinnerSendApi({
   getDb: getFirestore, serverTimestamp, generateQrPng, getAppBaseUrl: () => appBaseUrl.value(),
   getTransport: () => createMailApiTransport({endpoint: mailApiUrl.value(), apiKey: mailApiKey.value()}),
