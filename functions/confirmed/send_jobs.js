@@ -261,7 +261,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
 
   // 結果の書込み。claimIdが一致する場合だけ(他のworkerの結果を上書きしない)。
   // 「lease期限切れでunknownにされた後に、同じworkerの結果が遅れて届いた」場合は、その結果で確定できる。
-  async function finishItem({db, jobId, participantId, claimId, outcome, messageId, errorCode, confirmationEvidence}) {
+  async function finishItem({db, jobId, participantId, claimId, outcome, messageId, errorCode}) {
     const dRef = await deliveryForJob(db, jobId, participantId);
     const iRef = itemRef(db, jobId, participantId);
     return db.runTransaction(async (tx) => {
@@ -277,7 +277,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       };
       tx.update(dRef, update);
       const {claimId: _claimId, ...itemUpdate} = update;
-      tx.update(iRef, {...itemUpdate, ...(confirmationEvidence ? {confirmationEvidence} : {})});
+      tx.update(iRef, itemUpdate);
       return {applied: true};
     });
   }
@@ -310,6 +310,22 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       return fail("render-error");
     }
 
+    // Best-effort evidence is saved BEFORE dispatch, separately from formal results.
+    // A stopped write is still pre-dispatch: the existing lease recovery can reclaim it.
+    // Fence by claim and attempt so a late writer cannot replace a newer sample.
+    if (confirmationEvidence) {
+      try {
+        const dRef = await deliveryForJob(db, jobId, participantId);
+        await db.runTransaction(async tx => {
+          const delivery = (await tx.get(dRef)).data();
+          if (delivery?.status !== DELIVERY.SENDING || delivery.claimId !== claimId || toMillis(delivery.leaseUntil) <= now()) return;
+          tx.update(itemRef(db, jobId, participantId), {
+            confirmationEvidence: {...confirmationEvidence, attemptCount: claim.attemptCount},
+          });
+        });
+      } catch (_) { /* Missing evidence suppresses confirmation, never formal delivery. */ }
+    }
+
     if (!(await startDispatch({db, jobId, participantId, claimId}))) return {outcome: "skipped", reason: "claim-lost"};
     // ここから先は「送ったかもしれない」。例外・不明な結果は unknown(自動再送しない)。
     let result;
@@ -319,7 +335,7 @@ function createSendJobEngine({serverTimestamp, now = () => Date.now(), leaseMs =
       result = {outcome: DELIVERY.UNKNOWN, errorCode: "transport-exception"};
     }
     const outcome = [DELIVERY.SENT, DELIVERY.FAILED, DELIVERY.UNKNOWN].includes(result && result.outcome) ? result.outcome : DELIVERY.UNKNOWN;
-    await finishItem({db, jobId, participantId, claimId, outcome, messageId: result && result.messageId, errorCode: result && result.errorCode, confirmationEvidence});
+    await finishItem({db, jobId, participantId, claimId, outcome, messageId: result && result.messageId, errorCode: result && result.errorCode});
     return {outcome};
   }
 

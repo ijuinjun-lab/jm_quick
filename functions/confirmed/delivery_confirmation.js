@@ -1,7 +1,7 @@
 const {createHash, randomUUID} = require('node:crypto');
 const {ApiError} = require('./api_error');
 const {loadConfirmedEvent} = require('./winner_mail_api');
-const {renderConfirmation, RENDERER_VERSION, ms, LABELS} = require('./delivery_confirmation_render');
+const {renderConfirmation, ms, LABELS} = require('./delivery_confirmation_render');
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw new ApiError('failed-precondition', '配信確認の設定・配送状態を再確認してください。', {code}); };
 const emailOf = value => typeof value === 'string' && value.trim().length <= 254 && /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value.trim()) ? value.trim().toLowerCase() : null;
@@ -67,7 +67,10 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
     // One bounded read: never fetch participant records or an entire recipient list.
     const sample=await db.collection('sendJobs').doc(jobId).collection('items').where('status','in',job.sentCount > 0 ? ['sent'] : ['failed','unknown']).limit(1).get();
     let message=null,errorCode=null;
-    const evidence = sample.docs[0]?.data().confirmationEvidence || (job.sentCount === 0 ? {rendererVersion:RENDERER_VERSION,programIds:job.snapshot?.programs?.slice(0,1).map(p=>p.programId),hasRegisteredAt:false} : null);
+    const item = sample.docs[0]?.data();
+    // Never guess a pattern, or use evidence from an earlier delivery attempt.
+    const evidence = item?.confirmationEvidence?.attemptCount === item?.attemptCount && Number.isInteger(item?.attemptCount)
+      ? item.confirmationEvidence : null;
     if (!evidence) errorCode='no-successful-sample';
     else {
       try {message=await renderConfirmation({job:{...job,jobId},kind,evidence,generateQrPng});}

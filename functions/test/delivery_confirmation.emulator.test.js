@@ -28,7 +28,7 @@ describe('delivery confirmations: isolated emulator and mocked transport', {skip
      batchSequence:kind==='broadcast'?null:3,targetCount:2,sentCount:1,failedCount:1,unknownCount:0};
    await db.doc('sendJobs/'+id).set(job);
    const rendered=await renderWinnerMail({snapshot,participant:f.participant(),attendances:f.attendances(),appBaseUrl:f.APP_BASE_URL,generateQrPng:f.fakeQrPng});
-   await db.doc('sendJobs/'+id+'/items/person-secret').set({status:'sent',sentAt:new Date(clock-1000),confirmationEvidence:evidenceFor(rendered)});
+   await db.doc('sendJobs/'+id+'/items/person-secret').set({status:'sent',sentAt:new Date(clock-1000),attemptCount:1,confirmationEvidence:{...evidenceFor(rendered),attemptCount:1}});
    return {jobId:id,before:{status:'ready'},after:(await db.doc('sendJobs/'+id).get()).data()};
  }
  const report=async id=>api.getReport({data:{eventId:'event1',reportId:reportIdFor('event1',id)}});
@@ -73,6 +73,89 @@ describe('delivery confirmations: isolated emulator and mocked transport', {skip
    await api.onCompleted({jobId:'winner-enginebatch',before,after});assert.equal(sends.length,1);
    assert.equal(after.targetCount,1);assert.equal(after.sentCount,1);assert.equal((await db.collection('participants').get()).size,1);
    assert.deepEqual((await db.doc('participants/'+person.participantId).get()).data(),person);
+ });
+
+ async function protectedEngine({outcome='sent',failEvidence=false,pauseFirst=false}={}) {
+   const {createWinnerSendApi}=require('../confirmed/winner_send_api');
+   let deliveries=0,writes=0,release,entered;
+   const gate=new Promise(resolve=>{release=resolve;});
+   const paused=new Promise(resolve=>{entered=resolve;});
+   const bind=(target,key)=>typeof target[key]==='function'?target[key].bind(target):target[key];
+   const interrupted=Error('interrupted-evidence-transaction');
+   const injected=new Proxy(db,{get(target,key){
+     if(key!=='runTransaction')return bind(target,key);
+     return (fn,options)=>target.runTransaction(async tx=>{
+       const proxy=new Proxy(tx,{get(t,k){
+         if(k!=='update')return bind(t,k);
+         return (ref,data,...args)=>{
+           if(data.confirmationEvidence){
+             writes++;
+             // The fault applies only to the independent evidence write.
+             assert.deepEqual(Object.keys(data),['confirmationEvidence']);
+             if(failEvidence)throw Error('injected-evidence-write-failure');
+             if(pauseFirst&&writes===1)throw interrupted;
+           }
+           return t.update(ref,data,...args);
+         };
+       }});
+       return fn(proxy);
+     },options).catch(async error=>{
+       if(error!==interrupted)throw error;
+       // Rollback releases locks, as with a stopped writer. Resume its old callback later.
+       entered();await gate;return target.runTransaction(fn,options);
+     });
+   }});
+   const engine=createWinnerSendApi({getDb:()=>injected,serverTimestamp:()=>emu.FieldValue.serverTimestamp(),
+     generateQrPng:f.fakeQrPng,getAppBaseUrl:()=>f.APP_BASE_URL,engineOptions:{now:()=>clock,leaseMs:1000},
+     getTransport:()=>({capabilities:async()=>({ok:true}),send:async()=>{deliveries++;return {outcome,messageId:'formal-mock',errorCode:outcome==='sent'?null:'mock-'+outcome};}})});
+   await db.doc('importBatches/protected').set({eventId:'event1',status:'committed',sequence:1,createdCount:1});
+   const person=f.participant({importBatchId:'protected'});
+   await db.doc('participants/'+person.participantId).set(person);
+   for(const a of f.attendances())await db.doc('programAttendances/'+a.participantId+'_'+a.programId).set(a);
+   await engine.createJob({identity:admin,data:{eventId:'event1',batchId:'protected'}});
+   const jobId='winner-protected';
+   return {engine,jobId,person,paused,release,count:()=>deliveries,writes:()=>writes,
+     process:()=>engine.processJob({data:{jobId}}),
+     job:async()=>(await db.doc('sendJobs/'+jobId).get()).data(),
+     item:async()=>(await db.doc('sendJobs/'+jobId+'/items/'+person.participantId).get()).data()};
+ }
+ for(const enabled of [false,true])for(const outcome of ['sent','failed','unknown'])test(`formal ${outcome} survives evidence failure (policy ${enabled}) and concurrent workers`,async()=>{
+   await policy(enabled);
+   const x=await protectedEngine({outcome,failEvidence:true});
+   await Promise.all([x.process(),x.process()]);
+   const job=await x.job(),item=await x.item();
+   assert.equal(x.count(),1);assert(x.writes()>0);
+   assert.equal(job.status,'completed');assert.equal(job[outcome+'Count'],1);
+   assert.equal(item.status,outcome);assert.equal(item.confirmationEvidence,undefined);
+   const formal=(await db.collection('mailDeliveries').where('jobId','==',x.jobId).get()).docs[0].data();
+   assert.equal(formal.status,outcome);assert.equal(formal.claimId,null);assert.equal(formal.leaseUntil,null);
+   await x.process();assert.equal(x.count(),1);
+   await api.onCompleted({jobId:x.jobId,before:{status:'ready'},after:job});
+   assert.equal(sends.length,0);
+   if(enabled)assert.equal((await report(x.jobId)).status,'unavailable');
+ });
+ test('interrupted evidence transaction expires before dispatch; new worker recovers and late writer cannot overwrite',async()=>{
+   const x=await protectedEngine({pauseFirst:true});
+   const first=x.process();await x.paused;
+   try {
+     assert.equal(x.count(),0);assert.equal((await x.item()).status,'sending');
+     clock+=2000;
+     await x.process();assert.equal(x.count(),1);
+   }finally{x.release();}
+   await first;
+   const item=await x.item();assert.equal(item.status,'sent');assert.equal(item.attemptCount,2);
+   assert.equal(item.confirmationEvidence.attemptCount,2);
+   assert.equal((await x.job()).status,'completed');
+   await x.process();assert.equal(x.count(),1);
+ });
+ for(const outcome of ['sent','failed','unknown'])for(const stale of [false,true])test(`missing or stale evidence suppresses ${outcome} confirmation (stale ${stale})`,async()=>{
+   const event=await seed();
+   Object.assign(event.after,{targetCount:1,sentCount:0,failedCount:0,unknownCount:0,[outcome+'Count']:1});
+   const item={status:outcome,attemptCount:2};
+   if(stale){const old=(await db.doc('sendJobs/'+event.jobId+'/items/person-secret').get()).data();item.confirmationEvidence=old.confirmationEvidence;}
+   await db.doc('sendJobs/'+event.jobId+'/items/person-secret').set(item);
+   await api.onCompleted(event);assert.equal(sends.length,0);
+   const r=await report(event.jobId);assert.equal(r.status,'unavailable');assert.equal(r.html,'');assert.equal(r.text,'');
  });
  test('zero success reports clearly identify the intended sample rather than claiming a sent copy',async()=>{
    const event=await seed();event.after.sentCount=0;event.after.failedCount=2;
