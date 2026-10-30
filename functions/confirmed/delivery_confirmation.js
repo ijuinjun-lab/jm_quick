@@ -22,8 +22,14 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
     request(data, ['after']); const db = getDb(); await loadConfirmedEvent(db, data.eventId);
     if (data.after !== undefined && !/^[a-f0-9]{64}$/.test(data.after)) fail('invalid-cursor');
     const p = await policyRef(db,data.eventId).get();
-    let query = reports(db).where('eventId','==',data.eventId).orderBy('__name__').limit(21);
-    if (data.after) query = query.startAfter(data.after);
+    // The ID is only a tie-breaker; completion time determines every page's order.
+    let query = reports(db).where('eventId','==',data.eventId)
+      .orderBy('sourceCompletedAt','desc').orderBy('__name__','desc').limit(21);
+    if (data.after) {
+      const cursor = await reports(db).doc(data.after).get();
+      if (!cursor.exists || cursor.data().eventId !== data.eventId || !ms(cursor.data().sourceCompletedAt)) fail('invalid-cursor');
+      query = query.startAfter(cursor);
+    }
     const found = await query.get();
     return {canManage: identity?.systemAdmin === true, policy: p.exists ? {...p.data(), activatedAt:iso(p.data().activatedAt), updatedAt:iso(p.data().updatedAt)} : {enabled:false,version:0,recipients:[]},
       reports: found.docs.slice(0,20).map(d => {const r=d.data();return {reportId:d.id,jobId:r.sourceJobId,kind:r.kind,status:r.status,subject:r.message?.subject || '',completedAt:iso(r.sourceCompletedAt),errorCode:r.errorCode || null};}),
@@ -34,7 +40,9 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
     if (identity?.systemAdmin !== true) throw new ApiError('permission-denied','システム管理者のみ変更できます。');
     if (typeof data.enabled !== 'boolean' || !Number.isInteger(data.expectedVersion) || !Array.isArray(data.recipients) || data.recipients.length > 10) fail('invalid-policy');
     const recipients = data.recipients.map(r => {
-      if (!r || Object.keys(r).some(k=>!['email','name','enabled','kinds'].includes(k)) || !emailOf(r.email) || typeof r.name !== 'string' || r.name.length>100 || typeof r.enabled !== 'boolean' || !Array.isArray(r.kinds) || !r.kinds.length || r.kinds.some(k=>typeof k !== 'string' || !Object.hasOwn(LABELS,k))) fail('invalid-recipient');
+      if (!r || Object.keys(r).some(k=>!['email','name','enabled','kinds'].includes(k)) || typeof r.name !== 'string' || r.name.length>100 || typeof r.enabled !== 'boolean' || !Array.isArray(r.kinds) || r.kinds.some(k=>typeof k !== 'string' || !Object.hasOwn(LABELS,k))) fail('invalid-recipient');
+      if (!emailOf(r.email)) fail('invalid-address');
+      if (!r.kinds.length) fail('mail-kind-required');
       return {email:emailOf(r.email),name:r.name.trim(),enabled:r.enabled,kinds:[...new Set(r.kinds)].sort()};
     });
     if (new Set(recipients.map(r=>r.email)).size!==recipients.length) fail('duplicate-address');

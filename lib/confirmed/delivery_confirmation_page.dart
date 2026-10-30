@@ -35,6 +35,13 @@ class _DeliveryConfirmationPageState extends State<DeliveryConfirmationPage> {
   bool enabled = false, busy = false;
   String? error, nextAfter;
   int revision = 0;
+  final scroll = ScrollController();
+  @override
+  void dispose() {
+    scroll.dispose();
+    super.dispose();
+  }
+
   bool get canManage => settings?['canManage'] == true;
   Future<Map<String, dynamic>> call(
     String name, [
@@ -54,9 +61,22 @@ class _DeliveryConfirmationPageState extends State<DeliveryConfirmationPage> {
     });
     try {
       await action();
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        setState(() => error = '処理できませんでした。権限・設定・配送状態を確認して更新してください。');
+        setState(
+          () => error = e is DeliveryConfirmationException
+              ? e.message
+              : const DeliveryConfirmationException('unknown').message,
+        );
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && scroll.hasClients) {
+            scroll.animateTo(
+              0,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+            );
+          }
+        });
       }
     } finally {
       if (mounted) setState(() => busy = false);
@@ -120,6 +140,21 @@ class _DeliveryConfirmationPageState extends State<DeliveryConfirmationPage> {
     });
   }
 
+  Future<void> removeRecipient(int index) async {
+    if (!canManage || busy) return;
+    if (!await confirm(
+      '確認先を削除',
+      '${recipients[index]['email']} を確認先から削除します。過去の送信履歴は保持されます。削除は「確認先設定を保存」で確定します。',
+    )) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      recipients.removeAt(index);
+      revision++;
+    });
+  }
+
   Future<void> readReport(String id) async {
     final d = await call('getDeliveryConfirmationReport', {'reportId': id});
     if (mounted) setState(() => detail = d);
@@ -129,6 +164,7 @@ class _DeliveryConfirmationPageState extends State<DeliveryConfirmationPage> {
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('配信確認先')),
     body: SingleChildScrollView(
+      controller: scroll,
       padding: const EdgeInsets.all(16),
       child: Center(
         child: ConstrainedBox(
@@ -162,6 +198,18 @@ class _DeliveryConfirmationPageState extends State<DeliveryConfirmationPage> {
                       padding: const EdgeInsets.all(12),
                       child: Column(
                         children: [
+                          if (canManage)
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton.icon(
+                                key: ValueKey('remove-recipient-$i'),
+                                onPressed: busy
+                                    ? null
+                                    : () => removeRecipient(i),
+                                icon: const Icon(Icons.delete_outline),
+                                label: const Text('確認先を削除'),
+                              ),
+                            ),
                           TextFormField(
                             key: ValueKey('email-$revision-$i'),
                             initialValue: recipients[i]['email'] as String,

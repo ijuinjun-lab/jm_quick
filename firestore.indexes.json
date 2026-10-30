@@ -1,0 +1,14 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "deliveryConfirmationReports",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "eventId", "order": "ASCENDING" },
+        { "fieldPath": "sourceCompletedAt", "order": "DESCENDING" },
+        { "fieldPath": "__name__", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

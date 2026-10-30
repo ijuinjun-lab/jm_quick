@@ -79,6 +79,46 @@ describe('delivery confirmations: isolated emulator and mocked transport', {skip
    await db.doc('sendJobs/'+event.jobId+'/items/person-secret').update({status:'failed'});
    await api.onCompleted(event);assert.equal(sends.length,1);assert.match(sends[0].text,/送信成功0件/);
  });
+ test('completion descending pagination spans 45 reports, including tied times, without duplicates or mutations',async()=>{
+   const expected=[];
+   for(let i=0;i<45;i++){
+     const id=require('node:crypto').createHash('sha256').update('report-'+i).digest('hex');
+     const sourceCompletedAt=new Date(1700000000000+Math.floor(i/3)*1000);
+     const doc={eventId:'event1',sourceJobId:'winner-'+i,kind:'normal',status:'ready',sourceCompletedAt,message:{subject:'report-'+i}};
+     await db.doc('deliveryConfirmationReports/'+id).set(doc);expected.push({id,time:sourceCompletedAt.getTime()});
+   }
+   const foreign='f'.repeat(64);await db.doc('deliveryConfirmationReports/'+foreign).set({eventId:'other',sourceCompletedAt:new Date(clock)});
+   expected.sort((a,b)=>b.time-a.time || (a.id<b.id?1:-1));
+   const snapshot=(await db.collection('deliveryConfirmationReports').get()).docs.map(d=>[d.id,d.data()]);
+   const actual=[];let after=null;const sizes=[];
+   do {
+     const result=await api.settings({identity:admin,data:{eventId:'event1',...(after?{after}:{})}});
+     sizes.push(result.reports.length);actual.push(...result.reports.map(r=>r.reportId));after=result.nextAfter;
+   }while(after);
+   assert.deepEqual(sizes,[20,20,5]);assert.deepEqual(actual,expected.map(r=>r.id));
+   assert.deepEqual((await db.collection('deliveryConfirmationReports').get()).docs.map(d=>[d.id,d.data()]),snapshot);
+   await assert.rejects(api.settings({identity:admin,data:{eventId:'event1',after:foreign}}),e=>e.details.code==='invalid-cursor');
+   const config=require('../../firestore.indexes.json');
+   assert.deepEqual(config.indexes[0].fields,[{fieldPath:'eventId',order:'ASCENDING'},{fieldPath:'sourceCompletedAt',order:'DESCENDING'},{fieldPath:'__name__',order:'DESCENDING'}]);
+ });
+ test('removing and re-registering a recipient retains history and cannot resend the same job',async()=>{
+   const event=await seed();await api.onCompleted(event);const r=await report(event.jobId);
+   const ref=db.doc('deliveryConfirmationReports/'+r.reportId);const original=(await ref.get()).data();
+   const deliveries=(await ref.collection('deliveries').get()).docs.map(d=>d.data());
+   await policy(true,[]);assert.equal((await api.settings({identity:admin,data:{eventId:'event1'}})).policy.recipients.length,0);
+   assert.deepEqual((await ref.get()).data(),original);assert.deepEqual((await ref.collection('deliveries').get()).docs.map(d=>d.data()),deliveries);
+   await policy(true,[{...recipient,email:'OFFICE@example.invalid'}]);await api.onCompleted(event);await api.resume({identity:admin,data:{eventId:'event1',reportId:r.reportId}});
+   assert.equal(sends.length,1);assert.deepEqual((await ref.collection('deliveries').get()).docs.map(d=>d.data()),deliveries);
+   await api.onCompleted(await seed('normal','winner-after-reregister'));assert.equal(sends.length,2);
+ });
+ test('save returns distinct safe codes; managers cannot remove recipients',async()=>{
+   for(const [rows,code] of [[[recipient,recipient],'duplicate-address'],[[{...recipient,email:'invalid'}],'invalid-address'],[[{...recipient,kinds:[]}],'mail-kind-required']]){
+     await assert.rejects(policy(true,rows),e=>e.details.code===code);
+   }
+   const before=(await db.doc('deliveryConfirmationPolicies/event1').get()).data();
+   await assert.rejects(api.setPolicy({identity:{uid:'manager'},data:{eventId:'event1',enabled:true,recipients:[],expectedVersion:1}}),e=>e.code==='permission-denied');
+   assert.deepEqual((await db.doc('deliveryConfirmationPolicies/event1').get()).data(),before);
+ });
  test('parallel completion events and a different job using same address',async()=>{
    const event=await seed();await Promise.all(Array.from({length:5},()=>api.onCompleted(event)));assert.equal(sends.length,1);
    await api.onCompleted(await seed('normal','winner-second'));assert.equal(sends.length,2);
