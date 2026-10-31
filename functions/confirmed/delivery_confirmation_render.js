@@ -38,9 +38,15 @@ async function renderConfirmation({job, kind, evidence, generateQrPng}) {
     ['配信完了日時', dateText(job.completedAt)], ['対象件数', job.targetCount], ['送信成功件数', job.sentCount],
     ['失敗件数', job.failedCount], ['結果不明件数', job.unknownCount],
   ];
-  const intro = rows.map(([k,v]) => `${k}：${v}`).join('\n') + '\n送信成功はメールサービスの受付成功であり、到着・開封の確認ではありません。\n' + NOTICE +
+  const notes = '送信成功はメールサービスの受付成功であり、到着・開封の確認ではありません。\n' + NOTICE +
     (job.sentCount === 0 ? '\n送信成功0件のため、これは送信予定内容のサンプルです。実際に送信成功したコピーではありません。' : '\n代表1件の表示パターンです。全参加者の個別内容を網羅するものではありません。');
-  const banner = `<section style="padding:20px;background:#eef3f8"><h2>配信確認</h2><p>${escapeHtml(intro).replace(/\n/g,'<br>')}</p><h3>正式メールの確認用コピー</h3></section>`;
+  const intro = rows.map(([k,v]) => `${k}：${v}`).join('\n') + '\n' + notes;
+  const introHtml = rows.map(([k,v]) => {
+    const row = escapeHtml(`${k}：${v}`).replace(/\n/g,'<br>');
+    // Scope wrapping to the confirmation round; never change formal-copy styles.
+    return k === '配信回' ? `<span style="overflow-wrap:anywhere;word-break:break-all;">${row}</span>` : row;
+  }).join('<br>') + '<br>' + escapeHtml(notes).replace(/\n/g,'<br>');
+  const banner = `<section style="padding:20px;background:#eef3f8"><h2>配信確認</h2><p>${introHtml}</p><h3>正式メールの確認用コピー</h3></section>`;
   const html = safeHtml.replace(/(<body\b[^>]*>)/i, (_match, opening) => opening + banner);
   const text = intro + '\n\n【正式メールの確認用コピー】\n' + safeText;
   const subject = `【配信確認】${sample.subject}`;

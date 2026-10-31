@@ -47,6 +47,21 @@ test('unknown version never silently renders using current code',async()=>{
  assert.equal(RENDERER_VERSION.length,64);
 });
 module.exports={cases,digest};
+test('only the confirmation round gains wrapping; all other HTML, text, metadata and QR stay identical',async()=>{
+ const before = require('./fixtures/confirmation_before_jobid_wrap.json');
+ const all = await cases();
+ for(const [i,kind] of ['normal','waitlistPromotion','broadcast'].entries()){
+   const c = all.find(c=>c.key==='cat_dog_talk/'+(kind==='broadcast'?'broadcast11':kind));
+   const job = {jobId:'broadcast-'+('a'.repeat(64)),snapshot:c.snapshot,batchSequence:kind==='broadcast'?null:i+1,
+     targetCount:10,sentCount:7,failedCount:2,unknownCount:1,
+     dispatchRequestedAt:new Date('2026-10-31T01:00:00Z'),completedAt:new Date('2026-10-31T01:02:00Z')};
+   const message = await renderConfirmation({job,kind,evidence:evidenceFor(c.mail),generateQrPng:fakeQrPng});
+   const wrap = /<span style="overflow-wrap:anywhere;word-break:break-all;">(配信回：[^<]*)<\/span>/g;
+   assert.equal([...message.html.matchAll(wrap)].length,1);
+   const unwrapped = {...message,html:message.html.replace(wrap,'$1')};
+   assert.equal(createHash('sha256').update(JSON.stringify(unwrapped)).digest('hex'),before[kind],kind);
+ }
+});
 test('real PNG contains only the non-reception sentinel; literal dollar signs and HTML text remain safe',async()=>{
  const {generateQrPng}=require('../qr_png');
  const c=(await cases())[0];c.snapshot.template.introBody='料金 $& / $\' / <script>alert(1)</script>';
