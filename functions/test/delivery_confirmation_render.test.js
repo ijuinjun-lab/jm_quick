@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {createHash} = require('node:crypto');
 const {buildMailSnapshot} = require('../confirmed/mail_view_model');
 const {renderWinnerMail,renderBroadcastMail,renderReminderMail} = require('../confirmed/mail_render');
-const {renderConfirmation,evidenceFor,RENDERER_VERSION,SENTINEL} = require('../confirmed/delivery_confirmation_render');
+const {renderConfirmation,evidenceFor,RENDERER_VERSION,SENTINEL,LABELS} = require('../confirmed/delivery_confirmation_render');
 const {fakeQrPng} = require('../confirmed/test_support/mail_fixtures');
 const fixture = require('../confirmed/test_support/participation_fixture');
 const golden = require('./fixtures/formal_mail_before_confirmation.json');
@@ -47,7 +47,7 @@ test('unknown version never silently renders using current code',async()=>{
  assert.equal(RENDERER_VERSION.length,64);
 });
 module.exports={cases,digest};
-test('only the confirmation round gains wrapping; all other HTML, text, metadata and QR stay identical',async()=>{
+test('confirmation hides round and job ID; all other content and internal job data stay identical',async()=>{
  const before = require('./fixtures/confirmation_before_jobid_wrap.json');
  const all = await cases();
  for(const [i,kind] of ['normal','waitlistPromotion','broadcast'].entries()){
@@ -55,11 +55,19 @@ test('only the confirmation round gains wrapping; all other HTML, text, metadata
    const job = {jobId:'broadcast-'+('a'.repeat(64)),snapshot:c.snapshot,batchSequence:kind==='broadcast'?null:i+1,
      targetCount:10,sentCount:7,failedCount:2,unknownCount:1,
      dispatchRequestedAt:new Date('2026-10-31T01:00:00Z'),completedAt:new Date('2026-10-31T01:02:00Z')};
+   const originalJob = structuredClone(job);
    const message = await renderConfirmation({job,kind,evidence:evidenceFor(c.mail),generateQrPng:fakeQrPng});
-   const wrap = /<span style="overflow-wrap:anywhere;word-break:break-all;">(配信回：[^<]*)<\/span>/g;
-   assert.equal([...message.html.matchAll(wrap)].length,1);
-   const unwrapped = {...message,html:message.html.replace(wrap,'$1')};
-   assert.equal(createHash('sha256').update(JSON.stringify(unwrapped)).digest('hex'),before[kind],kind);
+   assert.deepEqual(job,originalJob);
+   for(const value of [message.html,message.text,message.subject]){
+     assert(!value.includes('配信回'));
+     assert(!value.includes(job.jobId));
+   }
+   const round = `配信回：${job.batchSequence ? `第${job.batchSequence}回` : `一斉配信 ${job.jobId}`}`;
+   const type = `配信種別：${LABELS[kind]}`;
+   const restored = {...message,
+     html:message.html.replace(type+'<br>',type+'<br>'+round+'<br>'),
+     text:message.text.replace(type+'\n',type+'\n'+round+'\n')};
+   assert.equal(createHash('sha256').update(JSON.stringify(restored)).digest('hex'),before[kind],kind);
  }
 });
 test('real PNG contains only the non-reception sentinel; literal dollar signs and HTML text remain safe',async()=>{
