@@ -958,6 +958,8 @@ const deliveryConfirmationApi = createDeliveryConfirmationApi({
 exports.getDeliveryConfirmationSettings = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.settings, {enforceAppCheck: true});
 exports.updateDeliveryConfirmationPolicy = confirmedCallable("systemAdmin", deliveryConfirmationApi.setPolicy, {enforceAppCheck: true});
 exports.getDeliveryConfirmationReport = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.getReport, {enforceAppCheck: true});
+exports.previewManualDeliveryConfirmation = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.previewManual, {enforceAppCheck: true, timeoutSeconds: 120});
+exports.sendManualDeliveryConfirmation = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.sendManual, {enforceAppCheck: true, secrets: [mailApiKey], timeoutSeconds: 540});
 exports.retryDeliveryConfirmation = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.retry, {enforceAppCheck: true, secrets: [mailApiKey], timeoutSeconds: 120});
 exports.resumeDeliveryConfirmation = confirmedEventCallable("eventManager", EVENT_SCOPES.dataEventId, deliveryConfirmationApi.resume, {enforceAppCheck: true, secrets: [mailApiKey], timeoutSeconds: 540});
 exports.notifyDeliveryConfirmationCompleted = onDocumentUpdated({document: "sendJobs/{jobId}", region: "asia-northeast1", secrets: [mailApiKey], timeoutSeconds: 540, maxInstances: 2, retry: true}, async event => {

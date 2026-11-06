@@ -15,6 +15,17 @@ const deliveryDigest = v => createHash('sha256').update(JSON.stringify(v, (_, va
 const fail = (code) => { throw new ApiError('failed-precondition', '資格の状態を再確認してください。受付・取込・配送中は変更できません。', {code}); };
 const stamp = (v) => v?.toDate?.().toISOString() || v || null;
 const view = (a) => ({programId: a.programId, plannedCount: a.plannedCount, slotLabel: a.slotLabel || '', startAt: stamp(a.startAt), endAt: stamp(a.endAt), entitlementStatus: a.entitlementStatus || 'active', checkedIn: a.checkedIn === true});
+// Only a mapped talk program may separate this explicit opening-time guidance.
+// Keep the original event setting intact; qualification slots contain session time.
+function talkSessionSlot(value) {
+  if (typeof value !== 'string' || parseTimeRange(value)) return value;
+  const match = /^(.+?)[（(]開場\s*(\d{1,2}):(\d{2})[）)]$/.exec(value.trim());
+  if (!match) return value;
+  const range = parseTimeRange(match[1].trim());
+  const hour = Number(match[2]), minute = Number(match[3]);
+  if (!range || hour > 23 || minute > 59 || hour * 60 + minute > range.start) return value;
+  return match[1].trim();
+}
 function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) {
   function parse(d, changing = false) {
     const keys = ['eventId', 'participantId', ...(changing ? ['action', 'operationId', 'fingerprint', 'programId', 'targetProgramId', 'slotLabel', 'plannedCount', 'reason'] : [])];
@@ -101,7 +112,9 @@ function createQualificationChangeApi({getDb, serverTimestamp, now = Date.now}) 
         ...(mappingFor(d.eventId,event)?.talkProgramId === p.programId ? [event.confirmedMailSettings?.talkTimeText] : []),
         ...inventory.docs.filter(x => x.data().programId === p.programId && x.data().entitlementStatus !== 'revoked' &&
           (!x.data().importBatchId || batches.get(x.data().importBatchId)?.status === 'committed')).map(x => programTimeText(x.data(), p))];
-      return [p.programId, [...new Set(values.filter(v => typeof v === 'string' && parseTimeRange(v)))].sort()];
+      const candidates = mappingFor(d.eventId,event)?.talkProgramId === p.programId
+        ? values.map(talkSessionSlot) : values;
+      return [p.programId, [...new Set(candidates.filter(v => typeof v === 'string' && parseTimeRange(v)))].sort()];
     }));
     const busy = busyReason !== null;
     const activeQualificationCount = as.docs.filter(s => s.data().entitlementStatus !== 'revoked' &&

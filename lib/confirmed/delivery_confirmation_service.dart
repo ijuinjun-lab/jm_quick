@@ -8,6 +8,14 @@ class DeliveryConfirmationException implements Exception {
   const DeliveryConfirmationException(this.code);
   final String code;
   String get message => switch (code) {
+    'preview-changed' => '設定または送信結果が変わりました。「状態を更新」で内容を再確認してください。',
+    'notification-disabled' => '事務局通知が無効です。システム管理者が通知設定を有効にしてください。',
+    'job-not-completed' => '対応するメールの送信処理が完了してから確認してください。',
+    'sample-unavailable' ||
+    'no-successful-sample' ||
+    'renderer-version-unavailable' =>
+      'この送信結果には通知内容を再現するための記録がありません。通知は送信できません。',
+    'attempt-changed' => '配送状態が変わりました。「状態を更新」で確認してください。通知済み・結果不明は再送できません。',
     'duplicate-address' => '同じメールアドレスが重複しています。確認先を1件にまとめてください。',
     'invalid-address' => 'メールアドレスの形式が正しくありません。入力内容を確認してください。',
     'mail-kind-required' => '対象メール種別を1つ以上選択してください。',

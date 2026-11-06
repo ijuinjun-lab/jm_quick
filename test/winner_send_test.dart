@@ -911,7 +911,8 @@ void main() {
       await tester.pumpWidget(jobPage(service));
       await settle(tester);
       expect(find.byType(FilledButton), findsNothing);
-      expect(find.byType(OutlinedButton), findsNothing);
+      expect(find.widgetWithText(OutlinedButton, '事務局へ送信結果を通知'), findsOneWidget);
+      expect(find.textContaining('失敗分だけ再送'), findsNothing);
       expect(find.textContaining('全 6件 送信済み'), findsOneWidget);
     });
 

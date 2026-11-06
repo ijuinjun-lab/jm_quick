@@ -1,0 +1,37 @@
+{
+  "eventId": "evaa167a3d7ef6aa83097210db572425",
+  "enabled": true,
+  "expectedVersion": 1,
+  "recipients": [
+    {
+      "email": "inoue-y6@asahi.com",
+      "name": "井上様",
+      "enabled": true,
+      "kinds": ["broadcast", "normal", "waitlistPromotion"]
+    },
+    {
+      "email": "sippo-support@info-event-jimukyoku.jp",
+      "name": "事務局",
+      "enabled": true,
+      "kinds": ["broadcast", "normal", "waitlistPromotion"]
+    },
+    {
+      "email": "ijuinjun@gmail.com",
+      "name": "",
+      "enabled": true,
+      "kinds": ["broadcast", "normal", "waitlistPromotion"]
+    },
+    {
+      "email": "jm.okubo@gmail.com",
+      "name": "",
+      "enabled": true,
+      "kinds": ["broadcast", "normal", "waitlistPromotion"]
+    },
+    {
+      "email": "hakamatajm@gmail.com",
+      "name": "",
+      "enabled": true,
+      "kinds": ["broadcast", "normal", "waitlistPromotion"]
+    }
+  ]
+}

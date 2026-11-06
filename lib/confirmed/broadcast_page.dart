@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'manual_delivery_confirmation.dart';
 import 'package:flutter/material.dart';
 import 'mail_html_preview.dart';
 import 'test_mail_page.dart';
@@ -584,6 +585,12 @@ class _BroadcastPageState extends State<BroadcastPage> {
                       : () => run(() => readJob(j['jobId'] as String)),
                 ),
               if (detail != null) ...[
+                if (detail!['job']['status'] == 'completed')
+                  ManualDeliveryConfirmationButton(
+                    key: ValueKey(selectedJob),
+                    eventId: widget.eventId,
+                    jobId: selectedJob!,
+                  ),
                 SelectableText(
                   '件名：${detail!['job']['subject'] ?? ''}\n本文：${detail!['job']['body'] ?? ''}\n${countsText(detail!['job']['counts'] as Map?)}',
                 ),

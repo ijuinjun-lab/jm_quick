@@ -35,6 +35,46 @@ describe('delivery confirmations: isolated emulator and mocked transport', {skip
  before(async()=>{emu=await startAdminEmulator();db=emu.db;});
  after(async()=>{await db.terminate();emu.stop();});
  beforeEach(async()=>{await emu.clear();clock=Date.now()+10000;sends=[];behavior=()=>({outcome:'sent',messageId:'mock'});api=createApi();await db.doc('events/event1').set(f.makeEvent());await policy();});
+ for(const kind of ['normal','waitlistPromotion','broadcast'])test(`${kind}: proposed five recipients, activation cutoff and duplicate completion`,async()=>{
+   const proposal=require('../../docs/delivery-confirmation-policy-request.json');
+   assert.equal(proposal.enabled,true);
+   assert.equal(proposal.recipients.length,5);
+   assert.deepEqual(proposal.recipients.map(r=>r.email),['inoue-y6@asahi.com','sippo-support@info-event-jimukyoku.jp','ijuinjun@gmail.com','jm.okubo@gmail.com','hakamatajm@gmail.com']);
+   // Only the injected mock transport can receive these configured addresses.
+   await policy(true,proposal.recipients.slice(0,2));
+   const old=await seed(kind,'old-pending');
+   // Preserve an already prepared but unsent report across disable/re-enable.
+   await api.onCompleted(old);
+   const oldReport=await report(old.jobId);
+   for(const d of oldReport.deliveries)await db.doc(`deliveryConfirmationReports/${oldReport.reportId}/deliveries/${d.recipientKey}`).update({status:'pending'});
+   sends=[];
+   await policy(false,proposal.recipients.slice(0,2));
+   await db.doc('deliveryConfirmationPolicies/event1').update({activatedAt:null});
+   old.after.createdAt=new Date(1);
+   await db.doc('sendJobs/'+old.jobId).update({createdAt:new Date(1)});
+   await db.doc('deliveryConfirmationReports/'+oldReport.reportId).update({sourceCreatedAt:new Date(1)});
+   await policy(proposal.enabled,proposal.recipients);
+   const saved=(await db.doc('deliveryConfirmationPolicies/event1').get()).data();
+   assert.deepEqual(saved.recipients,proposal.recipients);assert(saved.activatedAt.toMillis()>1);
+   await api.onCompleted(old);
+   await api.resume({identity:admin,data:{eventId:'event1',reportId:oldReport.reportId}});
+   const historical={...old,jobId:'old-no-report'};
+   await api.onCompleted(historical);
+   assert.equal((await db.doc('deliveryConfirmationReports/'+reportIdFor('event1',historical.jobId)).get()).exists,false);
+   assert.equal(sends.length,0);
+   const event=await seed(kind,'new-five');
+   const original=(await db.doc('sendJobs/'+event.jobId).get()).data();
+   await Promise.all([api.onCompleted(event),api.onCompleted(event)]);
+   const r=await report(event.jobId);
+   await api.resume({identity:admin,data:{eventId:'event1',reportId:r.reportId}});
+   assert.equal(sends.length,5);assert.equal(new Set(sends.map(m=>m.to)).size,5);
+   assert.deepEqual(sends.map(m=>m.to).sort(),proposal.recipients.map(r=>r.email).sort());
+   assert(r.deliveries.every(d=>d.status==='sent'));
+   assert.deepEqual((await db.doc('sendJobs/'+event.jobId).get()).data(),original);
+   const version=(await db.doc('deliveryConfirmationPolicies/event1').get()).data().version;
+   await assert.rejects(api.setPolicy({identity:admin,data:{eventId:'event1',enabled:true,expectedVersion:version,
+     recipients:[...proposal.recipients,{...proposal.recipients[2],email:' IJUINJUN@GMAIL.COM '}]}}),e=>e.details.code==='duplicate-address');
+ });
  for(const kind of ['normal','waitlistPromotion','broadcast'])test(`${kind}: one confirmation, safe sample, source untouched`,async()=>{
    const event=await seed(kind);const original=(await db.doc('sendJobs/'+event.jobId).get()).data();
    await db.doc('participants/person-secret').set({name:'秘密氏名',email:'private@example.invalid',publicId:'pub_PRIVATE_SECRET_00000000000'});

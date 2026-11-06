@@ -5,6 +5,7 @@ const {renderConfirmation, ms, LABELS} = require('./delivery_confirmation_render
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw new ApiError('failed-precondition', '配信確認の設定・配送状態を再確認してください。', {code}); };
 const emailOf = value => typeof value === 'string' && value.trim().length <= 254 && /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value.trim()) ? value.trim().toLowerCase() : null;
+const stableHash = value => hash(JSON.stringify(value, (_, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b))) : v));
 const reportIdFor = (eventId, jobId) => hash([eventId, jobId]);
 const kindOf = job => job.type === 'broadcast' ? 'broadcast' : job.type === 'winner' && ['normal','waitlistPromotion'].includes(job.notificationType || 'normal') ? job.notificationType || 'normal' : null;
 function request(data, keys = []) {
@@ -16,7 +17,8 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
   const reports = db => db.collection('deliveryConfirmationReports');
   const iso = v => ms(v) ? new Date(ms(v)).toISOString() : null;
   const eligible = (policy, job) => policy?.enabled === true && ms(policy.activatedAt) > 0 && ms(job.createdAt) > ms(policy.activatedAt);
-  const allowed = (policy, report, address) => eligible(policy, {createdAt: report.sourceCreatedAt}) &&
+  const allowed = (policy, report, address) => policy?.enabled === true &&
+    (eligible(policy, {createdAt: report.sourceCreatedAt}) || (ms(policy.activatedAt) > 0 && report.manualActivation === ms(policy.activatedAt))) &&
     policy.recipients?.some(r => r.email === address && r.enabled && r.kinds.includes(report.kind));
   async function settings({identity, data}) {
     request(data, ['after']); const db = getDb(); await loadConfirmedEvent(db, data.eventId);
@@ -56,13 +58,8 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
     });
     return {saved:true};
   }
-  // The report is immutable once prepared. Only independent deliveries change.
-  async function prepare(jobId, job) {
-    const db=getDb(), ref=reports(db).doc(reportIdFor(job.eventId,jobId));
-    const old=await ref.get();if(old.exists)return ref;
-    const p=(await policyRef(db,job.eventId).get()).data(), kind=kindOf(job);
-    if (!kind || !eligible(p,job) || !p.recipients.some(r=>r.enabled&&r.kinds.includes(kind))) return null;
-    await loadConfirmedEvent(db,job.eventId);
+  async function compose(jobId,job) {
+    const db=getDb(),kind=kindOf(job);
     if (![job.targetCount,job.sentCount,job.failedCount,job.unknownCount].every(n=>Number.isInteger(n)&&n>=0) || job.sentCount+job.failedCount+job.unknownCount!==job.targetCount || !ms(job.completedAt)) fail('source-counts-invalid');
     // One bounded read: never fetch participant records or an entire recipient list.
     const sample=await db.collection('sendJobs').doc(jobId).collection('items').where('status','in',job.sentCount > 0 ? ['sent'] : ['failed','unknown']).limit(1).get();
@@ -76,6 +73,16 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
       try {message=await renderConfirmation({job:{...job,jobId},kind,evidence,generateQrPng});}
       catch(e){errorCode=['renderer-version-unavailable','sample-unavailable','sample-render-failed','confirmation-too-large'].includes(e.message)?e.message:'sample-render-failed';}
     }
+    return {message,errorCode};
+  }
+  // The report is immutable once prepared. Only independent deliveries change.
+  async function prepare(jobId, job) {
+    const db=getDb(), ref=reports(db).doc(reportIdFor(job.eventId,jobId));
+    const old=await ref.get();if(old.exists)return ref;
+    const p=(await policyRef(db,job.eventId).get()).data(), kind=kindOf(job);
+    if (!kind || !eligible(p,job) || !p.recipients.some(r=>r.enabled&&r.kinds.includes(kind))) return null;
+    await loadConfirmedEvent(db,job.eventId);
+    const {message,errorCode}=await compose(jobId,job);
     await db.runTransaction(async tx=>{
       const [existing,current]=await tx.getAll(ref,policyRef(db,job.eventId));
       if(existing.exists)return;
@@ -98,12 +105,17 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
       if(r.status!=='ready'||!allowed(p,r,d.email))return {status:d.status,blocked:'disabled-or-unavailable'};
       if(d.status==='sending'){
         if(ms(d.leaseUntil)>now())return {status:'sending'};
-        if(d.dispatchStartedAt){tx.update(delivery,{status:'unknown',errorCode:'expired-after-dispatch',leaseUntil:null});return {status:'unknown'};}
+        if(d.dispatchStartedAt){
+          tx.update(delivery,{status:'unknown',errorCode:'expired-after-dispatch',leaseUntil:null});
+          tx.set(delivery.collection('attempts').doc(String(d.attemptCount)),{status:'unknown',errorCode:'expired-after-dispatch'},{merge:true});
+          return {status:'unknown'};
+        }
         // Only an expired pre-dispatch lease is safe to reclaim automatically.
       } else if(d.status==='failed') {
         if(!retry||expectedAttempt!==d.attemptCount)return {status:'failed'};
       } else if(d.status!=='pending')return {status:d.status};
       if(retry && (d.status!=='failed'||expectedAttempt!==d.attemptCount))fail('attempt-changed');
+      tx.create(delivery.collection('attempts').doc(String(d.attemptCount+1)),{requestedBy:actor,status:'sending',startedAt:serverTimestamp()});
       tx.update(delivery,{status:'sending',claimId,leaseUntil:new Date(now()+leaseMs),dispatchStartedAt:null,
         attemptCount:d.attemptCount+1,requestedBy:actor,startedAt:serverTimestamp(),errorCode:null});
       return {claimed:true,report:r,to:d.email};
@@ -128,6 +140,7 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
       // Late results from this claim may resolve a previously expired unknown.
       if(d.claimId!==claimId||!['sending','unknown'].includes(d.status))return {status:d.status};
       const status=['sent','failed','unknown'].includes(outcome?.outcome)?outcome.outcome:'unknown';
+      tx.set(delivery.collection('attempts').doc(String(d.attemptCount)),{status,completedAt:serverTimestamp(),messageId:outcome?.messageId||null,errorCode:outcome?.errorCode||null},{merge:true});
       tx.update(delivery,{status,claimId:null,leaseUntil:null,completedAt:serverTimestamp(),sentAt:status==='sent'?serverTimestamp():null,
         messageId:outcome?.messageId||null,errorCode:outcome?.errorCode||null});return {status};
     });
@@ -148,12 +161,78 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
   }
   function deliveryView(d) {
     const v=d.data();return {recipientKey:d.id,email:v.email,name:v.name,status:v.status==='sending'&&ms(v.leaseUntil)<=now()&&v.dispatchStartedAt?'unknown':v.status,
+      canResume:v.status==='sending'&&ms(v.leaseUntil)<=now()&&!v.dispatchStartedAt,
       attemptCount:v.attemptCount,startedAt:iso(v.startedAt),sentAt:iso(v.sentAt),completedAt:iso(v.completedAt),errorCode:v.errorCode||null};
   }
   async function getReport({data}) {
     const {ref,report:r}=await owned(data);const ds=await ref.collection('deliveries').get();
     return {reportId:ref.id,sourceJobId:r.sourceJobId,kind:r.kind,status:r.status,errorCode:r.errorCode,subject:r.message?.subject||'',html:r.message?.html||'',text:r.message?.text||'',
       qrPngBase64:r.message?.attachments?.[0]?.contentBase64||'',completedAt:iso(r.sourceCompletedAt),deliveries:ds.docs.map(deliveryView)};
+  }
+  // Preview is read-only. Historical jobs require explicit manual authorization;
+  // the automatic activation cutoff is unchanged.
+  async function manualContext(data, sending=false) {
+    request(data, ['jobId', ...(sending ? ['fingerprint','recipientKey','expectedAttempt'] : [])]);
+    if (!/^[A-Za-z0-9_-]{1,200}$/.test(data.jobId||'')) fail('invalid-job');
+    const db=getDb(), jobRef=db.collection('sendJobs').doc(data.jobId);
+    const js=await jobRef.get(), job=js.data();
+    if (!job || job.eventId!==data.eventId) throw new ApiError('permission-denied','このイベントの送信結果ではありません。');
+    await loadConfirmedEvent(db,data.eventId);
+    if (job.status!=='completed' || !kindOf(job)) fail('job-not-completed');
+    const policy=(await policyRef(db,data.eventId).get()).data();
+    const ref=reports(db).doc(reportIdFor(data.eventId,data.jobId)), existing=await ref.get();
+    const r=existing.data();
+    const composed=r ? {message:r.message,errorCode:r.errorCode} : await compose(data.jobId,job);
+    const ds=existing.exists ? await ref.collection('deliveries').get() : null;
+    const recipients=ds ? ds.docs.map(deliveryView) : (policy?.recipients||[])
+      .filter(x=>x.enabled&&x.kinds.includes(kindOf(job))).map(x=>({email:x.email,name:x.name,recipientKey:hash(x.email),status:'pending',attemptCount:0}));
+    recipients.sort((a,b)=>a.email.localeCompare(b.email));
+    const enabled=policy?.enabled===true && ms(policy.activatedAt)>0;
+    for(const d of recipients)d.allowed=enabled && policy.recipients.some(x=>x.email===d.email&&x.enabled&&x.kinds.includes(kindOf(job)));
+    const counts=r||job;
+    const summary={targetCount:counts.targetCount,sentCount:counts.sentCount,failedCount:counts.failedCount,unknownCount:counts.unknownCount};
+    const fingerprint=stableHash([policy?.version||0,composed,summary,recipients.map(({email,name,allowed})=>({email,name,allowed})),r?.sourceCompletedAt||job.completedAt]);
+    return {db,jobRef,job,policy,ref,existing,r,composed,recipients,summary,fingerprint};
+  }
+  function manualView(c) {
+    return {reportId:c.ref.id, fingerprint:c.fingerprint, subject:c.composed.message?.subject||'',text:c.composed.message?.text||'',html:c.composed.message?.html||'',
+      qrPngBase64:c.composed.message?.attachments?.[0]?.contentBase64||'',counts:c.summary,deliveries:c.recipients,
+      canSend:!!c.composed.message&&c.recipients.some(d=>d.allowed&&(d.status==='pending'||d.canResume)),
+      errorCode:c.composed.errorCode||(!c.policy?.enabled?'notification-disabled':null)};
+  }
+  async function previewManual({data}) {return manualView(await manualContext(data));}
+  async function sendManual({identity,data}) {
+    const c=await manualContext(data,true);
+    if (data.fingerprint!==c.fingerprint) fail('preview-changed');
+    if (!c.composed.message) fail('sample-unavailable');
+    if (!c.policy?.enabled || !ms(c.policy.activatedAt)) fail('notification-disabled');
+    if (data.recipientKey!==undefined && (!/^[a-f0-9]{64}$/.test(data.recipientKey)||!Number.isInteger(data.expectedAttempt))) fail('invalid-retry');
+    if (data.recipientKey===undefined && data.expectedAttempt!==undefined) fail('invalid-retry');
+    if (data.recipientKey!==undefined) {
+      const d=c.recipients.find(d=>d.recipientKey===data.recipientKey);
+      if(!d||!d.allowed||d.status!=='failed'||d.attemptCount!==data.expectedAttempt)fail('attempt-changed');
+    }
+    await c.db.runTransaction(async tx=>{
+      const [ps,js,rs]=await tx.getAll(policyRef(c.db,data.eventId),c.jobRef,c.ref);
+      if (stableHash(ps.data())!==stableHash(c.policy)||stableHash(js.data())!==stableHash(c.job)||rs.exists!==c.existing.exists ||
+          (rs.exists&&stableHash(rs.data())!==stableHash(c.r))) fail('preview-changed');
+      if (!rs.exists) {
+        if(data.recipientKey!==undefined)fail('invalid-retry');
+        tx.create(c.ref,{eventId:data.eventId,sourceJobId:data.jobId,sourceCreatedAt:c.job.createdAt,sourceCompletedAt:c.job.completedAt,
+          sourceStartedAt:c.job.dispatchRequestedAt||c.job.broadcastStartedAt||null,kind:kindOf(c.job),batchSequence:c.job.batchSequence||null,
+          ...c.summary,policyVersion:c.policy.version,createdAt:serverTimestamp(),status:'ready',errorCode:null,message:c.composed.message,
+          manualActivation:ms(c.policy.activatedAt),manuallyRequestedBy:identity.uid,manuallyRequestedAt:serverTimestamp()});
+        for(const d of c.recipients)tx.create(c.ref.collection('deliveries').doc(d.recipientKey),{eventId:data.eventId,email:d.email,name:d.name,status:'pending',attemptCount:0,createdAt:serverTimestamp()});
+      } else tx.update(c.ref,{manualActivation:ms(c.policy.activatedAt),manuallyRequestedBy:identity.uid,manuallyRequestedAt:serverTimestamp()});
+    });
+    if(data.recipientKey!==undefined) {
+      const d=c.recipients.find(d=>d.recipientKey===data.recipientKey);
+      if(!d||d.status!=='failed'||d.attemptCount!==data.expectedAttempt)fail('attempt-changed');
+      await deliver(c.ref,data.recipientKey,{retry:true,expectedAttempt:data.expectedAttempt,actor:identity.uid});
+    } else {
+      for(const d of c.recipients)await deliver(c.ref,d.recipientKey,{actor:identity.uid});
+    }
+    return previewManual({data:{eventId:data.eventId,jobId:data.jobId}});
   }
   async function retry({identity,data}) {
     const {ref}=await owned(data,['recipientKey','expectedAttempt']);
@@ -165,6 +244,6 @@ function createDeliveryConfirmationApi({getDb, serverTimestamp, getTransport, ge
     const {ref}=await owned(data);const ds=await ref.collection('deliveries').get();const results=[];
     for(const d of ds.docs)results.push(await deliver(ref,d.id,{actor:identity.uid}));return {results};
   }
-  return {settings,setPolicy,onCompleted,getReport,retry,resume};
+  return {settings,setPolicy,onCompleted,getReport,retry,resume,previewManual,sendManual};
 }
 module.exports={createDeliveryConfirmationApi,reportIdFor,kindOf,emailOf};

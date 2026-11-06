@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../widgets/common.dart';
 import 'winner_send_service.dart';
+import 'manual_delivery_confirmation.dart';
 
 /// 送信管理の確認ダイアログ(ワンクリック即送信を避ける)。確定ならtrue。
 Future<bool> confirmSendAction(
@@ -376,6 +377,13 @@ class _WinnerSendJobPageState extends State<WinnerSendJobPage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _summaryCard(current),
+        if (current.trustworthy &&
+            current.state == JobState.completed &&
+            widget.jobId.startsWith('winner-'))
+          ManualDeliveryConfirmationButton(
+            eventId: widget.eventId,
+            jobId: widget.jobId,
+          ),
         if (error != null) ...[
           const SizedBox(height: 10),
           Text(error!, style: const TextStyle(color: Color(0xffb42318))),
