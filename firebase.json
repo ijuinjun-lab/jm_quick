@@ -10,6 +10,7 @@
   }],
   "hosting": {
     "public": "build/web",
+    "predeploy": ["python3 scripts/build_web_release.py --verify-only"],
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "headers": [{
       "source": "**",

@@ -50,7 +50,7 @@ Functionsはfake Auth/mailとローカルFirestore Emulator、Flutterはmock/fak
 - `flutter analyze --no-pub`
 - `flutter test --no-pub --reporter expanded`
 - `cd cloudrun/mail-api && npm test`
-- `flutter build web --no-pub --no-web-resources-cdn`
+- `python3 scripts/build_web_release.py`（本番App Checkサイトキーを含めてビルド。deployはしない）
 
 ## 境界・残る確認
 

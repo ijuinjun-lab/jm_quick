@@ -2,6 +2,16 @@
 
 スタッフが案内メール、参加確定、リコンファーム、QR受付、当日参加登録を一通り体験するFlutter Web + Firestoreプロトタイプです。
 
+## 本番Webビルド
+
+Firebase CLIで `jm-quick` のApp Check設定を読み取れるアカウントにログインした状態で、
+`python3 scripts/build_web_release.py` を実行します。登録済みreCAPTCHA Enterpriseサイトキーを
+読み取り、`APP_CHECK_RECAPTCHA_ENTERPRISE_SITE_KEY` としてビルドに渡します。
+このコマンドはdeploy・Firestore更新・メール送信を行いません。
+
+Hostingのpredeployでは同スクリプトの `--verify-only` を実行し、登録済みキーのない成果物を拒否します。
+キー指定のない `flutter build web` の成果物は本番公開に使用しないでください。
+
 ## 画面
 
 - `/admin`：イベント一覧

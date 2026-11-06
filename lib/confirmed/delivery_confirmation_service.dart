@@ -20,6 +20,8 @@ class DeliveryConfirmationException implements Exception {
     'invalid-address' => 'メールアドレスの形式が正しくありません。入力内容を確認してください。',
     'mail-kind-required' => '対象メール種別を1つ以上選択してください。',
     'permission-denied' => 'この操作を行う権限がありません。確認先の変更・削除はシステム管理者のみ可能です。',
+    'app-check-unavailable' =>
+      'アプリ認証を開始できません。画面を再読み込みしてください。解消しない場合は管理者へお問い合わせください。',
     'unauthenticated' => 'ログイン・アプリ認証を確認して、もう一度お試しください。',
     'policy-changed' => '別の操作で設定が変更されました。「設定・履歴を更新」してからやり直してください。',
     'invalid-recipient' ||
@@ -46,9 +48,17 @@ class DeliveryConfirmationService {
   ) async {
     try {
       final token = await auth.idToken();
-      final check = await appCheck.token();
-      if (token == null || check == null) {
+      if (token == null || token.isEmpty) {
         throw const DeliveryConfirmationException('unauthenticated');
+      }
+      String? check;
+      try {
+        check = await appCheck.token();
+      } catch (_) {
+        throw const DeliveryConfirmationException('app-check-unavailable');
+      }
+      if (check == null || check.isEmpty) {
+        throw const DeliveryConfirmationException('app-check-unavailable');
       }
       final response = await client.post(
         Uri.parse('https://asia-northeast1-jm-quick.cloudfunctions.net/$name'),
